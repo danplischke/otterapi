@@ -1,0 +1,42 @@
+name: 🐛 Bug
+description: Report a bug or unexpected behavior in otterapi
+labels: ["bug 🐛"]
+
+body:
+  - type: markdown
+    attributes:
+      value:  Thank you for reporting a bug in otterapi! ✊
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: |
+        Please explain what you're seeing and what you would expect to see.
+
+        Please provide as much detail as possible to make understanding and solving your problem as quick as possible. 🙏
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example
+      description: >
+        If applicable, please add a self-contained, minimal, reproducible, example OpenAPI Document or code
+        demonstrating the bug.
+      placeholder: |
+        {"openapi":"3.1.0","info":{"title": ...
+        ...
+      render: json
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Python, otterapi & OS Version
+      description: |
+        Which version of Python & otter are you using, and which Operating System?
+
+      render: Text
+    validations:
+      required: true

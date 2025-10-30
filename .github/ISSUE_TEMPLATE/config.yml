@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 🤔 Ask a Question
+    url: 'https://github.com/danplischke/otter/discussions/new?category=question'
+    about: Ask any question about otterapi

@@ -1,0 +1,67 @@
+name: QA Check
+on:
+  push:
+    paths:
+      - ../../otterapi/**/*
+      - pyproject.toml
+  workflow_dispatch:
+
+jobs:
+  format:
+    runs-on: [ ubuntu-latest ]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.13
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv pip install . --group dev --system
+      - name: Run ruff linter
+        continue-on-error: true
+        run: |
+          ruff check otter
+      - name: Run ruff format check
+        id: ruff-format
+        continue-on-error: true
+        run: |
+          ruff format otter --check
+      - name: fail if formatting issues found
+        if: steps.ruff.outcome == 'failure' || steps.ruff-format.outcome == 'failure'
+        run: |
+          echo "Formatting and / or linting issues found. Please run 'just fmt' and 'just check' to fix them."
+          exit 1
+
+  check:
+    name: test build ${{ matrix.os }}::py${{ matrix.python-version }}
+    runs-on: [ ubuntu-latest ]
+    strategy:
+      max-parallel: 2
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+        include:
+          # we'll test the python support on ubuntu
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.10"
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv build .
