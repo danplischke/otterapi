@@ -4,7 +4,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
-DEFAULT_FILENAMES = ['otterapi.yaml', 'otterapi.yml']
+DEFAULT_FILENAMES = ['otter.yaml', 'otter.yml']
 
 
 class DocumentConfig(BaseModel):
