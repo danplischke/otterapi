@@ -35,5 +35,6 @@ test:
 
 [group('publish')]
 publish:
+    rm -rf dist
     uv build
     uv run twine upload dist/*  --verbose
