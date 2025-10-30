@@ -64,10 +64,10 @@ test = [
 ]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["otterapi/*", "/README.md"]
+only-include = ["otterapi", "/README.md"]
 
 [tool.hatch.build.targets.sdist]
-include = ["otterapi/*", "/README.md"]
+include = ["otterapi", "/README.md"]
 
 [tool.ruff]
 exclude = [".venv", "venv", "build", "dist", "__pycache__", ".eggs"]
