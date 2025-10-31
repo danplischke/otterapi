@@ -16,7 +16,11 @@ from otterapi.codegen.ast_utils import _all, _assign, _call, _name, _union_expr
 from otterapi.codegen.endpoints import async_request_fn, request_fn
 from otterapi.codegen.openapi_processor import OpenAPIProcessor
 from otterapi.codegen.type_generator import Endpoint, Parameter, Type, TypeGen
-from otterapi.codegen.utils import is_url, sanitize_identifier
+from otterapi.codegen.utils import (
+    is_url,
+    sanitize_identifier,
+    sanitize_parameter_field_name,
+)
 from otterapi.config import DocumentConfig
 
 HTTP_METHODS = [method.value.lower() for method in http.HTTPMethod]
@@ -89,6 +93,7 @@ class Codegen(OpenAPIProcessor):
             params.append(
                 Parameter(
                     name=param.name,
+                    name_sanitized=sanitize_parameter_field_name(param.name),
                     location=param.param_in,  # query, path, header, cookie
                     required=param.required or False,
                     type=param_type,
@@ -114,6 +119,7 @@ class Codegen(OpenAPIProcessor):
                         params.append(
                             Parameter(
                                 name='body',
+                                name_sanitized='body',
                                 location='body',
                                 required=body.required or False,
                                 type=body_type,

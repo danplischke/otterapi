@@ -244,14 +244,16 @@ def base_async_request_fn():
 
 def get_parameters(
     parameters: list[Parameter],
-) -> tuple[list[ast.arg], list[ast.arg], list[ast.expr]]:
+) -> tuple[list[ast.arg], list[ast.arg], list[ast.expr], dict[str, set[str]]]:
     args = []
     kwonlyargs = []
     kw_defaults = []
     imports = {}
 
     for param in parameters:
-        param_name = param.name
+        if param.name == 'user-id':
+            print()
+        param_name = param.name_sanitized
         param_type = param.type.annotation_ast if param.type else None
         param_required = param.required
 
@@ -294,7 +296,7 @@ def build_header_params(headers: list[Parameter]) -> ast.Dict | None:
 
     return ast.Dict(
         keys=[ast.Constant(value=header.name) for header in headers],
-        values=[_name(header.name) for header in headers],
+        values=[_name(header.name_sanitized) for header in headers],
     )
 
 
@@ -304,7 +306,7 @@ def build_query_params(queries: list[Parameter]) -> ast.Dict | None:
 
     return ast.Dict(
         keys=[ast.Constant(value=query.name) for query in queries],
-        values=[_name(query.name) for query in queries],
+        values=[_name(query.name_sanitized) for query in queries],
     )
 
 
@@ -332,7 +334,7 @@ def build_path_params(
             # Add the formatted value for the parameter
             values.append(
                 ast.FormattedValue(
-                    value=_name(path_param.name),
+                    value=_name(path_param.name_sanitized),
                     conversion=-1,  # No conversion (default)
                 )
             )
@@ -353,7 +355,7 @@ def build_body_params(body: Parameter | None) -> ast.expr | None:
 
     if body.type.type == 'model' or body.type.type == 'root_model':
         return _call(
-            func=_attr(_name(body.name), 'model_dump'),
+            func=_attr(_name(body.name_sanitized), 'model_dump'),
             args=[],
         )
 

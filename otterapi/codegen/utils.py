@@ -24,6 +24,33 @@ def remove_accents(input_str):
     return ''.join(c for c in nfkd_form if not unicodedata.combining(c))
 
 
+def sanitize_name_python_keywords(name: str) -> str:
+    import keyword
+
+    if name in keyword.kwlist:
+        return f'{name}_'
+    return name
+
+
+def sanitize_parameter_field_name(name: str) -> str:
+    """Sanitize parameter or field names to be valid Python identifiers.
+
+    - Replace spaces and hyphens with underscores
+    - Remove other invalid characters
+    - Ensure it doesn't start with a digit
+    """
+    if not name:
+        raise ValueError('Name cannot be empty')
+
+    sanitized = sanitize_name_python_keywords(name)
+    sanitized = re.sub(r'[-\s]+', '_', remove_accents(sanitized))
+    sanitized = re.sub(r'[^A-Za-z0-9_]', '', sanitized)
+
+    if sanitized and sanitized[0].isdigit():
+        sanitized = '_' + sanitized
+    return sanitized
+
+
 def sanitize_identifier(name: str) -> str:
     """Convert a string into a valid Python identifier.
 

@@ -1,5 +1,8 @@
 import ast
+import keyword
 from collections.abc import Iterable
+
+PYTHON_KEYWORDS = set(keyword.kwlist)
 
 
 def _name(name: str) -> ast.Name:

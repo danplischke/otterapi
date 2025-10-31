@@ -76,17 +76,17 @@ exclude = [".venv", "venv", "build", "dist", "__pycache__", ".eggs"]
 extend-select = [
     "Q",
     "RUF100",
-    "RUF018", # https://docs.astral.sh/ruff/rules/assignment-in-assert/
-    "C90",
+    "RUF018", # https://docs.astral.sh/ruff/rules/assignment-in-assert,
     "UP",
     "I",
-    "D",
     "TID251",
 ]
 flake8-quotes = { inline-quotes = "single", multiline-quotes = "double" }
 mccabe = { max-complexity = 15 }
 ignore = [
     "D100", # ignore missing docstring in module
+    "D101", # ignore missing in public class TODO: fix later
+    "D103", # ignore missing in public function TODO: fix later
     "D102", # ignore missing docstring in public method
     "D104", # ignore missing docstring in public package
     "D105", # ignore missing docstring in magic methods

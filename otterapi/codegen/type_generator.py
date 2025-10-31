@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, RootModel
 
 from otterapi.codegen.ast_utils import _call, _name, _subscript, _union_expr
 from otterapi.codegen.openapi_processor import OpenAPIProcessor
-from otterapi.codegen.utils import sanitize_identifier
+from otterapi.codegen.utils import sanitize_identifier, sanitize_parameter_field_name
 
 _PRIMITIVE_TYPE_MAP = {
     ('string', None): str,
@@ -126,6 +126,7 @@ class Type:
 @dataclasses.dataclass
 class Parameter:
     name: str
+    name_sanitized: str
     location: str  # query, path, header, cookie, body
     required: bool
     type: Type | None = None
@@ -261,18 +262,38 @@ class TypeGen(OpenAPIProcessor):
         if hasattr(field_schema, 'ref'):
             field_schema, _ = self._resolve_reference(field_schema)
 
+        field_keywords = list()
+
+        sanitized_field_name = sanitize_parameter_field_name(field_name)
+
         value = None
         if field_schema.default is not None and isinstance(
             field_schema.default, (str, int, float, bool)
         ):
-            value = _call(
-                _name(Field.__name__),
-                keywords=[
-                    ast.keyword(arg='default', value=ast.Constant(field_schema.default))
-                ],
+            field_keywords.append(
+                ast.keyword(arg='default', value=ast.Constant(field_schema.default))
             )
         elif field_schema.default is None and not field_schema.required:
-            value = ast.Constant(None)
+            field_keywords.append(ast.keyword(arg='default', value=ast.Constant(None)))
+
+        if sanitized_field_name != field_name:
+            field_keywords.append(
+                ast.keyword(
+                    arg='alias',
+                    value=ast.Constant(field_name),  # original name before adding _
+                )
+            )
+            field_name = sanitized_field_name
+
+        if field_keywords:
+            value = _call(
+                func=_name(Field.__name__),
+                keywords=field_keywords,
+            )
+
+            field_type.add_implementation_import(
+                module=Field.__module__, name=Field.__name__
+            )
 
         return ast.AnnAssign(
             target=_name(field_name),
@@ -498,7 +519,7 @@ class TypeGen(OpenAPIProcessor):
             type_ = self._create_array_type(
                 schema=schema, name=schema_name, base_name=base_name
             )
-        elif schema.type == DataType.OBJECT or schema.type == None:
+        elif schema.type == DataType.OBJECT or schema.type is None:
             type_ = self._create_object_type(
                 schema, name=schema_name, base_name=base_name
             )

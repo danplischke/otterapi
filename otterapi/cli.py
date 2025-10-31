@@ -81,4 +81,4 @@ def version() -> None:
 
 
 if __name__ == '__main__':
-    generate('/Users/PLISCD/Downloads/otterapi.yml')
+    generate()
