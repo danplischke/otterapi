@@ -16,7 +16,7 @@ def _attr(value: str | ast.expr, attr: str) -> ast.Attribute:
 
 
 def _subscript(generic: str, inner: ast.expr) -> ast.Subscript:
-    return ast.Subscript(value=_name(generic), slice=inner)
+    return ast.Subscript(value=_name(generic), slice=inner, ctx=ast.Load())
 
 
 def _union_expr(types: list[ast.expr]) -> ast.Subscript:
@@ -36,6 +36,12 @@ def _argument(name: str, value: ast.expr | None = None) -> ast.arg:
 
 
 def _assign(target: ast.expr, value: ast.expr) -> ast.Assign:
+    # Ensure target has Store context
+    if isinstance(target, ast.Name):
+        target = ast.Name(id=target.id, ctx=ast.Store())
+    elif isinstance(target, ast.Attribute):
+        # For attributes, only the outermost needs Store context
+        target.ctx = ast.Store()
     return ast.Assign(
         targets=[target],
         value=value,

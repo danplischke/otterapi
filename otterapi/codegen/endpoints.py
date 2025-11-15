@@ -251,8 +251,6 @@ def get_parameters(
     imports = {}
 
     for param in parameters:
-        if param.name == 'user-id':
-            print()
         param_name = param.name_sanitized
         param_type = param.type.annotation_ast if param.type else None
         param_required = param.required
