@@ -37,6 +37,7 @@ dependencies = [
     "httpx>=0.28.1",
     "openapi-pydantic>=0.5.1",
     "pydantic-settings>=2.11.0",
+    "pydantic[email]>=2.12.3",
     "pyyaml>=6.0.3",
     "typer>=0.20.0",
     "universal-pathlib>=0.3.4",

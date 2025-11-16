@@ -6,18 +6,20 @@ which is aligned with JSON Schema 2020-12.
 
 from __future__ import annotations
 
+import re
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Annotated, Any, Dict, List, Optional, Union
 
 from pydantic import (
     AnyUrl,
     BaseModel,
+    ConfigDict,
     Field,
-    PositiveFloat,
     RootModel,
-    conint,
-    constr,
 )
+
+if TYPE_CHECKING:
+    from ..v3_2 import v3_2
 
 
 class Reference(BaseModel):
@@ -29,8 +31,7 @@ class Reference(BaseModel):
 
 class Contact(BaseModel):
     """Contact information for the API."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     name: Optional[str] = None
     url: Optional[str] = None
@@ -39,8 +40,7 @@ class Contact(BaseModel):
 
 class License(BaseModel):
     """License information for the API."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     name: str
     identifier: Optional[str] = None
@@ -49,8 +49,7 @@ class License(BaseModel):
 
 class ServerVariable(BaseModel):
     """Server variable for URL templating."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     enum: Optional[List[str]] = None
     default: str
@@ -76,8 +75,7 @@ class Discriminator(BaseModel):
 
 class XML(BaseModel):
     """XML representation metadata."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     name: Optional[str] = None
     namespace: Optional[AnyUrl] = None
@@ -88,8 +86,7 @@ class XML(BaseModel):
 
 class Example(BaseModel):
     """Example object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     summary: Optional[str] = None
     description: Optional[str] = None
@@ -109,8 +106,7 @@ class SecurityRequirement(RootModel[Dict[str, List[str]]]):
 
 class ExternalDocumentation(BaseModel):
     """External documentation reference."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     description: Optional[str] = None
     url: str
@@ -225,8 +221,7 @@ class In4(Enum):
 
 class APIKeySecurityScheme(BaseModel):
     """API Key security scheme."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     type: Type1
     name: str
@@ -241,10 +236,9 @@ class Type2(Enum):
 
 class HTTPSecurityScheme1(BaseModel):
     """HTTP Bearer security scheme."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
-    scheme: constr(pattern=r'^[Bb][Ee][Aa][Rr][Ee][Rr]$')
+    scheme: Annotated[str, Field(pattern=r'^[Bb][Ee][Aa][Rr][Ee][Rr]$')]
     bearerFormat: Optional[str] = None
     description: Optional[str] = None
     type: Type2
@@ -252,8 +246,7 @@ class HTTPSecurityScheme1(BaseModel):
 
 class HTTPSecurityScheme2(BaseModel):
     """HTTP non-Bearer security scheme."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     scheme: str
     bearerFormat: Optional[str] = None
@@ -278,8 +271,7 @@ class Type5(Enum):
 
 class OpenIdConnectSecurityScheme(BaseModel):
     """OpenID Connect security scheme."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     type: Type5
     openIdConnectUrl: str
@@ -288,8 +280,7 @@ class OpenIdConnectSecurityScheme(BaseModel):
 
 class ImplicitOAuthFlow(BaseModel):
     """OAuth2 implicit flow."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     authorizationUrl: str
     refreshUrl: Optional[str] = None
@@ -298,8 +289,7 @@ class ImplicitOAuthFlow(BaseModel):
 
 class PasswordOAuthFlow(BaseModel):
     """OAuth2 password flow."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     tokenUrl: str
     refreshUrl: Optional[str] = None
@@ -308,8 +298,7 @@ class PasswordOAuthFlow(BaseModel):
 
 class ClientCredentialsFlow(BaseModel):
     """OAuth2 client credentials flow."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     tokenUrl: str
     refreshUrl: Optional[str] = None
@@ -318,8 +307,7 @@ class ClientCredentialsFlow(BaseModel):
 
 class AuthorizationCodeOAuthFlow(BaseModel):
     """OAuth2 authorization code flow."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     authorizationUrl: str
     tokenUrl: str
@@ -327,9 +315,9 @@ class AuthorizationCodeOAuthFlow(BaseModel):
     scopes: Dict[str, str]
 
 
-class Callback(RootModel[Dict[constr(pattern=r'^x-'), Any]]):
+class Callback(RootModel[Dict[Annotated[str, Field(pattern=r'^x-')], Any]]):
     """Callback object."""
-    root: Dict[constr(pattern=r'^x-'), Any]
+    root: Dict[Annotated[str, Field(pattern=r'^x-')], Any]
 
 
 class Style5(Enum):
@@ -342,8 +330,7 @@ class Style5(Enum):
 
 class Info(BaseModel):
     """API metadata."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     title: str
     summary: Optional[str] = None
@@ -356,8 +343,7 @@ class Info(BaseModel):
 
 class Server(BaseModel):
     """Server object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     url: str
     description: Optional[str] = None
@@ -369,24 +355,23 @@ class Schema(BaseModel):
     
     OpenAPI 3.1 uses JSON Schema 2020-12 with some modifications.
     """
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     # Core JSON Schema keywords
     title: Optional[str] = None
-    multipleOf: Optional[PositiveFloat] = None
+    multipleOf: Optional[Annotated[float, Field(gt=0)]] = None
     maximum: Optional[float] = None
     exclusiveMaximum: Optional[float] = None  # Changed from boolean in 3.0
     minimum: Optional[float] = None
     exclusiveMinimum: Optional[float] = None  # Changed from boolean in 3.0
-    maxLength: Optional[conint(ge=0)] = None
-    minLength: Optional[conint(ge=0)] = 0
+    maxLength: Optional[Annotated[int, Field(ge=0)]] = None
+    minLength: Optional[Annotated[int, Field(ge=0)]] = 0
     pattern: Optional[str] = None
-    maxItems: Optional[conint(ge=0)] = None
-    minItems: Optional[conint(ge=0)] = 0
+    maxItems: Optional[Annotated[int, Field(ge=0)]] = None
+    minItems: Optional[Annotated[int, Field(ge=0)]] = 0
     uniqueItems: Optional[bool] = False
-    maxProperties: Optional[conint(ge=0)] = None
-    minProperties: Optional[conint(ge=0)] = 0
+    maxProperties: Optional[Annotated[int, Field(ge=0)]] = None
+    minProperties: Optional[Annotated[int, Field(ge=0)]] = 0
     required: Optional[List[str]] = None
     enum: Optional[List[Any]] = None
     
@@ -430,8 +415,7 @@ class Schema(BaseModel):
 
 class Tag(BaseModel):
     """Tag for API operations."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     name: str
     description: Optional[str] = None
@@ -440,8 +424,7 @@ class Tag(BaseModel):
 
 class OAuthFlows(BaseModel):
     """OAuth2 flows configuration."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     implicit: Optional[ImplicitOAuthFlow] = None
     password: Optional[PasswordOAuthFlow] = None
@@ -451,8 +434,7 @@ class OAuthFlows(BaseModel):
 
 class Link(BaseModel):
     """Link object for response links."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     operationId: Optional[str] = None
     operationRef: Optional[str] = None
@@ -464,8 +446,7 @@ class Link(BaseModel):
 
 class OAuth2SecurityScheme(BaseModel):
     """OAuth2 security scheme."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     type: Type4
     flows: OAuthFlows
@@ -489,45 +470,43 @@ class SecurityScheme(RootModel[Union[
 
 class Components(BaseModel):
     """Components object for reusable definitions."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     schemas: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Schema, Reference]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Schema, Reference]]
     ] = None
     responses: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, Response]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, Response]]
     ] = None
     parameters: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, Parameter]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, Parameter]]
     ] = None
     examples: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, Example]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, Example]]
     ] = None
     requestBodies: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, RequestBody]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, RequestBody]]
     ] = None
     headers: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, Header]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, Header]]
     ] = None
     securitySchemes: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, SecurityScheme]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, SecurityScheme]]
     ] = None
     links: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, Link]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, Link]]
     ] = None
     callbacks: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, Callback]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, Callback]]
     ] = None
     pathItems: Optional[
-        Dict[constr(pattern=r'^[a-zA-Z0-9\.\-_]+$'), Union[Reference, PathItem]]
+        Dict[Annotated[str, Field(pattern=r'^[a-zA-Z0-9\.\-_]+$')], Union[Reference, PathItem]]
     ] = None  # New in 3.1
 
 
 class Response(BaseModel):
     """Response object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     description: str
     headers: Optional[Dict[str, Union[Header, Reference]]] = None
@@ -537,8 +516,7 @@ class Response(BaseModel):
 
 class MediaType(BaseModel):
     """Media type object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     schema_: Optional[Union[Schema, Reference]] = Field(None, alias='schema')
     example: Optional[Any] = None
@@ -548,8 +526,7 @@ class MediaType(BaseModel):
 
 class Header(BaseModel):
     """Header object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     description: Optional[str] = None
     required: Optional[bool] = False
@@ -571,8 +548,7 @@ class Paths(RootModel[Dict[str, Union['PathItem', Any]]]):
 
 class PathItem(BaseModel):
     """Path item object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     field_ref: Optional[str] = Field(None, alias='$ref')
     summary: Optional[str] = None
@@ -591,8 +567,7 @@ class PathItem(BaseModel):
 
 class Operation(BaseModel):
     """Operation object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     tags: Optional[List[str]] = None
     summary: Optional[str] = None
@@ -610,16 +585,14 @@ class Operation(BaseModel):
 
 class Responses(BaseModel):
     """Responses object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     default: Optional[Union[Response, Reference]] = None
 
 
 class Parameter(BaseModel):
     """Parameter object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     name: str
     in_: str = Field(..., alias='in')
@@ -638,8 +611,7 @@ class Parameter(BaseModel):
 
 class RequestBody(BaseModel):
     """Request body object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     description: Optional[str] = None
     content: Dict[str, MediaType]
@@ -648,8 +620,7 @@ class RequestBody(BaseModel):
 
 class Encoding(BaseModel):
     """Encoding object."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
     contentType: Optional[str] = None
     headers: Optional[Dict[str, Union[Header, Reference]]] = None
@@ -663,12 +634,11 @@ class Webhook(RootModel[Dict[str, Union['PathItem', Reference]]]):
     root: Dict[str, Union['PathItem', Reference]]
 
 
-class Model(BaseModel):
+class OpenAPI(BaseModel):
     """OpenAPI 3.1 root document."""
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
-    openapi: constr(pattern=r'^3\.1\.\d+(-.+)?$')  # Updated for 3.1.x
+    openapi: Annotated[str, Field(pattern=r'^3\.1\.\d+(-.+)?$')]  # Updated for 3.1.x
     info: Info
     jsonSchemaDialect: Optional[str] = 'https://spec.openapis.org/oas/3.1/dialect/base'  # New in 3.1
     servers: Optional[List[Server]] = None
@@ -679,10 +649,45 @@ class Model(BaseModel):
     tags: Optional[List[Tag]] = None
     externalDocs: Optional[ExternalDocumentation] = None
 
+    def upgrade_to_v3_2(self) -> 'v3_2.OpenAPI':
+        """Upgrade this OpenAPI 3.1 document to OpenAPI 3.2.
+        
+        Converts the current OpenAPI 3.1 specification to OpenAPI 3.2 format.
+        The conversion includes:
+        - Updating the openapi version string from 3.1.x to 3.2.0
+        - Updating the jsonSchemaDialect to the 3.2 dialect
+        - All other fields are compatible and transferred as-is
+        
+        Returns:
+            v3_2.OpenAPI: The upgraded OpenAPI 3.2 document
+        """
+        from ..v3_2 import v3_2
+        
+        # Get the model as a dictionary with aliases (e.g., 'schema' instead of 'schema_')
+        data = self.model_dump(mode='json', by_alias=True, exclude_none=False)
+        
+        # Update the openapi version from 3.1.x to 3.2.0
+        version_match = re.match(r'^3\.1\.(\d+)(-.+)?$', data['openapi'])
+        if version_match:
+            # Keep the patch version but change major.minor to 3.2
+            patch = version_match.group(1)
+            suffix = version_match.group(2) or ''
+            data['openapi'] = f'3.2.{patch}{suffix}'
+        else:
+            # Fallback to 3.2.0 if pattern doesn't match
+            data['openapi'] = '3.2.0'
+        
+        # Update jsonSchemaDialect if it's the 3.1 default
+        if data.get('jsonSchemaDialect') == 'https://spec.openapis.org/oas/3.1/dialect/base':
+            data['jsonSchemaDialect'] = 'https://spec.openapis.org/oas/3.2/dialect/base'
+        
+        # Parse and validate with v3_2.OpenAPI model
+        return v3_2.OpenAPI.model_validate(data)
+
 
 # Rebuild models to resolve forward references
 Schema.model_rebuild()
-Model.model_rebuild()
+OpenAPI.model_rebuild()
 Components.model_rebuild()
 Response.model_rebuild()
 MediaType.model_rebuild()
