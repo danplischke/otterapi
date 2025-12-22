@@ -38,23 +38,22 @@ def generate(
     config = get_config(config)
 
     try:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn('[progress.description]{task.description}'),
-            console=console,
-        ) as progress:
+
             for document_config in config.documents:
-                task = progress.add_task(
-                    f'Generating code for {document_config.source} in {document_config.output}...',
-                    total=None,
-                )
+                with Progress(
+                        SpinnerColumn(),
+                        TextColumn('[progress.description]{task.description}'),
+                        console=console,
+                ) as progress:
+                    task = progress.add_task(
+                        f'Generating code for {document_config.source} in {document_config.output}...',
+                        total=None,
+                    )
 
-                codegen = Codegen(document_config)
-                codegen.generate()
+                    codegen = Codegen(document_config)
+                    codegen.generate()
 
-                console.print(
-                    f"[green]✓[/green] Successfully generated code in '{document_config.output}'"
-                )
+                    progress.update(task, description=f'Code generation completed for {document_config.source}!')
                 console.print('[dim]Generated files:[/dim]')
                 console.print(
                     f'  - {document_config.output}/{document_config.models_file}'

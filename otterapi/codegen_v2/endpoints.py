@@ -93,7 +93,7 @@ def _build_response_validation_body() -> list[ast.stmt]:
 
     This creates the common logic for:
     - Status code checking and raise_for_status
-    - JSON parsing
+    - Content-type based response handling (JSON, text, binary, raw)
     - Response model validation with TypeAdapter
     - RootModel unwrapping
 
@@ -122,39 +122,107 @@ def _build_response_validation_body() -> list[ast.stmt]:
             ],
             orelse=[],
         ),
-        # data = response.json()
+        # content_type = response.headers.get('content-type', '')
         _assign(
-            target=_name('data'),
-            value=_call(func=_attr('response', 'json')),
-        ),
-        # if not response_model: return data
-        ast.If(
-            test=ast.UnaryOp(op=ast.Not(), operand=_name('response_model')),
-            body=[ast.Return(value=_name('data'))],
-            orelse=[],
-        ),
-        # validated_data = TypeAdapter(response_model).validate_python(data)
-        _assign(
-            target=_name('validated_data'),
+            target=_name('content_type'),
             value=_call(
-                func=_attr(
-                    _call(func=_name('TypeAdapter'), args=[_name('response_model')]),
-                    'validate_python',
-                ),
-                args=[_name('data')],
+                func=_attr(_attr('response', 'headers'), 'get'),
+                args=[ast.Constant(value='content-type'), ast.Constant(value='')],
             ),
         ),
-        # if isinstance(validated_data, RootModel): return validated_data.root
+        # Handle different content types
+        # if 'application/json' in content_type or content_type.endswith('+json'):
         ast.If(
-            test=_call(
-                func=_name('isinstance'),
-                args=[_name('validated_data'), _name('RootModel')],
+            test=ast.BoolOp(
+                op=ast.Or(),
+                values=[
+                    ast.Compare(
+                        left=ast.Constant(value='application/json'),
+                        ops=[ast.In()],
+                        comparators=[_name('content_type')],
+                    ),
+                    _call(
+                        func=_attr(_name('content_type'), 'endswith'),
+                        args=[ast.Constant(value='+json')],
+                    ),
+                ],
             ),
-            body=[ast.Return(value=_attr('validated_data', 'root'))],
-            orelse=[],
+            body=[
+                # data = response.json()
+                _assign(
+                    target=_name('data'),
+                    value=_call(func=_attr('response', 'json')),
+                ),
+                # if not response_model: return data
+                ast.If(
+                    test=ast.UnaryOp(op=ast.Not(), operand=_name('response_model')),
+                    body=[ast.Return(value=_name('data'))],
+                    orelse=[],
+                ),
+                # validated_data = TypeAdapter(response_model).validate_python(data)
+                _assign(
+                    target=_name('validated_data'),
+                    value=_call(
+                        func=_attr(
+                            _call(func=_name('TypeAdapter'), args=[_name('response_model')]),
+                            'validate_python',
+                        ),
+                        args=[_name('data')],
+                    ),
+                ),
+                # if isinstance(validated_data, RootModel): return validated_data.root
+                ast.If(
+                    test=_call(
+                        func=_name('isinstance'),
+                        args=[_name('validated_data'), _name('RootModel')],
+                    ),
+                    body=[ast.Return(value=_attr('validated_data', 'root'))],
+                    orelse=[],
+                ),
+                # return validated_data
+                ast.Return(value=_name('validated_data')),
+            ],
+            orelse=[
+                # elif content_type.startswith('text/'):
+                ast.If(
+                    test=_call(
+                        func=_attr(_name('content_type'), 'startswith'),
+                        args=[ast.Constant(value='text/')],
+                    ),
+                    body=[
+                        # return response.text
+                        ast.Return(value=_attr('response', 'text')),
+                    ],
+                    orelse=[
+                        # elif 'application/octet-stream' in content_type or content_type.startswith('image/'):
+                        ast.If(
+                            test=ast.BoolOp(
+                                op=ast.Or(),
+                                values=[
+                                    ast.Compare(
+                                        left=ast.Constant(value='application/octet-stream'),
+                                        ops=[ast.In()],
+                                        comparators=[_name('content_type')],
+                                    ),
+                                    _call(
+                                        func=_attr(_name('content_type'), 'startswith'),
+                                        args=[ast.Constant(value='image/')],
+                                    ),
+                                ],
+                            ),
+                            body=[
+                                # return response.content
+                                ast.Return(value=_attr('response', 'content')),
+                            ],
+                            orelse=[
+                                # else: return response (raw httpx.Response)
+                                ast.Return(value=_name('response')),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
         ),
-        # return validated_data
-        ast.Return(value=_name('validated_data')),
     ]
 
 

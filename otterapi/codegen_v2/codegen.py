@@ -139,10 +139,14 @@ class Codegen(OpenAPIProcessor):
         # Collect all types that have JSON responses
         json_types = [r.type for r in response_list if r.is_json and r.type]
 
-        # Also include non-JSON response types in the union (bytes, str)
+        # Also include non-JSON response types in the union (bytes, str, Response)
         non_json_types = []
+        has_binary = False
+        has_text = False
+        has_raw = False
+
         for r in response_list:
-            if r.is_binary:
+            if r.is_binary and not has_binary:
                 bytes_type = Type(
                     reference=None,
                     name=None,
@@ -150,7 +154,8 @@ class Codegen(OpenAPIProcessor):
                     annotation_ast=_name('bytes'),
                 )
                 non_json_types.append(bytes_type)
-            elif r.is_text:
+                has_binary = True
+            elif r.is_text and not has_text:
                 str_type = Type(
                     reference=None,
                     name=None,
@@ -158,6 +163,18 @@ class Codegen(OpenAPIProcessor):
                     annotation_ast=_name('str'),
                 )
                 non_json_types.append(str_type)
+                has_text = True
+            elif r.is_raw and not has_raw:
+                # For unknown content types, return the raw httpx.Response
+                response_type = Type(
+                    reference=None,
+                    name=None,
+                    type='primitive',
+                    annotation_ast=_name('Response'),
+                )
+                response_type.add_annotation_import('httpx', 'Response')
+                non_json_types.append(response_type)
+                has_raw = True
 
         all_types = json_types + non_json_types
 
@@ -420,7 +437,7 @@ class Codegen(OpenAPIProcessor):
         Returns:
             Tuple of (body statements, import collector, endpoint names).
         """
-        from otterapi.codegen.endpoints import base_async_request_fn, base_request_fn
+        from otterapi.codegen_v2.endpoints import base_async_request_fn, base_request_fn
 
         # Initialize body with constants
         body: list[ast.stmt] = [

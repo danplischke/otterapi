@@ -158,6 +158,11 @@ class ResponseInfo:
         """Check if this is a plain text response."""
         return self.content_type.startswith('text/') and not self.is_json
 
+    @property
+    def is_raw(self) -> bool:
+        """Check if this is an unknown content type that should return the raw httpx.Response."""
+        return not (self.is_json or self.is_binary or self.is_text)
+
 
 @dataclasses.dataclass
 class RequestBodyInfo:
