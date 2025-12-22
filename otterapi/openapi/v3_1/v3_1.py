@@ -541,9 +541,12 @@ class Header(BaseModel):
     examples: Optional[Dict[str, Union[Example, Reference]]] = None
 
 
-class Paths(RootModel[Dict[str, Union['PathItem', Any]]]):
-    """Paths object."""
-    root: Dict[str, Union['PathItem', Any]]
+class Paths(RootModel[Dict[str, 'PathItem']]):
+    """Paths object.
+
+    Keys should be path templates (starting with /) or extensions (starting with x-).
+    """
+    root: Dict[str, 'PathItem']
 
 
 class PathItem(BaseModel):
@@ -583,11 +586,12 @@ class Operation(BaseModel):
     servers: Optional[List[Server]] = None
 
 
-class Responses(BaseModel):
-    """Responses object."""
-    model_config = ConfigDict(extra='forbid')
+class Responses(RootModel[Dict[str, Union[Response, Reference]]]):
+    """Responses object containing response definitions by HTTP status code.
 
-    default: Optional[Union[Response, Reference]] = None
+    Keys are HTTP status codes (200, 400, etc.) or 'default'.
+    """
+    pass
 
 
 class Parameter(BaseModel):
@@ -649,7 +653,7 @@ class OpenAPI(BaseModel):
     tags: Optional[List[Tag]] = None
     externalDocs: Optional[ExternalDocumentation] = None
 
-    def upgrade_to_v3_2(self) -> 'v3_2.OpenAPI':
+    def upgrade(self) -> tuple['v3_2.OpenAPI', List[str]]:
         """Upgrade this OpenAPI 3.1 document to OpenAPI 3.2.
         
         Converts the current OpenAPI 3.1 specification to OpenAPI 3.2 format.
@@ -682,7 +686,7 @@ class OpenAPI(BaseModel):
             data['jsonSchemaDialect'] = 'https://spec.openapis.org/oas/3.2/dialect/base'
         
         # Parse and validate with v3_2.OpenAPI model
-        return v3_2.OpenAPI.model_validate(data)
+        return v3_2.OpenAPI.model_validate(data), []
 
 
 # Rebuild models to resolve forward references

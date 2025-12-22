@@ -605,9 +605,11 @@ class OpenAPI(BaseModel):
         # Extract the $ref value from the RootModel
         ref_value = ref.root.get('$ref', '')
         return openapi_v3_1.Reference(
-            ref=ref_value,
-            summary=None,
-            description=None
+           **{
+                '$ref': ref_value,
+                'summary': None,
+                'description': None
+           }
         )
     
     def _convert_schema_to_3_1(self, schema: Schema, warnings: List[str]) -> openapi_v3_1.Schema:
@@ -960,10 +962,78 @@ class OpenAPI(BaseModel):
         """Convert a SecurityScheme or Reference from OpenAPI 3.0 to 3.1."""
         if isinstance(scheme, Reference):
             return self._convert_reference_to_3_1(scheme)
-        
+
         # SecurityScheme is a RootModel with Union, need to access root
-        return openapi_v3_1.SecurityScheme(root=scheme.root)
-    
+        sec_scheme = scheme.root
+
+        if isinstance(sec_scheme, APIKeySecurityScheme):
+            inner = openapi_v3_1.APIKeySecurityScheme.model_validate({
+                'type': openapi_v3_1.Type1.apiKey,
+                'name': sec_scheme.name,
+                'in': sec_scheme.in_.value,
+                'description': sec_scheme.description
+            })
+            return openapi_v3_1.SecurityScheme(root=inner)
+        elif isinstance(sec_scheme, HTTPSecurityScheme):
+            http_scheme = sec_scheme.root
+            # Determine if it's Bearer or non-Bearer based on scheme pattern
+            scheme_value = http_scheme.scheme
+            if scheme_value.lower() == 'bearer':
+                inner_http = openapi_v3_1.HTTPSecurityScheme1(
+                    type=openapi_v3_1.Type2.http,
+                    scheme=scheme_value,
+                    bearerFormat=http_scheme.bearerFormat,
+                    description=http_scheme.description
+                )
+            else:
+                inner_http = openapi_v3_1.HTTPSecurityScheme2(
+                    type=openapi_v3_1.Type2.http,
+                    scheme=scheme_value,
+                    description=http_scheme.description
+                )
+            inner = openapi_v3_1.HTTPSecurityScheme(root=inner_http)
+            return openapi_v3_1.SecurityScheme(root=inner)
+        elif isinstance(sec_scheme, OAuth2SecurityScheme):
+            flows = sec_scheme.flows
+            oauth_flows = openapi_v3_1.OAuthFlows(
+                implicit=openapi_v3_1.ImplicitOAuthFlow(
+                    authorizationUrl=flows.implicit.authorizationUrl,
+                    refreshUrl=flows.implicit.refreshUrl,
+                    scopes=flows.implicit.scopes
+                ) if flows.implicit else None,
+                password=openapi_v3_1.PasswordOAuthFlow(
+                    tokenUrl=flows.password.tokenUrl,
+                    refreshUrl=flows.password.refreshUrl,
+                    scopes=flows.password.scopes
+                ) if flows.password else None,
+                clientCredentials=openapi_v3_1.ClientCredentialsFlow(
+                    tokenUrl=flows.clientCredentials.tokenUrl,
+                    refreshUrl=flows.clientCredentials.refreshUrl,
+                    scopes=flows.clientCredentials.scopes
+                ) if flows.clientCredentials else None,
+                authorizationCode=openapi_v3_1.AuthorizationCodeOAuthFlow(
+                    authorizationUrl=flows.authorizationCode.authorizationUrl,
+                    tokenUrl=flows.authorizationCode.tokenUrl,
+                    refreshUrl=flows.authorizationCode.refreshUrl,
+                    scopes=flows.authorizationCode.scopes
+                ) if flows.authorizationCode else None
+            )
+            inner = openapi_v3_1.OAuth2SecurityScheme(
+                type=openapi_v3_1.Type4.oauth2,
+                flows=oauth_flows,
+                description=sec_scheme.description
+            )
+            return openapi_v3_1.SecurityScheme(root=inner)
+        elif isinstance(sec_scheme, OpenIdConnectSecurityScheme):
+            inner = openapi_v3_1.OpenIdConnectSecurityScheme(
+                type=openapi_v3_1.Type5.openIdConnect,
+                openIdConnectUrl=sec_scheme.openIdConnectUrl,
+                description=sec_scheme.description
+            )
+            return openapi_v3_1.SecurityScheme(root=inner)
+
+        raise ValueError(f"Unknown security scheme type: {type(sec_scheme)}")
+
     def _convert_callback_or_ref_to_3_1(
         self, callback: Union[Callback, Reference], warnings: List[str]
     ) -> Union[openapi_v3_1.Callback, openapi_v3_1.Reference]:
@@ -1082,9 +1152,10 @@ class OpenAPI(BaseModel):
     
     def _convert_responses_to_3_1(self, responses: Responses, warnings: List[str]) -> openapi_v3_1.Responses:
         """Convert Responses from OpenAPI 3.0 to 3.1."""
-        return openapi_v3_1.Responses(
-            default=self._convert_response_or_ref_to_3_1(responses.default, warnings) if responses.default else None
-        )
+        converted_responses = {}
+        for status_code, response in responses.root.items():
+            converted_responses[status_code] = self._convert_response_or_ref_to_3_1(response, warnings)
+        return openapi_v3_1.Responses(root=converted_responses)
 
 
 class Components(BaseModel):
@@ -1153,10 +1224,11 @@ class Header(BaseModel):
     examples: Optional[Dict[str, Union[Example, Reference]]] = None
 
 
-class Paths(RootModel[Union[
-    Dict[Annotated[str, StringConstraints(pattern=r'^\/')], 'PathItem'], 
-    Dict[Annotated[str, StringConstraints(pattern=r'^x-')], Any]
-]]):
+class Paths(RootModel[Dict[str, 'PathItem']]):
+    """Paths object containing path items and optional extensions.
+
+    Keys should be path templates (starting with /) or extensions (starting with x-).
+    """
     pass
 
 
@@ -1195,10 +1267,12 @@ class Operation(BaseModel):
     servers: Optional[List[Server]] = None
 
 
-class Responses(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class Responses(RootModel[Dict[str, Union[Response, Reference]]]):
+    """Responses object containing response definitions by HTTP status code.
 
-    default: Optional[Union[Response, Reference]] = None
+    Keys are HTTP status codes (200, 400, etc.) or 'default'.
+    """
+    pass
 
 
 class Parameter(BaseModel):

@@ -547,9 +547,12 @@ class Header(BaseModel):
     examples: Optional[Dict[str, Union[Example, Reference]]] = None
 
 
-class Paths(RootModel[Dict[str, Union['PathItem', Any]]]):
-    """Paths object."""
-    root: Dict[str, Union['PathItem', Any]]
+class Paths(RootModel[Dict[str, 'PathItem']]):
+    """Paths object.
+
+    Keys should be path templates (starting with /) or extensions (starting with x-).
+    """
+    root: Dict[str, 'PathItem']
 
 
 class PathItem(BaseModel):
@@ -589,11 +592,8 @@ class Operation(BaseModel):
     servers: Optional[List[Server]] = None
 
 
-class Responses(BaseModel):
-    """Responses object."""
-    model_config = ConfigDict(extra='forbid')
-
-    default: Optional[Union[Response, Reference]] = None
+class Responses(RootModel[Dict[str, Union[Response, Reference]]]):
+    pass
 
 
 class Parameter(BaseModel):

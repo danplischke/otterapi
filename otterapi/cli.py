@@ -1,10 +1,11 @@
+import traceback
 from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from otterapi.codegen.generator import Codegen
+from otterapi.codegen_v2.codegen import Codegen
 from otterapi.config import get_config
 
 console = Console()
@@ -66,6 +67,7 @@ def generate(
 
     except Exception as e:
         console.print(f'[red]Error:[/red] {str(e)}')
+        traceback.print_exc()
         raise typer.Exit(1)
 
 
