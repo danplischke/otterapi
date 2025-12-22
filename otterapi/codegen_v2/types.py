@@ -131,6 +131,89 @@ class Parameter:
 
 
 @dataclasses.dataclass
+class ResponseInfo:
+    """Information about a response for a specific status code.
+
+    Attributes:
+        status_code: The HTTP status code for this response.
+        content_type: The content type (e.g., 'application/json', 'application/octet-stream').
+        type: The Type object for JSON responses, or None for raw responses.
+    """
+    status_code: int
+    content_type: str
+    type: Type | None = None
+
+    @property
+    def is_json(self) -> bool:
+        """Check if this is a JSON response."""
+        return self.content_type in ('application/json', 'text/json') or self.content_type.endswith('+json')
+
+    @property
+    def is_binary(self) -> bool:
+        """Check if this is a binary response."""
+        return self.content_type in ('application/octet-stream',) or self.content_type.startswith('image/')
+
+    @property
+    def is_text(self) -> bool:
+        """Check if this is a plain text response."""
+        return self.content_type.startswith('text/') and not self.is_json
+
+
+@dataclasses.dataclass
+class RequestBodyInfo:
+    """Information about a request body including its content type.
+
+    Attributes:
+        content_type: The content type (e.g., 'application/json', 'multipart/form-data').
+        type: The Type object for the body schema, or None if no schema.
+        required: Whether the request body is required.
+        description: Optional description of the request body.
+    """
+    content_type: str
+    type: Type | None = None
+    required: bool = False
+    description: str | None = None
+
+    @property
+    def is_json(self) -> bool:
+        """Check if this is a JSON request body."""
+        return self.content_type in ('application/json', 'text/json') or self.content_type.endswith('+json')
+
+    @property
+    def is_form(self) -> bool:
+        """Check if this is a form-encoded request body."""
+        return self.content_type == 'application/x-www-form-urlencoded'
+
+    @property
+    def is_multipart(self) -> bool:
+        """Check if this is a multipart form data request body."""
+        return self.content_type == 'multipart/form-data'
+
+    @property
+    def is_binary(self) -> bool:
+        """Check if this is a binary request body."""
+        return self.content_type in ('application/octet-stream',)
+
+    @property
+    def httpx_param_name(self) -> str:
+        """Get the httpx parameter name for this content type.
+
+        Returns:
+            The appropriate httpx parameter name: 'json', 'data', 'files', or 'content'.
+        """
+        if self.is_json:
+            return 'json'
+        elif self.is_form:
+            return 'data'
+        elif self.is_multipart:
+            return 'files'
+        elif self.is_binary:
+            return 'content'
+        else:
+            return 'content'
+
+
+@dataclasses.dataclass
 class Endpoint:
     sync_ast: ast.FunctionDef
     async_ast: ast.AsyncFunctionDef

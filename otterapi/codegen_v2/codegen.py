@@ -10,11 +10,10 @@ from otterapi.codegen_v2.ast_utils import _assign, _name, _call
 from otterapi.codegen_v2.endpoints import request_fn, async_request_fn
 from otterapi.codegen_v2.import_collector import ImportCollector
 from otterapi.codegen_v2.schema_loader import SchemaLoader
-from otterapi.codegen_v2.types import TypeGenerator, Endpoint, Parameter, Type
+from otterapi.codegen_v2.types import TypeGenerator, Endpoint, Parameter, Type, ResponseInfo, RequestBodyInfo
 from otterapi.codegen_v2.utils import OpenAPIProcessor, write_mod, sanitize_identifier, sanitize_parameter_field_name, \
     write_init_file
 from otterapi.config import DocumentConfig
-from otterapi.openapi.v3_2 import MediaType
 from otterapi.openapi.v3_2.v3_2 import OpenAPI as OpenAPIv3_2, Operation
 
 
@@ -33,37 +32,68 @@ class Codegen(OpenAPIProcessor):
         self.openapi = self._schema_loader.load(self.config.source)
         self.typegen = TypeGenerator(self.openapi)
 
-    def _extract_response_schemas(self, operation: Operation) -> dict[int, Type]:
-        """Extract response type schemas from an operation.
+    def _extract_response_info(self, operation: Operation) -> dict[int, ResponseInfo]:
+        """Extract response information including content type from an operation.
+
+        This method extracts response schemas and content types for each status code.
+        When multiple content types are available for a response, it prefers JSON
+        content types for better type safety.
 
         Args:
             operation: The OpenAPI operation to extract responses from.
 
         Returns:
-            Dictionary mapping status codes to their response types.
-
-        Raises:
-            ValueError: If multiple schemas are defined for the same status code.
+            Dictionary mapping status codes to ResponseInfo objects.
         """
-        types: dict[int, Type] = {}
+        responses: dict[int, ResponseInfo] = {}
 
         if not operation.responses:
-            return types
+            return responses
 
-        for status_code, response in operation.responses.root.items():
-            if response.content:
-                for content_type, media_type in response.content.items():
-                    if media_type.schema_:
-                        if status_code in types:
-                            raise ValueError(
-                                'Multiple response schemas for the same status code are not supported'
-                            )
-                        types[int(status_code)] = self.typegen.schema_to_type(
-                            media_type.schema_,
-                            base_name=f'{sanitize_identifier(operation.operationId)}Response',
-                        )
+        # Content type priority - prefer JSON for type safety
+        json_content_types = {'application/json', 'text/json'}
 
-        return types
+        for status_code_str, response in operation.responses.root.items():
+            try:
+                status_code = int(status_code_str)
+            except ValueError:
+                # Skip non-numeric status codes like 'default'
+                logging.debug(f'Skipping non-numeric status code: {status_code_str}')
+                continue
+
+            if not response.content:
+                continue
+
+            # Find the best content type to use
+            selected_content_type = None
+            selected_media_type = None
+
+            # First, try to find a JSON content type
+            for content_type, media_type in response.content.items():
+                if content_type in json_content_types or content_type.endswith('+json'):
+                    selected_content_type = content_type
+                    selected_media_type = media_type
+                    break
+
+            # If no JSON found, use the first available content type
+            if selected_content_type is None:
+                selected_content_type, selected_media_type = next(iter(response.content.items()))
+
+            # Create ResponseInfo with type if schema exists
+            response_type = None
+            if selected_media_type.schema_:
+                response_type = self.typegen.schema_to_type(
+                    selected_media_type.schema_,
+                    base_name=f'{sanitize_identifier(operation.operationId)}Response',
+                )
+
+            responses[status_code] = ResponseInfo(
+                status_code=status_code,
+                content_type=selected_content_type,
+                type=response_type,
+            )
+
+        return responses
 
     def _create_response_union(self, types: list[Type]) -> Type:
         """Create a union type from multiple response types.
@@ -86,29 +116,57 @@ class Codegen(OpenAPIProcessor):
         union_type.add_annotation_import('typing', 'Union')
         return union_type
 
-    def _get_response_models_by_status_code(
+    def _get_response_models(
             self, operation: Operation
-    ) -> tuple[list[int] | None, Type | None]:
-        """Get response models grouped by status code.
+    ) -> tuple[list[ResponseInfo], Type | None]:
+        """Get response models and info from an operation.
 
         Args:
             operation: The OpenAPI operation to extract response models from.
 
         Returns:
-            A tuple of (status_codes, response_type) where:
-            - status_codes: List of applicable status codes, or None if no responses
-            - response_type: The response type (single or union), or None if no responses
+            A tuple of (response_infos, response_type) where:
+            - response_infos: List of ResponseInfo objects for all status codes
+            - response_type: The unified response type (single or union), or None
         """
-        types = self._extract_response_schemas(operation)
+        responses = self._extract_response_info(operation)
 
-        type_len = len(types)
-        if type_len == 0:
-            return None, None
-        elif type_len == 1:
-            return list(types.keys()), next(iter(types.values()))
+        if not responses:
+            return [], None
+
+        response_list = list(responses.values())
+
+        # Collect all types that have JSON responses
+        json_types = [r.type for r in response_list if r.is_json and r.type]
+
+        # Also include non-JSON response types in the union (bytes, str)
+        non_json_types = []
+        for r in response_list:
+            if r.is_binary:
+                bytes_type = Type(
+                    reference=None,
+                    name=None,
+                    type='primitive',
+                    annotation_ast=_name('bytes'),
+                )
+                non_json_types.append(bytes_type)
+            elif r.is_text:
+                str_type = Type(
+                    reference=None,
+                    name=None,
+                    type='primitive',
+                    annotation_ast=_name('str'),
+                )
+                non_json_types.append(str_type)
+
+        all_types = json_types + non_json_types
+
+        if len(all_types) == 0:
+            return response_list, None
+        elif len(all_types) == 1:
+            return response_list, all_types[0]
         else:
-            type_values = list(types.values())
-            return list(types.keys()), self._create_response_union(type_values)
+            return response_list, self._create_response_union(all_types)
 
     def _extract_operation_parameters(self, operation: Operation) -> list[Parameter]:
         """Extract path, query, header, and cookie parameters from an operation.
@@ -137,14 +195,20 @@ class Codegen(OpenAPIProcessor):
             )
         return params
 
-    def _extract_request_body(self, operation: Operation) -> Parameter | None:
-        """Extract request body parameter from an operation.
+    def _extract_request_body(self, operation: Operation) -> RequestBodyInfo | None:
+        """Extract request body information from an operation.
+
+        Handles different content types including:
+        - application/json: JSON body with schema validation
+        - multipart/form-data: File uploads and form data
+        - application/x-www-form-urlencoded: URL-encoded form data
+        - application/octet-stream: Binary data
 
         Args:
             operation: The OpenAPI operation to extract request body from.
 
         Returns:
-            Parameter object for the request body, or None if no body exists.
+            RequestBodyInfo object with content type and schema, or None if no body exists.
         """
         if not operation.requestBody:
             return None
@@ -153,45 +217,53 @@ class Codegen(OpenAPIProcessor):
         if not body.content:
             return None
 
+        # Content type priority - prefer JSON for type safety
+        json_content_types = {'application/json', 'text/json'}
+
+        selected_content_type = None
+        selected_media_type = None
+
+        # First, try to find a JSON content type
         for content_type, media_type in body.content.items():
-            if content_type != 'application/json':
-                logging.warning(
-                    f'Skipping non-JSON request body content type: {content_type}'
-                )
-                continue
+            if content_type in json_content_types or content_type.endswith('+json'):
+                selected_content_type = content_type
+                selected_media_type = media_type
+                break
 
-            if media_type.schema_:
-                body_type = self.typegen.schema_to_type(
-                    media_type.schema_,
-                    base_name=f'{sanitize_identifier(operation.operationId)}RequestBody',
-                )
-                return Parameter(
-                    name='body',
-                    name_sanitized='body',
-                    location='body',
-                    required=body.required or False,
-                    type=body_type,
-                    description=body.description,
-                )
+        # If no JSON found, use the first available content type
+        if selected_content_type is None:
+            selected_content_type, selected_media_type = next(iter(body.content.items()))
 
-        return None
+        # Create type from schema if available
+        body_type = None
+        if selected_media_type.schema_:
+            body_type = self.typegen.schema_to_type(
+                selected_media_type.schema_,
+                base_name=f'{sanitize_identifier(operation.operationId)}RequestBody',
+            )
 
-    def _get_param_model(self, operation: Operation) -> list[Parameter]:
-        """Get all parameters (path, query, header, body) for an operation.
+        return RequestBodyInfo(
+            content_type=selected_content_type,
+            type=body_type,
+            required=body.required or False,
+            description=body.description,
+        )
+
+    def _get_param_model(self, operation: Operation) -> tuple[list[Parameter], RequestBodyInfo | None]:
+        """Get all parameters and request body info for an operation.
 
         Args:
             operation: The OpenAPI operation to extract parameters from.
 
         Returns:
-            List of all Parameter objects for the operation.
+            A tuple of (parameters, request_body_info) where:
+            - parameters: List of Parameter objects (path, query, header)
+            - request_body_info: RequestBodyInfo object or None
         """
         params = self._extract_operation_parameters(operation)
+        body_info = self._extract_request_body(operation)
 
-        body_param = self._extract_request_body(operation)
-        if body_param:
-            params.append(body_param)
-
-        return params
+        return params, body_info
 
     def _generate_endpoint(self, path: str, method: str, operation: Operation) -> Endpoint:
         """Generate an endpoint with sync and async functions.
@@ -210,10 +282,8 @@ class Codegen(OpenAPIProcessor):
         )
         async_fn_name = f'a{fn_name}'
 
-        parameters = self._get_param_model(operation)
-        supported_status_codes, response_model = (
-            self._get_response_models_by_status_code(operation)
-        )
+        parameters, request_body_info = self._get_param_model(operation)
+        response_infos, response_model = self._get_response_models(operation)
 
         async_fn, async_imports = async_request_fn(
             name=async_fn_name,
@@ -222,7 +292,8 @@ class Codegen(OpenAPIProcessor):
             response_model=response_model,
             docs=operation.description,
             parameters=parameters,
-            supported_status_codes=supported_status_codes,
+            response_infos=response_infos,
+            request_body_info=request_body_info,
         )
 
         sync_fn, imports = request_fn(
@@ -232,7 +303,8 @@ class Codegen(OpenAPIProcessor):
             response_model=response_model,
             docs=operation.description,
             parameters=parameters,
-            supported_status_codes=supported_status_codes,
+            response_infos=response_infos,
+            request_body_info=request_body_info,
         )
 
         ep = Endpoint(
@@ -248,6 +320,11 @@ class Codegen(OpenAPIProcessor):
         for param in parameters:
             if param.type and param.type.annotation_imports:
                 ep.add_imports([param.type.annotation_imports])
+
+        # Add imports for request body type if present
+        if request_body_info and request_body_info.type:
+            if request_body_info.type.annotation_imports:
+                ep.add_imports([request_body_info.type.annotation_imports])
 
         return ep
 

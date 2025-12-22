@@ -28,7 +28,7 @@ from otterapi.codegen_v2.ast_utils import (
     _subscript,
     _union_expr,
 )
-from otterapi.codegen_v2.types import Parameter, Type
+from otterapi.codegen_v2.types import Parameter, Type, ResponseInfo, RequestBodyInfo
 
 # Type alias for import dictionaries used throughout this module
 ImportDict = dict[str, set[str]]
@@ -435,47 +435,55 @@ def build_path_params(
     return ast.JoinedStr(values=values)
 
 
-def build_body_params(body: Parameter | None) -> ast.expr | None:
+def build_body_params(body: RequestBodyInfo | None) -> tuple[ast.expr | None, str | None]:
     """Build an AST expression for the request body parameter.
 
-    For Pydantic models, generates a `.model_dump()` call to serialize the body.
-    For primitive types, returns the parameter name directly.
+    For JSON bodies with Pydantic models, generates a `.model_dump()` call.
+    For other content types, returns the parameter name directly.
 
     Args:
-        body: The body Parameter object, or None if no body.
+        body: The RequestBodyInfo object, or None if no body.
 
     Returns:
-        An AST expression for the body, or None if no body parameter.
+        A tuple of (body_expr, httpx_param_name) where:
+        - body_expr: AST expression for the body value, or None
+        - httpx_param_name: The httpx keyword to use ('json', 'data', 'files', 'content')
     """
     if not body:
-        return None
+        return None, None
 
-    if body.type.type == 'model' or body.type.type == 'root_model':
-        return _call(
-            func=_attr(_name(body.name_sanitized), 'model_dump'),
+    body_name = 'body'
+
+    # For JSON content with model types, use model_dump()
+    if body.is_json and body.type and body.type.type in ('model', 'root'):
+        body_expr = _call(
+            func=_attr(_name(body_name), 'model_dump'),
             args=[],
         )
+    else:
+        # For other content types or primitive types, use the value directly
+        body_expr = _name(body_name)
 
-    return _name(body.name)
+    return body_expr, body.httpx_param_name
 
 
 def prepare_call_from_parameters(
-    parameters: list[Parameter] | None, path: str
-) -> tuple[ast.expr | None, ast.expr | None, ast.expr | None, ast.expr]:
+    parameters: list[Parameter] | None,
+    path: str,
+    request_body_info: RequestBodyInfo | None = None,
+) -> tuple[ast.expr | None, ast.expr | None, ast.expr | None, str | None, ast.expr]:
     """Prepare all parameter AST nodes for a request function call.
 
-    Separates parameters by location (query, path, header, body) and builds
+    Separates parameters by location (query, path, header) and builds
     the appropriate AST nodes for each.
 
     Args:
         parameters: List of all Parameter objects for the endpoint.
         path: The original path string with placeholders.
+        request_body_info: RequestBodyInfo object for the request body, or None.
 
     Returns:
-        A tuple of (query_params, header_params, body_params, processed_path).
-
-    Raises:
-        ValueError: If multiple body parameters are provided.
+        A tuple of (query_params, header_params, body_params, body_param_name, processed_path).
     """
     if not parameters:
         parameters = []
@@ -483,15 +491,14 @@ def prepare_call_from_parameters(
     query_params = [p for p in parameters if p.location == 'query']
     path_params = [p for p in parameters if p.location == 'path']
     header_params = [p for p in parameters if p.location == 'header']
-    body_params = [p for p in parameters if p.location == 'body']
 
-    if len(body_params) > 1:
-        raise ValueError('Multiple body parameters are not supported.')
+    body_expr, body_param_name = build_body_params(request_body_info)
 
     return (
         build_query_params(query_params),
         build_header_params(header_params),
-        build_body_params(body_params[0] if len(body_params) == 1 else None),
+        body_expr,
+        body_param_name,
         build_path_params(path_params, path),
     )
 
@@ -504,7 +511,8 @@ def _build_endpoint_fn(
     is_async: bool,
     docs: str | None = None,
     parameters: list[Parameter] | None = None,
-    supported_status_codes: list[int] | None = None,
+    response_infos: list[ResponseInfo] | None = None,
+    request_body_info: RequestBodyInfo | None = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an endpoint function (sync or async).
 
@@ -519,16 +527,35 @@ def _build_endpoint_fn(
         is_async: If True, generates an async function; otherwise sync.
         docs: Optional docstring for the generated function.
         parameters: List of Parameter objects for the endpoint.
-        supported_status_codes: List of expected status codes, or None.
+        response_infos: List of ResponseInfo objects describing response content types.
+        request_body_info: RequestBodyInfo object for the request body, or None.
 
     Returns:
         A tuple of (function_ast, imports) for the endpoint function.
     """
-    args, kwonlyargs, kw_defaults, imports = get_parameters(parameters or [])
+    # Get parameters and add body parameter if present
+    all_params = list(parameters or [])
+    if request_body_info:
+        # Add body as a parameter
+        body_param = Parameter(
+            name='body',
+            name_sanitized='body',
+            location='body',
+            required=request_body_info.required,
+            type=request_body_info.type,
+            description=request_body_info.description,
+        )
+        all_params.append(body_param)
 
-    query_params, header_params, body_params, processed_path = (
-        prepare_call_from_parameters(parameters, path)
+    args, kwonlyargs, kw_defaults, imports = get_parameters(all_params)
+
+    query_params, header_params, body_expr, body_param_name, processed_path = (
+        prepare_call_from_parameters(parameters, path, request_body_info)
     )
+
+    # Extract supported status codes from response_infos
+    supported_status_codes = [r.status_code for r in (response_infos or [])] or None
+
     call_keywords = get_base_call_keywords(
         method, processed_path, response_model, supported_status_codes
     )
@@ -537,8 +564,8 @@ def _build_endpoint_fn(
         call_keywords.append(ast.keyword(arg='params', value=query_params))
     if header_params:
         call_keywords.append(ast.keyword(arg='headers', value=header_params))
-    if body_params:
-        call_keywords.append(ast.keyword(arg='json', value=body_params))
+    if body_expr and body_param_name:
+        call_keywords.append(ast.keyword(arg=body_param_name, value=body_expr))
 
     # Add **kwargs to the call
     call_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
@@ -606,7 +633,8 @@ def request_fn(
     response_model: Type | None,
     docs: str | None = None,
     parameters: list[Parameter] | None = None,
-    supported_status_codes: list[int] | None = None,
+    response_infos: list[ResponseInfo] | None = None,
+    request_body_info: RequestBodyInfo | None = None,
 ) -> tuple[ast.FunctionDef, ImportDict]:
     """Generate a synchronous endpoint function.
 
@@ -620,7 +648,8 @@ def request_fn(
         response_model: The response type for validation, or None.
         docs: Optional docstring for the generated function.
         parameters: List of Parameter objects for the endpoint.
-        supported_status_codes: List of expected status codes, or None.
+        response_infos: List of ResponseInfo objects describing response content types.
+        request_body_info: RequestBodyInfo object for the request body, or None.
 
     Returns:
         A tuple of (function_ast, imports) for the sync endpoint function.
@@ -633,7 +662,8 @@ def request_fn(
         is_async=False,
         docs=docs,
         parameters=parameters,
-        supported_status_codes=supported_status_codes,
+        response_infos=response_infos,
+        request_body_info=request_body_info,
     )
 
 
@@ -644,7 +674,8 @@ def async_request_fn(
     response_model: Type | None,
     docs: str | None = None,
     parameters: list[Parameter] | None = None,
-    supported_status_codes: list[int] | None = None,
+    response_infos: list[ResponseInfo] | None = None,
+    request_body_info: RequestBodyInfo | None = None,
 ) -> tuple[ast.AsyncFunctionDef, ImportDict]:
     """Generate an asynchronous endpoint function.
 
@@ -658,7 +689,8 @@ def async_request_fn(
         response_model: The response type for validation, or None.
         docs: Optional docstring for the generated function.
         parameters: List of Parameter objects for the endpoint.
-        supported_status_codes: List of expected status codes, or None.
+        response_infos: List of ResponseInfo objects describing response content types.
+        request_body_info: RequestBodyInfo object for the request body, or None.
 
     Returns:
         A tuple of (function_ast, imports) for the async endpoint function.
@@ -671,5 +703,6 @@ def async_request_fn(
         is_async=True,
         docs=docs,
         parameters=parameters,
-        supported_status_codes=supported_status_codes,
+        response_infos=response_infos,
+        request_body_info=request_body_info,
     )
