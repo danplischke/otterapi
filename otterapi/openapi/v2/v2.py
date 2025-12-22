@@ -840,7 +840,7 @@ class Swagger(BaseModelWithVendorExtensions):
         for method in ["get", "put", "post", "delete", "options", "head", "patch"]:
             operation = getattr(path_item, method, None)
             if operation:
-                result[method] = self._convert_operation(operation, warnings)
+                result[method] = self._convert_operation(operation, warnings, method=method)
 
         # Convert path-level parameters
         if path_item.parameters:
@@ -854,7 +854,7 @@ class Swagger(BaseModelWithVendorExtensions):
         return result
 
     def _convert_operation(
-            self, operation: Operation, warnings: List[str]
+            self, operation: Operation, warnings: List[str], method: str = None
     ) -> Dict[str, Any]:
         """Convert an Operation object."""
         result: Dict[str, Any] = {}
@@ -878,6 +878,7 @@ class Swagger(BaseModelWithVendorExtensions):
             result["operationId"] = operation.operation_id
 
         # Convert parameters and extract body/formData
+        body_schema = None
         if operation.parameters:
             converted = self._convert_parameters(
                 operation.parameters,
@@ -888,12 +889,16 @@ class Swagger(BaseModelWithVendorExtensions):
                 result["parameters"] = converted["parameters"]
             if converted["requestBody"]:
                 result["requestBody"] = converted["requestBody"]
+            # Extract body schema for response inference
+            body_schema = converted.get("body_schema")
 
         # Convert responses
         result["responses"] = self._convert_responses(
             operation.responses,
             operation.produces or self.produces or ["application/json"],
             warnings,
+            method=method,
+            body_schema=body_schema,
         )
 
         if operation.deprecated:
@@ -925,7 +930,8 @@ class Swagger(BaseModelWithVendorExtensions):
         """
         Convert parameters list, separating body/formData into requestBody.
         
-        Returns dict with 'parameters' and 'requestBody' keys.
+        Returns dict with 'parameters', 'requestBody', and 'body_schema' keys.
+        The 'body_schema' is used for inferring response schemas when not specified.
         """
         result_params = []
         body_param = None
@@ -946,14 +952,17 @@ class Swagger(BaseModelWithVendorExtensions):
                     )
 
         request_body = None
+        body_schema = None
         if body_param:
             request_body = self._convert_body_parameter_to_dict(body_param, consumes, warnings)
+            # Extract the body schema for response inference
+            body_schema = self._convert_schema_to_dict(body_param.schema_)
         elif form_params:
             request_body = self._convert_formdata_parameters(
                 form_params, consumes, warnings
             )
 
-        return {"parameters": result_params, "requestBody": request_body}
+        return {"parameters": result_params, "requestBody": request_body, "body_schema": body_schema}
 
     def _convert_body_parameter_to_dict(
             self,
@@ -1223,8 +1232,18 @@ class Swagger(BaseModelWithVendorExtensions):
             responses: Responses,
             produces: List[str],
             warnings: List[str],
+            method: str = None,
+            body_schema: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
-        """Convert Responses object."""
+        """Convert Responses object.
+
+        Args:
+            responses: The Swagger 2.0 Responses object
+            produces: List of media types the operation produces
+            warnings: List to append warnings to
+            method: HTTP method (post, put, etc.) for response inference
+            body_schema: Body parameter schema for inferring response when not specified
+        """
         result = {}
 
         if hasattr(responses, "__pydantic_extra__") and responses.__pydantic_extra__:
@@ -1237,6 +1256,39 @@ class Swagger(BaseModelWithVendorExtensions):
                     result[status_code] = self._convert_response_to_dict(
                         response, produces, warnings
                     )
+
+        # Infer success response schema if not present
+        # For POST/PUT operations with a body parameter that references a model,
+        # it's common for the response to return the same model
+        if body_schema and method in ("post", "put"):
+            # Check if there's already a 2xx response with a schema
+            has_success_schema = False
+            for status_code in result:
+                if status_code.startswith("2") and not status_code.startswith("x-"):
+                    response_obj = result[status_code]
+                    if isinstance(response_obj, dict) and "content" in response_obj:
+                        # Check if any content type has a schema
+                        for media_type_obj in response_obj["content"].values():
+                            if isinstance(media_type_obj, dict) and "schema" in media_type_obj:
+                                has_success_schema = True
+                                break
+                    if has_success_schema:
+                        break
+
+            # Only infer if the body schema is a $ref (model reference)
+            if not has_success_schema and body_schema.get("$ref"):
+                warnings.append(
+                    f"Inferred 200 response schema from request body for {method.upper()} operation"
+                )
+                # Build the inferred response
+                content = {}
+                for media_type in produces:
+                    content[media_type] = {"schema": body_schema}
+
+                result["200"] = {
+                    "description": "Successful operation",
+                    "content": content,
+                }
 
         return result
 
