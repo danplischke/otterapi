@@ -248,7 +248,7 @@ class RequestBodyInfo:
 @dataclasses.dataclass
 class Endpoint:
     """Represents a generated API endpoint with sync and async functions."""
-    
+
     # AST nodes
     sync_ast: ast.FunctionDef
     async_ast: ast.AsyncFunctionDef
@@ -262,15 +262,16 @@ class Endpoint:
     method: str = ''
     path: str = ''
     description: str | None = None
-    
+    tags: list[str] | None = None  # OpenAPI tags for module splitting
+
     # Parameters and body
     parameters: list['Parameter'] | None = None
     request_body: 'RequestBodyInfo | None' = None
-    
+
     # Response info
     response_type: 'Type | None' = None
     response_infos: list['ResponseInfo'] | None = None
-    
+
     # Imports needed
     imports: dict[str, set[str]] = dataclasses.field(default_factory=dict)
 

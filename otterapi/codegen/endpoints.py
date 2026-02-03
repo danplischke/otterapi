@@ -571,7 +571,6 @@ def build_path_params(
     pattern = r'\{([^}]+)\}'
     parts = re.split(pattern, path)
     values: list[ast.expr] = []
-    current_pos = 0
 
     for i, part in enumerate(parts):
         if i % 2 == 0:
@@ -747,9 +746,6 @@ def _build_endpoint_fn(
             r.status_code for r in response_infos if r.status_code
         ]
 
-    # Check if this is a binary response (might want to stream)
-    is_binary_response = response_infos and any(r.is_binary for r in response_infos)
-
     # Build the request call keywords
     call_keywords = get_base_call_keywords(
         query_params=query_params,
@@ -886,3 +882,182 @@ def async_request_fn(
         response_infos=response_infos,
         request_body_info=request_body_info,
     )
+
+
+# =============================================================================
+# Delegating Endpoint Functions (Client-based)
+# =============================================================================
+
+
+def build_delegating_endpoint_fn(
+    fn_name: str,
+    client_method_name: str,
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
+    response_type: Type | None,
+    docs: str | None = None,
+    is_async: bool = False,
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
+    """Build an endpoint function that delegates to a client method.
+
+    Generates code like:
+        def get_pet_by_id(petId: Any, **kwargs) -> Pet:
+            '''Returns a single pet.'''
+            return _get_client().get_pet_by_id(petId, **kwargs)
+
+    Args:
+        fn_name: The function name to generate.
+        client_method_name: The client method to delegate to.
+        parameters: List of Parameter objects for the endpoint.
+        request_body_info: RequestBodyInfo object for the request body, or None.
+        response_type: The response Type for the return annotation.
+        docs: Optional docstring for the generated function.
+        is_async: Whether to generate an async function.
+
+    Returns:
+        A tuple of (function_ast, imports).
+    """
+    imports: ImportDict = {}
+    func_builder = _async_func if is_async else _func
+
+    # Build function arguments from parameters
+    if parameters:
+        args, kwonlyargs, kw_defaults, param_imports = get_parameters(parameters)
+        imports.update(param_imports)
+    else:
+        args, kwonlyargs, kw_defaults = [], [], []
+
+    # Add body parameter if present
+    if request_body_info:
+        body_annotation = (
+            request_body_info.type.annotation_ast
+            if request_body_info.type
+            else _name('Any')
+        )
+        if request_body_info.type:
+            imports.update(request_body_info.type.annotation_imports)
+        else:
+            imports.setdefault('typing', set()).add('Any')
+
+        body_arg = _argument('body', body_annotation)
+        if request_body_info.required:
+            args.append(body_arg)
+        else:
+            kwonlyargs.append(body_arg)
+            kw_defaults.append(ast.Constant(value=None))
+
+    # Build the call arguments to pass to the client method
+    call_args: list[ast.expr] = []
+    call_keywords: list[ast.keyword] = []
+
+    # Add positional args (required parameters)
+    for arg in args:
+        call_args.append(_name(arg.arg))
+
+    # Add keyword args (optional parameters)
+    for kwarg in kwonlyargs:
+        call_keywords.append(ast.keyword(arg=kwarg.arg, value=_name(kwarg.arg)))
+
+    # Add **kwargs pass-through
+    call_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
+
+    # Build the client method call: _get_client().method_name(args, **kwargs)
+    client_call = _call(
+        func=_attr(_call(_name('_get_client')), client_method_name),
+        args=call_args,
+        keywords=call_keywords,
+    )
+
+    if is_async:
+        client_call = ast.Await(value=client_call)
+
+    # Build function body
+    body: list[ast.stmt] = []
+
+    if docs:
+        body.append(ast.Expr(value=ast.Constant(value=clean_docstring(docs))))
+
+    body.append(ast.Return(value=client_call))
+
+    # Build return type annotation
+    if response_type:
+        returns = response_type.annotation_ast
+        imports.update(response_type.annotation_imports)
+    else:
+        returns = _name('Any')
+        imports.setdefault('typing', set()).add('Any')
+
+    func_ast = func_builder(
+        name=fn_name,
+        args=args,
+        body=body,
+        kwargs=_argument('kwargs', _name('dict')),
+        kwonlyargs=kwonlyargs,
+        kw_defaults=kw_defaults,
+        returns=returns,
+    )
+
+    return func_ast, imports
+
+
+def build_default_client_code() -> tuple[list[ast.stmt], ImportDict]:
+    """Build the default client variable and _get_client() function.
+
+    Generates:
+        _default_client: Client | None = None
+
+        def _get_client() -> Client:
+            '''Get or lazily initialize the default client.'''
+            global _default_client
+            if _default_client is None:
+                _default_client = Client()
+            return _default_client
+
+    Returns:
+        A tuple of (statements, imports).
+    """
+    imports: ImportDict = {}
+
+    # Build: _default_client: Client | None = None
+    default_client_var = ast.AnnAssign(
+        target=ast.Name(id='_default_client', ctx=ast.Store()),
+        annotation=_union_expr([_name('Client'), ast.Constant(value=None)]),
+        value=ast.Constant(value=None),
+        simple=1,
+    )
+
+    # Build the _get_client() function body
+    get_client_body: list[ast.stmt] = [
+        # Docstring
+        ast.Expr(
+            value=ast.Constant(value='Get or lazily initialize the default client.')
+        ),
+        # global _default_client
+        ast.Global(names=['_default_client']),
+        # if _default_client is None:
+        ast.If(
+            test=ast.Compare(
+                left=_name('_default_client'),
+                ops=[ast.Is()],
+                comparators=[ast.Constant(value=None)],
+            ),
+            body=[
+                # _default_client = Client()
+                _assign(_name('_default_client'), _call(_name('Client'))),
+            ],
+            orelse=[],
+        ),
+        # return _default_client
+        ast.Return(value=_name('_default_client')),
+    ]
+
+    get_client_fn = _func(
+        name='_get_client',
+        args=[],
+        body=get_client_body,
+        returns=_name('Client'),
+    )
+
+    imports.setdefault('typing', set()).add('Union')
+
+    return [default_client_var, get_client_fn], imports

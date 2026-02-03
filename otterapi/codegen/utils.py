@@ -141,7 +141,47 @@ def validate_python_syntax(content: str) -> None:
         Path(temp_path).unlink(missing_ok=True)
 
 
-def write_mod(body: list[ast.stmt], path: UPath | Path | str) -> None:
+def format_source(source: str) -> str:
+    """Format Python source code using ruff or black if available.
+
+    Args:
+        source: The source code to format.
+
+    Returns:
+        Formatted source code, or original if formatters unavailable.
+    """
+    # Try ruff first
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ['ruff', 'format', '-'],
+            input=source,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+    # Try black
+    try:
+        import black
+
+        return black.format_str(source, mode=black.Mode())
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Return original if no formatter available
+    return source
+
+
+def write_mod(
+    body: list[ast.stmt], path: UPath | Path | str, format_code: bool = True
+) -> None:
     """Write a list of AST statements to a Python file.
 
     This method:
@@ -149,11 +189,13 @@ def write_mod(body: list[ast.stmt], path: UPath | Path | str) -> None:
     2. Fixes missing locations in the AST
     3. Unparses the AST to Python source code
     4. Validates the code by compiling it
-    5. Writes the code to the specified file
+    5. Optionally formats the code with ruff/black
+    6. Writes the code to the specified file
 
     Args:
         body: List of AST statement nodes to write.
         path: Path where the file should be written.
+        format_code: Whether to format the code with ruff/black. Defaults to True.
 
     Raises:
         SyntaxError: If the generated code is not valid Python.
@@ -171,6 +213,10 @@ def write_mod(body: list[ast.stmt], path: UPath | Path | str) -> None:
 
     # Validate the generated code by compiling it
     validate_python_syntax(file_content)
+
+    # Format code if requested
+    if format_code:
+        file_content = format_source(file_content)
 
     # Write to file
     path.parent.mkdir(parents=True, exist_ok=True)

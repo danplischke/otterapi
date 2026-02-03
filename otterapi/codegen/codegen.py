@@ -11,7 +11,7 @@ import os
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import _all, _assign, _call, _name, _union_expr
+from otterapi.codegen.ast_utils import _all, _name, _union_expr
 from otterapi.codegen.client_generator import (
     EndpointInfo,
     generate_base_client_class,
@@ -33,7 +33,6 @@ from otterapi.codegen.utils import (
     sanitize_identifier,
     sanitize_parameter_field_name,
     to_snake_case,
-    write_init_file,
     write_mod,
 )
 from otterapi.config import DocumentConfig
@@ -410,6 +409,9 @@ class Codegen(OpenAPIProcessor):
             request_body_info=request_body_info,
         )
 
+        # Extract tags from operation
+        tags = list(operation.tags) if operation.tags else None
+
         ep = Endpoint(
             sync_ast=sync_fn,
             sync_fn_name=fn_name,
@@ -419,6 +421,7 @@ class Codegen(OpenAPIProcessor):
             method=method,
             path=path,
             description=operation.description,
+            tags=tags,
             parameters=parameters,
             request_body=request_body_info,
             response_type=response_model,
@@ -556,49 +559,67 @@ class Codegen(OpenAPIProcessor):
     def _build_endpoint_file_body(
         self, baseurl: str, endpoints: list[Endpoint]
     ) -> tuple[list[ast.stmt], ImportCollector, set[str]]:
-        """Build the body of the endpoints file with functions and collect imports.
+        """Build the body of the endpoints file with delegating functions.
+
+        Generates thin wrapper functions that delegate to the Client class methods.
 
         Args:
-            baseurl: The base URL for API requests.
+            baseurl: The base URL for API requests (unused, kept for API compat).
             endpoints: List of Endpoint objects to include.
 
         Returns:
             Tuple of (body statements, import collector, endpoint names).
         """
-        from otterapi.codegen.endpoints import base_async_request_fn, base_request_fn
+        from otterapi.codegen.endpoints import (
+            build_default_client_code,
+            build_delegating_endpoint_fn,
+        )
 
-        # Initialize body with constants
-        body: list[ast.stmt] = [
-            _assign(_name('BASE_URL'), ast.Constant(baseurl)),
-            _assign(_name('T'), _call(_name('TypeVar'), [ast.Constant('T')])),
-        ]
-
+        body: list[ast.stmt] = []
         import_collector = ImportCollector()
 
-        # Add base request functions
-        sync_base_fn, sync_base_imports = base_request_fn()
-        async_base_fn, async_base_imports = base_async_request_fn()
+        # Add default client variable and _get_client() function
+        client_stmts, client_imports = build_default_client_code()
+        body.extend(client_stmts)
+        import_collector.add_imports(client_imports)
 
-        body.append(sync_base_fn)
-        body.append(async_base_fn)
-
-        import_collector.add_imports(sync_base_imports)
-        import_collector.add_imports(async_base_imports)
-
-        # Add endpoint functions and collect imports
+        # Add delegating endpoint functions
         endpoint_names = set()
         for endpoint in endpoints:
-            endpoint_names.update([endpoint.sync_fn_name, endpoint.async_fn_name])
-            body.append(endpoint.sync_ast)
-            body.append(endpoint.async_ast)
-            import_collector.add_imports(endpoint.imports)
+            # Build sync delegating function
+            sync_fn, sync_imports = build_delegating_endpoint_fn(
+                fn_name=endpoint.sync_fn_name,
+                client_method_name=endpoint.sync_fn_name,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                response_type=endpoint.response_type,
+                docs=endpoint.description,
+                is_async=False,
+            )
+            endpoint_names.add(endpoint.sync_fn_name)
+            body.append(sync_fn)
+            import_collector.add_imports(sync_imports)
+
+            # Build async delegating function
+            async_fn, async_imports = build_delegating_endpoint_fn(
+                fn_name=endpoint.async_fn_name,
+                client_method_name=endpoint.async_fn_name,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                response_type=endpoint.response_type,
+                docs=endpoint.description,
+                is_async=True,
+            )
+            endpoint_names.add(endpoint.async_fn_name)
+            body.append(async_fn)
+            import_collector.add_imports(async_imports)
 
         return body, import_collector, endpoint_names
 
     def _generate_endpoint_file(
         self, path: UPath, models_file: UPath, endpoints: list[Endpoint]
     ) -> None:
-        """Generate the endpoints Python file.
+        """Generate the endpoints Python file with delegating functions.
 
         Args:
             path: Path where the endpoints file should be written.
@@ -620,6 +641,14 @@ class Codegen(OpenAPIProcessor):
         if model_names:
             model_import = self._create_model_import(models_file, model_names)
             body.insert(0, model_import)
+
+        # Add Client import (relative import from same directory)
+        client_import = ast.ImportFrom(
+            module='client',
+            names=[ast.alias(name='Client', asname=None)],
+            level=1,
+        )
+        body.insert(0, client_import)
 
         # Add all other imports at the beginning
         for import_stmt in import_collector.to_ast():
@@ -677,15 +706,149 @@ class Codegen(OpenAPIProcessor):
         models_file = directory / self.config.models_file
         self._generate_models_file(models_file)
 
-        endpoints_file = directory / self.config.endpoints_file
-        self._generate_endpoint_file(endpoints_file, models_file, endpoints)
+        base_url = self._resolve_base_url()
 
         # Generate client class
-        base_url = self._resolve_base_url()
         client_name = self._get_client_class_name()
+
+        # Check if module splitting is enabled
+        if self.config.module_split.enabled:
+            self._generate_split_endpoints(
+                directory, models_file, endpoints, base_url, client_name
+            )
+        else:
+            # Original single-file generation
+            endpoints_file = directory / self.config.endpoints_file
+            self._generate_endpoint_file(endpoints_file, models_file, endpoints)
+
         self._generate_client_file(directory, endpoints, base_url, client_name)
 
-        write_init_file(directory)
+        # Write __init__.py only if not using module splitting (splitting handles its own __init__.py)
+        if not self.config.module_split.enabled:
+            self._generate_init_file(directory, endpoints, client_name)
+
+    def _generate_init_file(
+        self,
+        directory: UPath,
+        endpoints: list[Endpoint],
+        client_class_name: str,
+    ) -> None:
+        """Generate __init__.py with all exports for non-split mode.
+
+        Args:
+            directory: Output directory.
+            endpoints: List of Endpoint objects.
+            client_class_name: Name of the client class.
+        """
+        body: list[ast.stmt] = []
+        all_names: list[str] = []
+
+        # Get endpoint names
+        endpoint_names = []
+        for endpoint in endpoints:
+            endpoint_names.append(endpoint.sync_fn_name)
+            endpoint_names.append(endpoint.async_fn_name)
+
+        # Import endpoints from endpoints.py
+        endpoints_file_stem = self.config.endpoints_file.replace('.py', '')
+        body.append(
+            ast.ImportFrom(
+                module=endpoints_file_stem,
+                names=[
+                    ast.alias(name=name, asname=None) for name in sorted(endpoint_names)
+                ],
+                level=1,
+            )
+        )
+        all_names.extend(endpoint_names)
+
+        # Import Client from client.py
+        body.append(
+            ast.ImportFrom(
+                module='client',
+                names=[ast.alias(name='Client', asname=None)],
+                level=1,
+            )
+        )
+        all_names.append('Client')
+
+        # Import BaseClient from _client.py
+        base_client_name = f'Base{client_class_name}'
+        body.append(
+            ast.ImportFrom(
+                module='_client',
+                names=[ast.alias(name=base_client_name, asname=None)],
+                level=1,
+            )
+        )
+        all_names.append(base_client_name)
+
+        # Also get all model names from typegen
+        all_model_names = {
+            type_.name
+            for type_ in self.typegen.types.values()
+            if type_.name and type_.implementation_ast
+        }
+        if all_model_names:
+            body.append(
+                ast.ImportFrom(
+                    module=self.config.models_file.replace('.py', ''),
+                    names=[
+                        ast.alias(name=name, asname=None)
+                        for name in sorted(all_model_names)
+                    ],
+                    level=1,
+                )
+            )
+            all_names.extend(all_model_names)
+
+        # Add __all__ at the beginning
+        body.insert(0, _all(sorted(set(all_names))))
+
+        # Write __init__.py
+        init_path = directory / '__init__.py'
+        write_mod(body, init_path)
+
+    def _generate_split_endpoints(
+        self,
+        directory: UPath,
+        models_file: UPath,
+        endpoints: list[Endpoint],
+        base_url: str,
+        client_class_name: str,
+    ) -> None:
+        """Generate split endpoint modules based on configuration.
+
+        Args:
+            directory: Output directory.
+            models_file: Path to the models file.
+            endpoints: List of Endpoint objects.
+            base_url: The base URL for API requests.
+            client_class_name: Name of the client class (e.g., 'SwaggerPetstoreOpenAPI30Client').
+        """
+        from otterapi.codegen.splitting import (
+            ModuleTreeBuilder,
+            SplitModuleEmitter,
+        )
+
+        # Build the module tree
+        builder = ModuleTreeBuilder(self.config.module_split)
+        tree = builder.build(endpoints)
+
+        # Emit the split modules
+        emitter = SplitModuleEmitter(
+            config=self.config.module_split,
+            output_dir=directory,
+            models_file=models_file,
+            models_import_path=self.config.models_import_path,
+            client_class_name=client_class_name,
+        )
+
+        emitter.emit(
+            tree=tree,
+            base_url=base_url,
+            typegen_types=self.typegen.types,
+        )
 
     def _get_client_class_name(self) -> str:
         """Get the client class name from config or derive from API title."""

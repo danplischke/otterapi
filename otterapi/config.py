@@ -5,13 +5,16 @@ supporting multiple configuration formats (YAML, JSON, TOML) and
 environment variable overrides.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
 
 DEFAULT_FILENAMES = ['otter.yaml', 'otter.yml', 'otter.json']
@@ -58,6 +61,166 @@ def _expand_env_vars_recursive(obj: Any) -> Any:
         return obj
 
 
+class SplitStrategy(str, Enum):
+    """Strategy for splitting endpoints into modules."""
+
+    NONE = 'none'  # No splitting, all endpoints in one file
+    PATH = 'path'  # Split based on URL path segments
+    TAG = 'tag'  # Split based on OpenAPI tags
+    HYBRID = 'hybrid'  # Combine tag and path strategies
+    CUSTOM = 'custom'  # Use custom module_map only
+
+
+class ModuleDefinition(BaseModel):
+    """Definition for a single module or module group.
+
+    Supports both flat modules (with just paths) and nested module hierarchies.
+
+    Attributes:
+        paths: List of glob patterns to match endpoint paths.
+        modules: Nested submodules (recursive structure).
+        strip_prefix: Prefix to strip from paths in this group.
+        package_prefix: Prefix for generated imports.
+        file_name: Override for the generated file name.
+        description: Module docstring.
+    """
+
+    paths: list[str] = Field(default_factory=list)
+    modules: dict[str, ModuleDefinition] = Field(default_factory=dict)
+    strip_prefix: str | None = None
+    package_prefix: str | None = None
+    file_name: str | None = None
+    description: str | None = None
+
+    model_config = {'extra': 'forbid'}
+
+
+# Rebuild model to resolve forward references
+ModuleDefinition.model_rebuild()
+
+
+# Type alias for module_map values which can be:
+# - A list of path patterns (shorthand)
+# - A single path pattern string (shorthand)
+# - A full ModuleDefinition
+ModuleMapValue = ModuleDefinition | list[str] | str | dict
+
+
+class ModuleSplitConfig(BaseModel):
+    """Configuration for splitting endpoints into submodules.
+
+    Attributes:
+        enabled: Whether module splitting is enabled.
+        strategy: The splitting strategy to use.
+        global_strip_prefixes: Prefixes to strip from all paths before matching.
+        path_depth: Number of path segments to use for path-based strategy.
+        min_endpoints: Minimum endpoints required per module before consolidating.
+        fallback_module: Module name for endpoints that don't match any rule.
+        module_map: Custom mapping of module names to path patterns or definitions.
+        flat_structure: If True, generate flat file structure instead of directories.
+        split_models: Whether to split models per module (advanced).
+        shared_models_module: Module name for shared models when split_models is True.
+    """
+
+    enabled: bool = False
+    strategy: SplitStrategy | Literal['none', 'path', 'tag', 'hybrid', 'custom'] = (
+        SplitStrategy.HYBRID
+    )
+    global_strip_prefixes: list[str] = Field(
+        default_factory=lambda: ['/api', '/api/v1', '/api/v2', '/api/v3']
+    )
+    path_depth: int = Field(default=1, ge=1, le=5)
+    min_endpoints: int = Field(default=2, ge=1)
+    fallback_module: str = 'common'
+    module_map: dict[str, ModuleMapValue] = Field(default_factory=dict)
+    flat_structure: bool = False
+    split_models: bool = False
+    shared_models_module: str = '_models'
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('strategy', mode='before')
+    @classmethod
+    def normalize_strategy(cls, v: Any) -> SplitStrategy:
+        """Convert string strategy to enum."""
+        if isinstance(v, str):
+            return SplitStrategy(v.lower())
+        return v
+
+    @field_validator('module_map', mode='before')
+    @classmethod
+    def normalize_module_map_before(cls, v: Any) -> dict[str, ModuleDefinition]:
+        """Normalize shorthand module_map syntax to full ModuleDefinition objects.
+
+        Handles:
+        - {"users": ["/user/*"]} → ModuleDefinition(paths=["/user/*"])
+        - {"users": "/user/*"} → ModuleDefinition(paths=["/user/*"])
+        - Nested dicts without paths/modules → nested ModuleDefinition
+        """
+        if isinstance(v, dict):
+            return _normalize_module_map(v)
+        return v
+
+
+def _is_module_definition_dict(value: dict) -> bool:
+    """Check if a dict looks like a ModuleDefinition (has known keys)."""
+    known_keys = {
+        'paths',
+        'modules',
+        'strip_prefix',
+        'package_prefix',
+        'file_name',
+        'description',
+    }
+    return bool(set(value.keys()) & known_keys)
+
+
+def _normalize_module_map(
+    module_map: dict[str, ModuleMapValue],
+) -> dict[str, ModuleDefinition]:
+    """Recursively normalize module_map values to ModuleDefinition objects."""
+    normalized: dict[str, ModuleDefinition] = {}
+
+    for key, value in module_map.items():
+        if isinstance(value, ModuleDefinition):
+            # Already a ModuleDefinition, but recursively normalize its modules
+            if value.modules:
+                value = value.model_copy(
+                    update={'modules': _normalize_module_map(value.modules)}
+                )
+            normalized[key] = value
+        elif isinstance(value, str):
+            # Single path pattern string → ModuleDefinition with one path
+            normalized[key] = ModuleDefinition(paths=[value])
+        elif isinstance(value, list):
+            # List of path patterns → ModuleDefinition with paths
+            normalized[key] = ModuleDefinition(paths=value)
+        elif isinstance(value, dict):
+            # Dict that's not yet a ModuleDefinition - could be:
+            # 1. A dict that should be parsed as ModuleDefinition (has known keys)
+            # 2. A dict of nested modules (shorthand for modules={...})
+            if _is_module_definition_dict(value):
+                # Try to parse as ModuleDefinition
+                definition = ModuleDefinition.model_validate(value)
+                if definition.modules:
+                    definition = definition.model_copy(
+                        update={'modules': _normalize_module_map(definition.modules)}
+                    )
+                normalized[key] = definition
+            else:
+                # Treat the dict as a nested module structure
+                # This handles cases like: {"identity": {"users": [...], "auth": [...]}}
+                nested_modules = _normalize_module_map(value)
+                normalized[key] = ModuleDefinition(modules=nested_modules)
+        else:
+            raise ValueError(
+                f"Invalid module_map value for '{key}': expected str, list, dict, "
+                f'or ModuleDefinition, got {type(value).__name__}'
+            )
+
+    return normalized
+
+
 class DocumentConfig(BaseModel):
     """Configuration for a single OpenAPI document to be processed.
 
@@ -71,6 +234,7 @@ class DocumentConfig(BaseModel):
         generate_async: Whether to generate async endpoint functions.
         generate_sync: Whether to generate sync endpoint functions.
         client_class_name: Optional name for a generated client class.
+        module_split: Configuration for splitting endpoints into submodules.
     """
 
     source: str = Field(..., description='Path or URL to the OpenAPI document.')
@@ -102,6 +266,11 @@ class DocumentConfig(BaseModel):
 
     client_class_name: str | None = Field(
         None, description='Optional name for a generated client class.'
+    )
+
+    module_split: ModuleSplitConfig = Field(
+        default_factory=ModuleSplitConfig,
+        description='Configuration for splitting endpoints into submodules.',
     )
 
     @field_validator('source')

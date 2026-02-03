@@ -12,10 +12,8 @@ from typing import TYPE_CHECKING
 from otterapi.codegen.ast_utils import (
     _argument,
     _assign,
-    _async_func,
     _attr,
     _call,
-    _func,
     _name,
     _subscript,
     _union_expr,
@@ -751,4 +749,10 @@ class {class_name}({base_class_name}):
     #         if e.response.status_code == 404:
     #             return None
     #         raise
+
+
+# Convenience alias for shorter imports
+Client = {class_name}
+
+__all__ = ["{class_name}", "Client"]
 '''
