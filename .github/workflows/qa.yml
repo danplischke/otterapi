@@ -1,62 +1,195 @@
 name: QA Check
+
 on:
   push:
+    branches: [main, master]
     paths:
-      - otterapi/**/*
-      - pyproject.toml
+      - "otterapi/**/*"
+      - "pyproject.toml"
+      - ".github/workflows/qa.yml"
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
 
-jobs:
-  format:
-    runs-on: [ ubuntu-latest ]
-    steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python
-        uses: astral-sh/setup-uv@v7
-      - name: Install dependencies
-        run: |
-          uv pip install . --group dev --system
-      - name: Run ruff linter
-        continue-on-error: true
-        run: |
-          ruff check otter
-      - name: Run ruff format check
-        id: ruff-format
-        continue-on-error: true
-        run: |
-          ruff format otter --check
-      - name: fail if formatting issues found
-        if: steps.ruff.outcome == 'failure' || steps.ruff-format.outcome == 'failure'
-        run: |
-          echo "Formatting and / or linting issues found. Please run 'just fmt' and 'just check' to fix them."
-          exit 1
+env:
+  PYTHON_VERSION_DEFAULT: "3.12"
 
-  check:
-    name: test build ${{ matrix.os }}::py${{ matrix.python-version }}
-    runs-on: [ ubuntu-latest ]
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run ruff linter
+        run: uv run ruff check otterapi --output-format=github
+
+      - name: Run ruff format check
+        run: uv run ruff format otterapi --check
+
+  type-check:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run mypy
+        run: uv run mypy otterapi --ignore-missing-imports
+        continue-on-error: true # Don't fail CI yet, but report issues
+
+  test:
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
-      max-parallel: 2
-      fail-fast: true
+      fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
         include:
-          - os: ubuntu-latest
-            python-version: "3.14"
-          - os: ubuntu-latest
-            python-version: "3.13"
-          - os: ubuntu-latest
+          - os: macos-latest
             python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.11"
-          - os: ubuntu-latest
-            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.12"
+
     steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python
-        uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
       - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run tests with coverage
+        run: uv run pytest otterapi/tests/ -v --cov=otterapi --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+          verbose: true
+
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build package
+        run: uv build
+
+      - name: Check package
         run: |
-          uv build .
+          pip install twine
+          twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Test code generation with Petstore API
+        run: |
+          uv run otterapi generate -s https://petstore3.swagger.io/api/v3/openapi.json -o ./test_petstore_client
+
+          # Verify files were created
+          test -f ./test_petstore_client/models.py
+          test -f ./test_petstore_client/endpoints.py
+          test -f ./test_petstore_client/__init__.py
+
+          # Verify generated code is valid Python
+          python -m py_compile ./test_petstore_client/models.py
+          python -m py_compile ./test_petstore_client/endpoints.py
+
+      - name: Test CLI commands
+        run: |
+          uv run otterapi --help
+          uv run otterapi version
+          uv run otterapi validate https://petstore3.swagger.io/api/v3/openapi.json
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [lint, test, build, integration-test]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

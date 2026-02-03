@@ -1,3 +1,9 @@
+"""Code generation module for OtterAPI.
+
+This module provides the main Codegen class that orchestrates the generation
+of Python client code from OpenAPI specifications.
+"""
+
 import ast
 import http
 import logging
@@ -5,30 +11,100 @@ import os
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import _all, _union_expr
-from otterapi.codegen_v2.ast_utils import _assign, _name, _call
-from otterapi.codegen_v2.endpoints import request_fn, async_request_fn
-from otterapi.codegen_v2.import_collector import ImportCollector
-from otterapi.codegen_v2.schema_loader import SchemaLoader
-from otterapi.codegen_v2.types import TypeGenerator, Endpoint, Parameter, Type, ResponseInfo, RequestBodyInfo
-from otterapi.codegen_v2.utils import OpenAPIProcessor, write_mod, sanitize_identifier, sanitize_parameter_field_name, \
-    write_init_file
+from otterapi.codegen.ast_utils import _all, _assign, _call, _name, _union_expr
+from otterapi.codegen.client_generator import (
+    EndpointInfo,
+    generate_base_client_class,
+    generate_client_stub,
+)
+from otterapi.codegen.endpoints import async_request_fn, request_fn
+from otterapi.codegen.import_collector import ImportCollector
+from otterapi.codegen.schema_loader import SchemaLoader
+from otterapi.codegen.types import (
+    Endpoint,
+    Parameter,
+    RequestBodyInfo,
+    ResponseInfo,
+    Type,
+    TypeGenerator,
+)
+from otterapi.codegen.utils import (
+    OpenAPIProcessor,
+    sanitize_identifier,
+    sanitize_parameter_field_name,
+    to_snake_case,
+    write_init_file,
+    write_mod,
+)
 from otterapi.config import DocumentConfig
 from otterapi.openapi.v3_2.v3_2 import OpenAPI as OpenAPIv3_2, Operation
-
 
 HTTP_METHODS = [method.value.lower() for method in http.HTTPMethod]
 
 
 class Codegen(OpenAPIProcessor):
+    """Main code generator for creating Python clients from OpenAPI specifications.
 
-    def __init__(self, config: DocumentConfig, schema_loader: SchemaLoader | None = None):
+    This class orchestrates the entire code generation process, including:
+    - Loading and validating OpenAPI schemas
+    - Generating Pydantic models from schema definitions
+    - Creating typed endpoint functions for API operations
+    - Writing output files with proper imports and structure
+
+    The generator supports OpenAPI 3.x specifications and produces
+    fully typed Python code compatible with httpx for HTTP requests
+    and Pydantic for data validation.
+
+    Attributes:
+        config: The DocumentConfig containing source and output settings.
+        openapi: The loaded OpenAPI schema (populated after _load_schema).
+        typegen: The TypeGenerator for creating Pydantic models.
+
+    Example:
+        >>> from otterapi.config import DocumentConfig
+        >>> from otterapi.codegen.codegen import Codegen
+        >>>
+        >>> config = DocumentConfig(
+        ...     source="https://api.example.com/openapi.json",
+        ...     output="./client"
+        ... )
+        >>> codegen = Codegen(config)
+        >>> codegen.generate()
+        # Creates models.py and endpoints.py in ./client/
+
+    Note:
+        The schema is not loaded until generate() is called or
+        _load_schema() is explicitly invoked.
+    """
+
+    def __init__(
+        self, config: DocumentConfig, schema_loader: SchemaLoader | None = None
+    ):
+        """Initialize the code generator.
+
+        Args:
+            config: Configuration specifying source schema and output location.
+            schema_loader: Optional custom schema loader. If not provided,
+                          a default SchemaLoader will be created.
+        """
         super().__init__(None)
         self.config = config
         self.openapi: OpenAPIv3_2 | None = None
         self._schema_loader = schema_loader or SchemaLoader()
 
-    def _load_schema(self):
+    def _load_schema(self) -> None:
+        """Load and parse the OpenAPI schema from the configured source.
+
+        This method loads the schema from a URL or file path, validates it
+        against the OpenAPI specification, and initializes the type generator.
+
+        After calling this method, self.openapi and self.typegen will be
+        populated and ready for code generation.
+
+        Raises:
+            SchemaLoadError: If the schema cannot be loaded from the source.
+            SchemaValidationError: If the schema is not valid OpenAPI.
+        """
         self.openapi = self._schema_loader.load(self.config.source)
         self.typegen = TypeGenerator(self.openapi)
 
@@ -77,7 +153,9 @@ class Codegen(OpenAPIProcessor):
 
             # If no JSON found, use the first available content type
             if selected_content_type is None:
-                selected_content_type, selected_media_type = next(iter(response.content.items()))
+                selected_content_type, selected_media_type = next(
+                    iter(response.content.items())
+                )
 
             # Create ResponseInfo with type if schema exists
             response_type = None
@@ -117,7 +195,7 @@ class Codegen(OpenAPIProcessor):
         return union_type
 
     def _get_response_models(
-            self, operation: Operation
+        self, operation: Operation
     ) -> tuple[list[ResponseInfo], Type | None]:
         """Get response models and info from an operation.
 
@@ -249,7 +327,9 @@ class Codegen(OpenAPIProcessor):
 
         # If no JSON found, use the first available content type
         if selected_content_type is None:
-            selected_content_type, selected_media_type = next(iter(body.content.items()))
+            selected_content_type, selected_media_type = next(
+                iter(body.content.items())
+            )
 
         # Create type from schema if available
         body_type = None
@@ -266,7 +346,9 @@ class Codegen(OpenAPIProcessor):
             description=body.description,
         )
 
-    def _get_param_model(self, operation: Operation) -> tuple[list[Parameter], RequestBodyInfo | None]:
+    def _get_param_model(
+        self, operation: Operation
+    ) -> tuple[list[Parameter], RequestBodyInfo | None]:
         """Get all parameters and request body info for an operation.
 
         Args:
@@ -282,7 +364,9 @@ class Codegen(OpenAPIProcessor):
 
         return params, body_info
 
-    def _generate_endpoint(self, path: str, method: str, operation: Operation) -> Endpoint:
+    def _generate_endpoint(
+        self, path: str, method: str, operation: Operation
+    ) -> Endpoint:
         """Generate an endpoint with sync and async functions.
 
         Args:
@@ -293,10 +377,12 @@ class Codegen(OpenAPIProcessor):
         Returns:
             An Endpoint object containing the generated functions and imports.
         """
-        fn_name = (
-                operation.operationId
-                or f'{method}_{path.replace("/", "_").replace("{", "").replace("}", "")}'
+        # Convert operationId to snake_case for Pythonic function names
+        raw_name = (
+            operation.operationId
+            or f'{method}_{path.replace("/", "_").replace("{", "").replace("}", "")}'
         )
+        fn_name = to_snake_case(raw_name)
         async_fn_name = f'a{fn_name}'
 
         parameters, request_body_info = self._get_param_model(operation)
@@ -330,6 +416,13 @@ class Codegen(OpenAPIProcessor):
             async_fn_name=async_fn_name,
             async_ast=async_fn,
             name=fn_name,
+            method=method,
+            path=path,
+            description=operation.description,
+            parameters=parameters,
+            request_body=request_body_info,
+            response_type=response_model,
+            response_infos=response_infos,
         )
 
         ep.add_imports([imports, async_imports])
@@ -343,6 +436,10 @@ class Codegen(OpenAPIProcessor):
             if request_body_info.type.annotation_imports:
                 ep.add_imports([request_body_info.type.annotation_imports])
 
+        # Add imports for response model type if present
+        if response_model and response_model.annotation_imports:
+            ep.add_imports([response_model.annotation_imports])
+
         return ep
 
     def _generate_endpoints(self) -> list[Endpoint]:
@@ -353,7 +450,11 @@ class Codegen(OpenAPIProcessor):
         """
         endpoints: list[Endpoint] = []
         # Paths is a RootModel, access .root to get the underlying dict
-        paths_dict = self.openapi.paths.root if hasattr(self.openapi.paths, 'root') else self.openapi.paths
+        paths_dict = (
+            self.openapi.paths.root
+            if hasattr(self.openapi.paths, 'root')
+            else self.openapi.paths
+        )
         for path, path_item in paths_dict.items():
             for method in HTTP_METHODS:
                 operation = getattr(path_item, method, None)
@@ -397,19 +498,46 @@ class Codegen(OpenAPIProcessor):
 
         return baseurl
 
-    def _collect_model_names(self) -> set[str]:
-        """Collect all model names that have implementations.
+    def _collect_used_model_names(self, endpoints: list[Endpoint]) -> set[str]:
+        """Collect model names that are actually used in endpoint signatures.
+
+        Only collects models that have implementations (defined in models.py)
+        and are referenced in endpoint parameters, request bodies, or responses.
+
+        Args:
+            endpoints: List of Endpoint objects to check for model usage.
 
         Returns:
-            Set of model names to be imported in the endpoints file.
+            Set of model names actually used in endpoints.
         """
-        model_names = set()
-        for type_name, type_ in self.typegen.types.items():
-            if type_.name and type_.implementation_ast:
-                model_names.add(type_.name)
-        return model_names
+        # Get all model names that have implementations
+        available_models = {
+            type_.name
+            for type_ in self.typegen.types.values()
+            if type_.name and type_.implementation_ast
+        }
 
-    def _create_model_import(self, models_file: UPath, model_names: set[str]) -> ast.ImportFrom:
+        # Walk the AST of each endpoint function to find referenced names
+        used_models = set()
+
+        class NameCollector(ast.NodeVisitor):
+            """Collect all Name nodes from AST that match available models."""
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if node.id in available_models:
+                    used_models.add(node.id)
+                self.generic_visit(node)
+
+        collector = NameCollector()
+        for endpoint in endpoints:
+            collector.visit(endpoint.sync_ast)
+            collector.visit(endpoint.async_ast)
+
+        return used_models
+
+    def _create_model_import(
+        self, models_file: UPath, model_names: set[str]
+    ) -> ast.ImportFrom:
         """Create an import statement for models.
 
         Args:
@@ -426,7 +554,7 @@ class Codegen(OpenAPIProcessor):
         )
 
     def _build_endpoint_file_body(
-            self, baseurl: str, endpoints: list[Endpoint]
+        self, baseurl: str, endpoints: list[Endpoint]
     ) -> tuple[list[ast.stmt], ImportCollector, set[str]]:
         """Build the body of the endpoints file with functions and collect imports.
 
@@ -437,7 +565,7 @@ class Codegen(OpenAPIProcessor):
         Returns:
             Tuple of (body statements, import collector, endpoint names).
         """
-        from otterapi.codegen_v2.endpoints import base_async_request_fn, base_request_fn
+        from otterapi.codegen.endpoints import base_async_request_fn, base_request_fn
 
         # Initialize body with constants
         body: list[ast.stmt] = [
@@ -468,7 +596,7 @@ class Codegen(OpenAPIProcessor):
         return body, import_collector, endpoint_names
 
     def _generate_endpoint_file(
-            self, path: UPath, models_file: UPath, endpoints: list[Endpoint]
+        self, path: UPath, models_file: UPath, endpoints: list[Endpoint]
     ) -> None:
         """Generate the endpoints Python file.
 
@@ -487,8 +615,8 @@ class Codegen(OpenAPIProcessor):
         # Add __all__ export
         body.insert(0, _all(sorted(endpoint_names)))
 
-        # Add model imports if any models exist
-        model_names = self._collect_model_names()
+        # Add model imports only for models actually used in endpoints
+        model_names = self._collect_used_model_names(endpoints)
         if model_names:
             model_import = self._create_model_import(models_file, model_names)
             body.insert(0, model_import)
@@ -552,5 +680,111 @@ class Codegen(OpenAPIProcessor):
         endpoints_file = directory / self.config.endpoints_file
         self._generate_endpoint_file(endpoints_file, models_file, endpoints)
 
+        # Generate client class
+        base_url = self._resolve_base_url()
+        client_name = self._get_client_class_name()
+        self._generate_client_file(directory, endpoints, base_url, client_name)
+
         write_init_file(directory)
 
+    def _get_client_class_name(self) -> str:
+        """Get the client class name from config or derive from API title."""
+        if self.config.client_class_name:
+            return self.config.client_class_name
+
+        # Derive from API title
+        if self.openapi and self.openapi.info and self.openapi.info.title:
+            title = self.openapi.info.title
+            # Convert to PascalCase and add Client suffix
+            name = sanitize_identifier(title)
+            if not name.endswith('Client'):
+                name = f'{name}Client'
+            return name
+
+        return 'APIClient'
+
+    def _generate_client_file(
+        self,
+        directory: UPath,
+        endpoints: list[Endpoint],
+        base_url: str,
+        client_name: str,
+    ) -> None:
+        """Generate the client class files.
+
+        Generates:
+        - _client.py: Always regenerated, contains BaseClient class
+        - client.py: Created once if missing, user can customize
+
+        Args:
+            directory: Output directory.
+            endpoints: List of Endpoint objects.
+            base_url: Default base URL from spec.
+            client_name: Name for the client class.
+        """
+        base_client_name = f'Base{client_name}'
+
+        # Convert endpoints to EndpointInfo for client generation
+        endpoint_infos = self._endpoints_to_info(endpoints)
+
+        # Generate base client class
+        class_ast, client_imports = generate_base_client_class(
+            class_name=base_client_name,
+            endpoints=endpoint_infos,
+            default_base_url=base_url,
+            default_timeout=30.0,
+        )
+
+        # Build the _client.py file
+        body: list[ast.stmt] = []
+        import_collector = ImportCollector()
+        import_collector.add_imports(client_imports)
+
+        # Add model imports
+        model_names = self._collect_used_model_names(endpoints)
+        if model_names:
+            models_file = directory / self.config.models_file
+            model_import = self._create_model_import(models_file, model_names)
+            body.append(model_import)
+
+        # Add other imports
+        for import_stmt in import_collector.to_ast():
+            body.insert(0, import_stmt)
+
+        # Add __all__ export
+        body.append(_all([base_client_name]))
+
+        # Add the class
+        body.append(class_ast)
+
+        # Write _client.py (always regenerated)
+        client_file = directory / '_client.py'
+        write_mod(body, client_file)
+
+        # Generate client.py stub (only if it doesn't exist)
+        user_client_file = directory / 'client.py'
+        if not user_client_file.exists():
+            stub_content = generate_client_stub(
+                class_name=client_name,
+                base_class_name=base_client_name,
+                module_name='_client',
+            )
+            user_client_file.write_text(stub_content)
+
+    def _endpoints_to_info(self, endpoints: list[Endpoint]) -> list[EndpointInfo]:
+        """Convert Endpoint objects to EndpointInfo for client generation."""
+        infos = []
+        for ep in endpoints:
+            info = EndpointInfo(
+                name=ep.fn.name,
+                async_name=ep.async_fn.name,
+                method=ep.method,
+                path=ep.path,
+                parameters=ep.parameters,
+                request_body=ep.request_body,
+                response_type=ep.response_type,
+                response_infos=ep.response_infos,
+                description=ep.description,
+            )
+            infos.append(info)
+        return infos

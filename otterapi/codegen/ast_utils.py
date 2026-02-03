@@ -57,9 +57,9 @@ def _import(module: str, names: list[str]) -> ast.ImportFrom:
 
 
 def _call(
-    func: ast.expr,
-    args: list[ast.expr] | None = None,
-    keywords: list[ast.keyword] | None = None,
+        func: ast.expr,
+        args: list[ast.expr] | None = None,
+        keywords: list[ast.keyword] | None = None,
 ) -> ast.Call:
     return ast.Call(
         func=func,
@@ -69,13 +69,13 @@ def _call(
 
 
 def _func(
-    name: str,
-    args: list[ast.arg],
-    body: list[ast.stmt],
-    returns: ast.expr | None = None,
-    kwargs: ast.arg = None,
-    kwonlyargs: list[ast.arg] = None,
-    kw_defaults: list[ast.expr] = None,
+        name: str,
+        args: list[ast.arg],
+        body: list[ast.stmt],
+        returns: ast.expr | None = None,
+        kwargs: ast.arg = None,
+        kwonlyargs: list[ast.arg] = None,
+        kw_defaults: list[ast.expr] = None,
 ) -> ast.FunctionDef:
     return ast.FunctionDef(
         name=name,
@@ -94,13 +94,13 @@ def _func(
 
 
 def _async_func(
-    name: str,
-    args: list[ast.arg],
-    body: list[ast.stmt],
-    returns: ast.expr | None = None,
-    kwargs: ast.arg = None,
-    kwonlyargs: list[ast.arg] = None,
-    kw_defaults: list[ast.expr] = None,
+        name: str,
+        args: list[ast.arg],
+        body: list[ast.stmt],
+        returns: ast.expr | None = None,
+        kwargs: ast.arg = None,
+        kwonlyargs: list[ast.arg] = None,
+        kw_defaults: list[ast.expr] = None,
 ) -> ast.AsyncFunctionDef:
     return ast.AsyncFunctionDef(
         name=name,

@@ -1,16 +1,19 @@
 import ast
 import dataclasses
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from openapi_pydantic import DataType, Reference, Schema
-from openapi_pydantic.v3.parser import OpenAPIv3
 from pydantic import BaseModel, Field, RootModel
 
 from otterapi.codegen.ast_utils import _call, _name, _subscript, _union_expr
-from otterapi.codegen.openapi_processor import OpenAPIProcessor
-from otterapi.codegen.utils import sanitize_identifier, sanitize_parameter_field_name
+from otterapi.codegen.utils import (
+    OpenAPIProcessor,
+    sanitize_identifier,
+    sanitize_parameter_field_name,
+)
+from otterapi.openapi.v3_2 import Reference, Schema, Type as DataType
 
 _PRIMITIVE_TYPE_MAP = {
     ('string', None): str,
@@ -33,16 +36,60 @@ _PRIMITIVE_TYPE_MAP = {
 class Type:
     reference: str | None  # reference is None if type is 'primitive'
     name: str | None
-    annotation_ast: ast.expr | ast.stmt
     type: Literal['primitive', 'root', 'model']
-    implementation_ast: ast.expr | ast.stmt | None = dataclasses.field(
-        default_factory=None
-    )
+    annotation_ast: ast.expr | ast.stmt | None = dataclasses.field(default=None)
+    implementation_ast: ast.expr | ast.stmt | None = dataclasses.field(default=None)
     dependencies: set[str] = dataclasses.field(default_factory=set)
     implementation_imports: dict[str, set[str]] = dataclasses.field(
         default_factory=dict
     )
     annotation_imports: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+
+    def __hash__(self):
+        """Make Type hashable based on its name (for use in sets/dicts)."""
+        # We only hash based on name since we use name as the key in the types dict
+        return hash(self.name)
+
+    def add_dependency(self, type_: 'Type') -> None:
+        self.dependencies.add(type_.name)
+        for dep in type_.dependencies:
+            self.dependencies.add(dep)
+
+    def add_implementation_import(self, module: str, name: str | Iterable[str]) -> None:
+        # Skip builtins - they don't need to be imported
+        if module == 'builtins':
+            return
+
+        if isinstance(name, str):
+            name = [name]
+
+        if module not in self.implementation_imports:
+            self.implementation_imports[module] = set()
+
+        for n in name:
+            self.implementation_imports[module].add(n)
+
+    def add_annotation_import(self, module: str, name: str | Iterable[str]) -> None:
+        # Skip builtins - they don't need to be imported
+        if module == 'builtins':
+            return
+
+        if isinstance(name, str):
+            name = [name]
+
+        if module not in self.annotation_imports:
+            self.annotation_imports[module] = set()
+
+        for n in name:
+            self.annotation_imports[module].add(n)
+
+    def copy_imports_from_sub_types(self, types: Iterable['Type']):
+        for t in types:
+            for module, names in t.annotation_imports.items():
+                self.add_annotation_import(module, names)
+
+            for module, names in t.implementation_imports.items():
+                self.add_implementation_import(module, names)
 
     def __eq__(self, other):
         """Deep comparison of Type objects, including AST nodes."""
@@ -80,69 +127,162 @@ class Type:
 
         return True
 
-    def __hash__(self):
-        """Make Type hashable based on its name (for use in sets/dicts)."""
-        # We only hash based on name since we use name as the key in the types dict
-        return hash(self.name)
-
-    def add_dependency(self, type_: 'Type') -> None:
-        self.dependencies.add(type_.name)
-        for dep in type_.dependencies:
-            self.dependencies.add(dep)
-
-    def copy_imports_from_sub_types(self, types: list['Type']):
-        for t in types:
-            for module, names in t.annotation_imports.items():
-                if module not in self.annotation_imports:
-                    self.annotation_imports[module] = set()
-                self.annotation_imports[module].update(names)
-
-            for module, names in t.implementation_imports.items():
-                if module not in self.implementation_imports:
-                    self.implementation_imports[module] = set()
-                self.implementation_imports[module].update(names)
-
-    def add_implementation_import(self, module: str, name: str | list[str]) -> None:
-        if isinstance(name, str):
-            name = [name]
-
-        if module not in self.implementation_imports:
-            self.implementation_imports[module] = set()
-
-        for n in name:
-            self.implementation_imports[module].add(n)
-
-    def add_annotation_import(self, module: str, name: str | list[str]) -> None:
-        if isinstance(name, str):
-            name = [name]
-
-        if module not in self.annotation_imports:
-            self.annotation_imports[module] = set()
-
-        for n in name:
-            self.annotation_imports[module].add(n)
-
 
 @dataclasses.dataclass
 class Parameter:
     name: str
     name_sanitized: str
-    location: str  # query, path, header, cookie, body
+    location: Literal['query', 'path', 'header', 'cookie', 'body']
     required: bool
     type: Type | None = None
     description: str | None = None
 
 
 @dataclasses.dataclass
+class ResponseInfo:
+    """Information about a response for a specific status code.
+
+    Attributes:
+        status_code: The HTTP status code for this response.
+        content_type: The content type (e.g., 'application/json', 'application/octet-stream').
+        type: The Type object for JSON responses, or None for raw responses.
+    """
+
+    status_code: int
+    content_type: str
+    type: Type | None = None
+
+    @property
+    def is_json(self) -> bool:
+        """Check if this is a JSON response."""
+        return self.content_type in (
+            'application/json',
+            'text/json',
+        ) or self.content_type.endswith('+json')
+
+    @property
+    def is_binary(self) -> bool:
+        """Check if this is a binary response (file download)."""
+        binary_types = (
+            'application/octet-stream',
+            'application/pdf',
+            'application/zip',
+            'application/gzip',
+            'application/x-tar',
+            'application/x-rar-compressed',
+        )
+        binary_prefixes = ('image/', 'audio/', 'video/', 'application/vnd.')
+        return self.content_type in binary_types or any(
+            self.content_type.startswith(p) for p in binary_prefixes
+        )
+
+    @property
+    def is_text(self) -> bool:
+        """Check if this is a plain text response."""
+        return self.content_type.startswith('text/') and not self.is_json
+
+    @property
+    def is_raw(self) -> bool:
+        """Check if this is an unknown content type that should return the raw httpx.Response."""
+        return not (self.is_json or self.is_binary or self.is_text)
+
+
+@dataclasses.dataclass
+class RequestBodyInfo:
+    """Information about a request body including its content type.
+
+    Attributes:
+        content_type: The content type (e.g., 'application/json', 'multipart/form-data').
+        type: The Type object for the body schema, or None if no schema.
+        required: Whether the request body is required.
+        description: Optional description of the request body.
+    """
+
+    content_type: str
+    type: Type | None = None
+    required: bool = False
+    description: str | None = None
+
+    @property
+    def is_json(self) -> bool:
+        """Check if this is a JSON request body."""
+        return self.content_type in (
+            'application/json',
+            'text/json',
+        ) or self.content_type.endswith('+json')
+
+    @property
+    def is_form(self) -> bool:
+        """Check if this is a form-encoded request body."""
+        return self.content_type == 'application/x-www-form-urlencoded'
+
+    @property
+    def is_multipart(self) -> bool:
+        """Check if this is a multipart form data request body."""
+        return self.content_type == 'multipart/form-data'
+
+    @property
+    def is_binary(self) -> bool:
+        """Check if this is a binary request body."""
+        return self.content_type in ('application/octet-stream',)
+
+    @property
+    def httpx_param_name(self) -> str:
+        """Get the httpx parameter name for this content type.
+
+        Returns:
+            The appropriate httpx parameter name: 'json', 'data', 'files', or 'content'.
+        """
+        if self.is_json:
+            return 'json'
+        elif self.is_form:
+            return 'data'
+        elif self.is_multipart:
+            return 'files'
+        elif self.is_binary:
+            return 'content'
+        else:
+            return 'content'
+
+
+@dataclasses.dataclass
 class Endpoint:
+    """Represents a generated API endpoint with sync and async functions."""
+    
+    # AST nodes
     sync_ast: ast.FunctionDef
     async_ast: ast.AsyncFunctionDef
 
+    # Function names
     sync_fn_name: str
     async_fn_name: str
 
+    # Endpoint metadata
     name: str
+    method: str = ''
+    path: str = ''
+    description: str | None = None
+    
+    # Parameters and body
+    parameters: list['Parameter'] | None = None
+    request_body: 'RequestBodyInfo | None' = None
+    
+    # Response info
+    response_type: 'Type | None' = None
+    response_infos: list['ResponseInfo'] | None = None
+    
+    # Imports needed
     imports: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+
+    @property
+    def fn(self) -> ast.FunctionDef:
+        """Alias for sync_ast."""
+        return self.sync_ast
+
+    @property
+    def async_fn(self) -> ast.AsyncFunctionDef:
+        """Alias for async_ast."""
+        return self.async_ast
 
     def add_imports(self, imports: list[dict[str, set[str]]]):
         for imports_ in imports:
@@ -152,10 +292,9 @@ class Endpoint:
                 self.imports[module].update(names)
 
 
-class TypeGen(OpenAPIProcessor):
-    def __init__(self, openapi: OpenAPIv3):
-        super().__init__(openapi)
-        self.types: dict[str, Type] = {}
+@dataclasses.dataclass
+class TypeGenerator(OpenAPIProcessor):
+    types: dict[str, Type] = dataclasses.field(default_factory=dict)
 
     def add_type(self, type_: Type, base_name: str | None = None) -> Type:
         """Add a type to the registry. If a type with the same name but different definition
@@ -241,7 +380,7 @@ class TypeGen(OpenAPIProcessor):
         ) if reference.title else None
 
     def _get_primitive_type_ast(self, schema: Schema) -> Type:
-        key = (schema.type, schema.schema_format or None)
+        key = (schema.type, schema.format or None)
         mapped = _PRIMITIVE_TYPE_MAP.get(key, Any)
 
         type_ = Type(
@@ -426,7 +565,7 @@ class TypeGen(OpenAPIProcessor):
     def _create_array_type(
         self, schema: Schema, name: str | None = None, base_name: str | None = None
     ) -> Type:
-        if schema.type != DataType.ARRAY:
+        if schema.type != DataType.array:
             raise ValueError('Schema is not an array')
 
         if not schema.items:
@@ -515,11 +654,12 @@ class TypeGen(OpenAPIProcessor):
 
         schema, schema_name = self._resolve_reference(schema)
 
-        if schema.type == DataType.ARRAY:
+        # TODO: schema.type can be array?
+        if schema.type == DataType.array:
             type_ = self._create_array_type(
                 schema=schema, name=schema_name, base_name=base_name
             )
-        elif schema.type == DataType.OBJECT or schema.type is None:
+        elif schema.type == DataType.object or schema.type is None:
             type_ = self._create_object_type(
                 schema, name=schema_name, base_name=base_name
             )

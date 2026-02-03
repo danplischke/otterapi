@@ -1,74 +1,382 @@
-import os
-from pathlib import Path
+"""Configuration management for OtterAPI.
 
-from pydantic import BaseModel, Field
+This module provides configuration loading and validation for OtterAPI,
+supporting multiple configuration formats (YAML, JSON, TOML) and
+environment variable overrides.
+"""
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
-DEFAULT_FILENAMES = ['otter.yaml', 'otter.yml']
+DEFAULT_FILENAMES = ['otter.yaml', 'otter.yml', 'otter.json']
+
+
+def _expand_env_vars(value: str) -> str:
+    """Expand environment variables in a string.
+
+    Supports both ${VAR} and ${VAR:-default} syntax.
+
+    Args:
+        value: String potentially containing environment variables.
+
+    Returns:
+        String with environment variables expanded.
+    """
+    # Pattern matches ${VAR} or ${VAR:-default}
+    pattern = r'\$\{([^}:]+)(?::-([^}]*))?\}'
+
+    def replacer(match: re.Match) -> str:
+        var_name = match.group(1)
+        default = match.group(2)
+        return os.environ.get(var_name, default if default is not None else '')
+
+    return re.sub(pattern, replacer, value)
+
+
+def _expand_env_vars_recursive(obj: Any) -> Any:
+    """Recursively expand environment variables in a data structure.
+
+    Args:
+        obj: Data structure (dict, list, or scalar).
+
+    Returns:
+        Data structure with all string values having env vars expanded.
+    """
+    if isinstance(obj, dict):
+        return {k: _expand_env_vars_recursive(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_expand_env_vars_recursive(item) for item in obj]
+    elif isinstance(obj, str):
+        return _expand_env_vars(obj)
+    else:
+        return obj
 
 
 class DocumentConfig(BaseModel):
-    """Represents a single document to be processed."""
+    """Configuration for a single OpenAPI document to be processed.
+
+    Attributes:
+        source: Path or URL to the OpenAPI document.
+        output: Output directory for the generated code.
+        base_url: Optional base URL override for the API.
+        models_file: Name of the generated models file.
+        models_import_path: Optional import path for models in endpoints.
+        endpoints_file: Name of the generated endpoints file.
+        generate_async: Whether to generate async endpoint functions.
+        generate_sync: Whether to generate sync endpoint functions.
+        client_class_name: Optional name for a generated client class.
+    """
 
     source: str = Field(..., description='Path or URL to the OpenAPI document.')
 
     base_url: str | None = Field(
         None,
-        description='Optional base URL to resolve paths if no servers are defined in the OpenAPI document.',
+        description='Optional base URL to override servers defined in the OpenAPI document.',
     )
 
     output: str = Field(..., description='Output directory for the generated code.')
 
-    models_file: str | None = Field(
-        'models.py', description='Optional file name for generated models.'
-    )
+    models_file: str = Field('models.py', description='File name for generated models.')
 
     models_import_path: str | None = Field(
         None, description='Optional import path for generated models.'
     )
 
-    endpoints_file: str | None = Field(
-        'endpoints.py', description='Optional file name for generated endpoints.'
+    endpoints_file: str = Field(
+        'endpoints.py', description='File name for generated endpoints.'
     )
+
+    generate_async: bool = Field(
+        True, description='Whether to generate async endpoint functions.'
+    )
+
+    generate_sync: bool = Field(
+        True, description='Whether to generate sync endpoint functions.'
+    )
+
+    client_class_name: str | None = Field(
+        None, description='Optional name for a generated client class.'
+    )
+
+    @field_validator('source')
+    @classmethod
+    def validate_source(cls, v: str) -> str:
+        """Validate that source is a non-empty string."""
+        if not v or not v.strip():
+            raise ValueError('source cannot be empty')
+        return v.strip()
+
+    @field_validator('output')
+    @classmethod
+    def validate_output(cls, v: str) -> str:
+        """Validate that output is a non-empty string."""
+        if not v or not v.strip():
+            raise ValueError('output cannot be empty')
+        return v.strip()
+
+    @field_validator('models_file', 'endpoints_file')
+    @classmethod
+    def validate_filename(cls, v: str) -> str:
+        """Validate that file names end with .py."""
+        if not v.endswith('.py'):
+            raise ValueError(f'File name must end with .py, got: {v}')
+        return v
 
 
 class CodegenConfig(BaseSettings):
+    """Main configuration for OtterAPI code generation.
+
+    Attributes:
+        documents: List of OpenAPI documents to process.
+        generate_endpoints: Whether to generate endpoint functions.
+        format_output: Whether to format generated code with black/ruff.
+        validate_output: Whether to validate generated code syntax.
+        create_py_typed: Whether to create py.typed marker files.
+    """
+
     documents: list[DocumentConfig] = Field(
         ..., description='List of OpenAPI documents to process.'
     )
 
     generate_endpoints: bool = Field(
-        True, description='Whether to generate models from the OpenAPI schemas.'
+        True, description='Whether to generate endpoint functions.'
     )
+
+    format_output: bool = Field(
+        True, description='Whether to format generated code with black/ruff.'
+    )
+
+    validate_output: bool = Field(
+        True, description='Whether to validate generated code syntax.'
+    )
+
+    create_py_typed: bool = Field(
+        True, description='Whether to create py.typed marker files.'
+    )
+
+    @field_validator('documents')
+    @classmethod
+    def validate_documents(cls, v: list[DocumentConfig]) -> list[DocumentConfig]:
+        """Validate that at least one document is configured."""
+        if not v:
+            raise ValueError('At least one document must be configured')
+        return v
+
+    model_config = {
+        'env_prefix': 'OTTER_',
+        'env_nested_delimiter': '__',
+    }
 
 
 def load_yaml(path: str | Path) -> dict:
+    """Load configuration from a YAML file.
+
+    Args:
+        path: Path to the YAML file.
+
+    Returns:
+        Parsed configuration dictionary.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        yaml.YAMLError: If the file is not valid YAML.
+    """
     import yaml
 
-    return yaml.load(Path(path).read_text(), Loader=yaml.FullLoader)
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f'Configuration file not found: {path}')
+
+    content = path.read_text(encoding='utf-8')
+    data = yaml.safe_load(content)
+
+    # Expand environment variables
+    return _expand_env_vars_recursive(data)
+
+
+def load_json(path: str | Path) -> dict:
+    """Load configuration from a JSON file.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        Parsed configuration dictionary.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        json.JSONDecodeError: If the file is not valid JSON.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f'Configuration file not found: {path}')
+
+    content = path.read_text(encoding='utf-8')
+    data = json.loads(content)
+
+    # Expand environment variables
+    return _expand_env_vars_recursive(data)
+
+
+def load_toml(path: str | Path) -> dict:
+    """Load configuration from a TOML file (pyproject.toml).
+
+    Args:
+        path: Path to the TOML file.
+
+    Returns:
+        Parsed configuration dictionary for the otterapi tool section.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        KeyError: If the file doesn't contain otterapi configuration.
+    """
+    import tomllib
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f'Configuration file not found: {path}')
+
+    content = path.read_text(encoding='utf-8')
+    data = tomllib.loads(content)
+
+    # Extract tool.otterapi section
+    tools = data.get('tool', {})
+    if 'otterapi' not in tools:
+        raise KeyError(f'No [tool.otterapi] section found in {path}')
+
+    # Expand environment variables
+    return _expand_env_vars_recursive(tools['otterapi'])
+
+
+def load_config_file(path: str | Path) -> dict:
+    """Load configuration from a file, auto-detecting the format.
+
+    Args:
+        path: Path to the configuration file.
+
+    Returns:
+        Parsed configuration dictionary.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        ValueError: If the file format is not supported.
+    """
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(f'Configuration file not found: {path}')
+
+    suffix = path.suffix.lower()
+
+    if suffix in ('.yaml', '.yml'):
+        return load_yaml(path)
+    elif suffix == '.json':
+        return load_json(path)
+    elif suffix == '.toml':
+        return load_toml(path)
+    else:
+        # Try to auto-detect based on content
+        content = path.read_text(encoding='utf-8').strip()
+        if content.startswith('{'):
+            return load_json(path)
+        elif content.startswith('['):
+            return load_toml(path)
+        else:
+            return load_yaml(path)
 
 
 def get_config(path: str | None = None) -> CodegenConfig:
-    """Load configuration from a file or return default config."""
+    """Load OtterAPI configuration from a file or environment.
+
+    This function attempts to load configuration in the following order:
+    1. From the specified path (if provided)
+    2. From default config files in the current directory
+    3. From pyproject.toml [tool.otterapi] section
+    4. From environment variables
+
+    Args:
+        path: Optional path to a configuration file.
+
+    Returns:
+        Validated CodegenConfig object.
+
+    Raises:
+        FileNotFoundError: If no configuration can be found.
+        pydantic.ValidationError: If the configuration is invalid.
+    """
+    # If path is specified, use it directly
     if path:
-        return CodegenConfig.model_validate(load_yaml(path))
+        data = load_config_file(path)
+        return CodegenConfig.model_validate(data)
 
-    cwd = os.getcwd()
+    cwd = Path.cwd()
 
+    # Try default config files
     for filename in DEFAULT_FILENAMES:
-        path = Path(cwd) / filename
-        if path.exists():
-            return CodegenConfig.model_validate(load_yaml(path))
+        config_path = cwd / filename
+        if config_path.exists():
+            data = load_config_file(config_path)
+            return CodegenConfig.model_validate(data)
 
-    path = Path(os.getcwd()) / 'pyproject.toml'
+    # Try pyproject.toml
+    pyproject_path = cwd / 'pyproject.toml'
+    if pyproject_path.exists():
+        try:
+            data = load_toml(pyproject_path)
+            return CodegenConfig.model_validate(data)
+        except KeyError:
+            pass  # No otterapi section, continue looking
 
-    if path.exists():
-        import tomllib
+    # Try to build from environment variables
+    env_source = os.environ.get('OTTER_SOURCE')
+    env_output = os.environ.get('OTTER_OUTPUT')
 
-        pyproject = tomllib.loads(path.read_text())
-        tools = pyproject.get('tool', {})
+    if env_source and env_output:
+        return CodegenConfig(
+            documents=[
+                DocumentConfig(
+                    source=env_source,
+                    output=env_output,
+                    base_url=os.environ.get('OTTER_BASE_URL'),
+                    models_file=os.environ.get('OTTER_MODELS_FILE', 'models.py'),
+                    endpoints_file=os.environ.get(
+                        'OTTER_ENDPOINTS_FILE', 'endpoints.py'
+                    ),
+                )
+            ]
+        )
 
-        if 'otterapi' in tools:
-            return CodegenConfig.model_validate(tools['otterapi'])
+    raise FileNotFoundError(
+        'No configuration found. Create an otter.yml file, add [tool.otterapi] '
+        'to pyproject.toml, or set OTTER_SOURCE and OTTER_OUTPUT environment variables.'
+    )
 
-    raise FileNotFoundError('config not found')
+
+def create_default_config() -> dict:
+    """Create a default configuration dictionary.
+
+    Returns:
+        Dictionary with default configuration values.
+    """
+    return {
+        'documents': [
+            {
+                'source': 'https://petstore3.swagger.io/api/v3/openapi.json',
+                'output': './client',
+                'models_file': 'models.py',
+                'endpoints_file': 'endpoints.py',
+                'generate_async': True,
+                'generate_sync': True,
+            }
+        ],
+        'format_output': True,
+        'validate_output': True,
+        'create_py_typed': True,
+    }

@@ -489,7 +489,7 @@ class TestAllFunction:
         # Test with generator
         result = _all(name for name in ['a', 'b'])
         assert len(result.value.elts) == 2
-        
+
         # Test with set
         result = _all({'x', 'y', 'z'})
         assert len(result.value.elts) == 3
@@ -552,8 +552,10 @@ class TestASTNodeCompilation:
         # Create Dict[str, Optional[List[int]]]
         list_int = _subscript('List', _name('int'))
         optional_list = _optional_expr(list_int)
-        dict_type = _subscript('Dict', ast.Tuple(elts=[_name('str'), optional_list], ctx=ast.Load()))
-        
+        dict_type = _subscript(
+            'Dict', ast.Tuple(elts=[_name('str'), optional_list], ctx=ast.Load())
+        )
+
         func = _func(
             'complex_type',
             [_argument('data', dict_type)],
@@ -573,14 +575,18 @@ class TestASTNodeExecution:
         func = _func(
             'add',
             [_argument('a'), _argument('b')],
-            [ast.Return(value=ast.BinOp(left=_name('a'), op=ast.Add(), right=_name('b')))],
+            [
+                ast.Return(
+                    value=ast.BinOp(left=_name('a'), op=ast.Add(), right=_name('b'))
+                )
+            ],
         )
         module = ast.Module(body=[func], type_ignores=[])
         ast.fix_missing_locations(module)
-        
+
         namespace = {}
         exec(compile(module, '<test>', 'exec'), namespace)
-        
+
         assert 'add' in namespace
         assert namespace['add'](2, 3) == 5
 
@@ -589,10 +595,10 @@ class TestASTNodeExecution:
         all_node = _all(['foo', 'bar', 'baz'])
         module = ast.Module(body=[all_node], type_ignores=[])
         ast.fix_missing_locations(module)
-        
+
         namespace = {}
         exec(compile(module, '<test>', 'exec'), namespace)
-        
+
         assert '__all__' in namespace
         assert namespace['__all__'] == ('foo', 'bar', 'baz')
 
@@ -601,10 +607,10 @@ class TestASTNodeExecution:
         assign = _assign(_name('result'), ast.Constant(value=42))
         module = ast.Module(body=[assign], type_ignores=[])
         ast.fix_missing_locations(module)
-        
+
         namespace = {}
         exec(compile(module, '<test>', 'exec'), namespace)
-        
+
         assert 'result' in namespace
         assert namespace['result'] == 42
 
@@ -615,10 +621,10 @@ class TestASTNodeExecution:
         assign = _assign(_name('result'), call)
         module = ast.Module(body=[assign], type_ignores=[])
         ast.fix_missing_locations(module)
-        
+
         namespace = {'max': max}
         exec(compile(module, '<test>', 'exec'), namespace)
-        
+
         assert namespace['result'] == 5
 
 
@@ -660,4 +666,3 @@ class TestEdgeCases:
         outer = _func('outer', [], [inner, ast.Return(value=_call(_name('inner')))])
         assert len(outer.body) == 2
         assert isinstance(outer.body[0], ast.FunctionDef)
-
