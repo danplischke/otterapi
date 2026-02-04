@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import _all
+from otterapi.codegen.ast_utils import _all, _name
 from otterapi.codegen.import_collector import ImportCollector
 from otterapi.codegen.utils import write_mod
 
 if TYPE_CHECKING:
     from otterapi.codegen.splitting.tree import ModuleTree
     from otterapi.codegen.types import Endpoint, Type
-    from otterapi.config import ModuleSplitConfig
+    from otterapi.config import DataFrameConfig, ModuleSplitConfig
 
 
 @dataclass
@@ -61,6 +61,7 @@ class SplitModuleEmitter:
         models_file: Path | UPath,
         models_import_path: str | None = None,
         client_class_name: str = 'APIClient',
+        dataframe_config: DataFrameConfig | None = None,
     ):
         """Initialize the split module emitter.
 
@@ -70,12 +71,14 @@ class SplitModuleEmitter:
             models_file: Path to the models file for import generation.
             models_import_path: Optional custom import path for models.
             client_class_name: Name of the client class (e.g., 'SwaggerPetstoreOpenAPI30Client').
+            dataframe_config: Optional DataFrame configuration for generating _df/_pl methods.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
         self.models_file = UPath(models_file)
         self.models_import_path = models_import_path
         self.client_class_name = client_class_name
+        self.dataframe_config = dataframe_config
         self._emitted_modules: list[EmittedModule] = []
 
     def emit(
@@ -219,7 +222,8 @@ class SplitModuleEmitter:
         """
         from otterapi.codegen.endpoints import (
             build_default_client_code,
-            build_delegating_endpoint_fn,
+            build_standalone_dataframe_fn,
+            build_standalone_endpoint_fn,
         )
 
         body: list[ast.stmt] = []
@@ -235,16 +239,21 @@ class SplitModuleEmitter:
         body.extend(client_stmts)
         import_collector.add_imports(client_imports)
 
+        # Track if we need DataFrame type hints
+        has_dataframe_methods = False
+
         # Add delegating endpoint functions
         endpoint_names: list[str] = []
         for endpoint in endpoints:
-            # Build sync delegating function
-            sync_fn, sync_imports = build_delegating_endpoint_fn(
+            # Build sync standalone function
+            sync_fn, sync_imports = build_standalone_endpoint_fn(
                 fn_name=endpoint.sync_fn_name,
-                client_method_name=endpoint.sync_fn_name,
+                method=endpoint.method,
+                path=endpoint.path,
                 parameters=endpoint.parameters,
                 request_body_info=endpoint.request_body,
                 response_type=endpoint.response_type,
+                response_infos=endpoint.response_infos,
                 docs=endpoint.description,
                 is_async=False,
             )
@@ -252,19 +261,103 @@ class SplitModuleEmitter:
             body.append(sync_fn)
             import_collector.add_imports(sync_imports)
 
-            # Build async delegating function
-            async_fn, async_imports = build_delegating_endpoint_fn(
+            # Build async standalone function
+            async_fn, async_imports = build_standalone_endpoint_fn(
                 fn_name=endpoint.async_fn_name,
-                client_method_name=endpoint.async_fn_name,
+                method=endpoint.method,
+                path=endpoint.path,
                 parameters=endpoint.parameters,
                 request_body_info=endpoint.request_body,
                 response_type=endpoint.response_type,
+                response_infos=endpoint.response_infos,
                 docs=endpoint.description,
                 is_async=True,
             )
             endpoint_names.append(endpoint.async_fn_name)
             body.append(async_fn)
             import_collector.add_imports(async_imports)
+
+            # Generate DataFrame methods if configured
+            if self.dataframe_config and self.dataframe_config.enabled:
+                gen_pandas, gen_polars, df_path = (
+                    self._get_dataframe_config_for_endpoint(endpoint)
+                )
+
+                if gen_pandas:
+                    has_dataframe_methods = True
+                    # Sync pandas method
+                    pandas_fn_name = f'{endpoint.sync_fn_name}_df'
+                    pandas_fn, pandas_imports = build_standalone_dataframe_fn(
+                        fn_name=pandas_fn_name,
+                        method=endpoint.method,
+                        path=endpoint.path,
+                        parameters=endpoint.parameters,
+                        request_body_info=endpoint.request_body,
+                        library='pandas',
+                        default_path=df_path,
+                        docs=endpoint.description,
+                        is_async=False,
+                    )
+                    endpoint_names.append(pandas_fn_name)
+                    body.append(pandas_fn)
+                    import_collector.add_imports(pandas_imports)
+
+                    # Async pandas method
+                    async_pandas_fn_name = f'{endpoint.async_fn_name}_df'
+                    async_pandas_fn, async_pandas_imports = (
+                        build_standalone_dataframe_fn(
+                            fn_name=async_pandas_fn_name,
+                            method=endpoint.method,
+                            path=endpoint.path,
+                            parameters=endpoint.parameters,
+                            request_body_info=endpoint.request_body,
+                            library='pandas',
+                            default_path=df_path,
+                            docs=endpoint.description,
+                            is_async=True,
+                        )
+                    )
+                    endpoint_names.append(async_pandas_fn_name)
+                    body.append(async_pandas_fn)
+                    import_collector.add_imports(async_pandas_imports)
+
+                if gen_polars:
+                    has_dataframe_methods = True
+                    # Sync polars method
+                    polars_fn_name = f'{endpoint.sync_fn_name}_pl'
+                    polars_fn, polars_imports = build_standalone_dataframe_fn(
+                        fn_name=polars_fn_name,
+                        method=endpoint.method,
+                        path=endpoint.path,
+                        parameters=endpoint.parameters,
+                        request_body_info=endpoint.request_body,
+                        library='polars',
+                        default_path=df_path,
+                        docs=endpoint.description,
+                        is_async=False,
+                    )
+                    endpoint_names.append(polars_fn_name)
+                    body.append(polars_fn)
+                    import_collector.add_imports(polars_imports)
+
+                    # Async polars method
+                    async_polars_fn_name = f'{endpoint.async_fn_name}_pl'
+                    async_polars_fn, async_polars_imports = (
+                        build_standalone_dataframe_fn(
+                            fn_name=async_polars_fn_name,
+                            method=endpoint.method,
+                            path=endpoint.path,
+                            parameters=endpoint.parameters,
+                            request_body_info=endpoint.request_body,
+                            library='polars',
+                            default_path=df_path,
+                            docs=endpoint.description,
+                            is_async=True,
+                        )
+                    )
+                    endpoint_names.append(async_polars_fn_name)
+                    body.append(async_polars_fn)
+                    import_collector.add_imports(async_polars_imports)
 
         # Add __all__ export
         body.insert(0, _all(sorted(endpoint_names)))
@@ -279,6 +372,30 @@ class SplitModuleEmitter:
         client_import = self._create_client_import(module_path)
         body.insert(0, client_import)
 
+        # Add TYPE_CHECKING block for DataFrame type hints if needed
+        if has_dataframe_methods:
+            import_collector.add_imports({'typing': {'TYPE_CHECKING'}})
+            type_checking_block = ast.If(
+                test=_name('TYPE_CHECKING'),
+                body=[
+                    ast.Import(names=[ast.alias(name='pandas', asname='pd')]),
+                    ast.Import(names=[ast.alias(name='polars', asname='pl')]),
+                ],
+                orelse=[],
+            )
+            body.insert(0, type_checking_block)
+
+            # Add dataframe helper imports
+            dataframe_import = ast.ImportFrom(
+                module='._dataframe',
+                names=[
+                    ast.alias(name='to_pandas', asname=None),
+                    ast.alias(name='to_polars', asname=None),
+                ],
+                level=0,
+            )
+            body.insert(0, dataframe_import)
+
         # Add all other imports at the beginning
         for import_stmt in import_collector.to_ast():
             body.insert(0, import_stmt)
@@ -289,6 +406,52 @@ class SplitModuleEmitter:
         write_mod(body, file_path)
 
         return endpoint_names
+
+    def _get_dataframe_config_for_endpoint(
+        self, endpoint: Endpoint
+    ) -> tuple[bool, bool, str | None]:
+        """Get DataFrame configuration for a specific endpoint.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            Tuple of (generate_pandas, generate_polars, path).
+        """
+        if not self.dataframe_config or not self.dataframe_config.enabled:
+            return False, False, None
+
+        # Check if endpoint returns a list
+        returns_list = self._endpoint_returns_list(endpoint)
+
+        return self.dataframe_config.should_generate_for_endpoint(
+            endpoint_name=endpoint.sync_fn_name,
+            returns_list=returns_list,
+        )
+
+    def _endpoint_returns_list(self, endpoint: Endpoint) -> bool:
+        """Check if an endpoint returns a list type.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            True if the endpoint returns a list, False otherwise.
+        """
+        if not endpoint.response_type:
+            return False
+
+        response_type = endpoint.response_type
+
+        # Check the annotation AST for list type
+        # Array types have annotation_ast as a Subscript with value.id='list'
+        if response_type.annotation_ast:
+            ann = response_type.annotation_ast
+            if isinstance(ann, ast.Subscript):
+                if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
+                    return True
+
+        return False
 
     def _create_client_import(
         self,

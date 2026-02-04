@@ -6,7 +6,7 @@ HTTP client injection support.
 """
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
@@ -27,6 +27,15 @@ ImportDict = dict[str, set[str]]
 
 
 @dataclass
+class DataFrameMethodConfig:
+    """Configuration for DataFrame method generation."""
+
+    generate_pandas: bool = False
+    generate_polars: bool = False
+    path: str | None = None
+
+
+@dataclass
 class EndpointInfo:
     """Information about an endpoint for client method generation."""
 
@@ -39,19 +48,23 @@ class EndpointInfo:
     response_type: 'Type | None'
     response_infos: list['ResponseInfo'] | None
     description: str | None
+    dataframe_config: DataFrameMethodConfig = field(
+        default_factory=DataFrameMethodConfig
+    )
 
 
 def generate_base_client_class(
     class_name: str,
-    endpoints: list[EndpointInfo],
     default_base_url: str,
     default_timeout: float = 30.0,
 ) -> tuple[ast.ClassDef, ImportDict]:
-    """Generate a BaseClient class with all endpoints as methods.
+    """Generate a BaseClient class with only request infrastructure.
+
+    This class contains only the HTTP request plumbing (__init__, _request,
+    _request_async). Endpoint implementations live in the module files.
 
     Args:
         class_name: Name for the generated class (e.g., 'BasePetStoreClient').
-        endpoints: List of EndpointInfo objects to include as methods.
         default_base_url: Default base URL from the OpenAPI spec.
         default_timeout: Default request timeout in seconds.
 
@@ -60,7 +73,7 @@ def generate_base_client_class(
     """
     imports: ImportDict = {
         'httpx': {'Client', 'AsyncClient', 'Response'},
-        'typing': {'Any', 'Union'},
+        'typing': {'Any', 'Union', 'Type', 'TypeVar'},
         'pydantic': {'TypeAdapter', 'RootModel'},
     }
 
@@ -73,33 +86,28 @@ def generate_base_client_class(
     # Build _request_async method (async)
     async_request_method = _build_request_method(is_async=True)
 
-    # Build endpoint methods
-    endpoint_methods: list[ast.stmt] = []
-    for endpoint in endpoints:
-        # Generate sync method
-        sync_method, sync_imports = _build_endpoint_method(
-            endpoint=endpoint,
-            is_async=False,
-        )
-        endpoint_methods.append(sync_method)
-        _merge_imports(imports, sync_imports)
+    # Build _request_json method (sync) - request + json parsing
+    request_json_method = _build_request_json_method(is_async=False)
 
-        # Generate async method
-        async_method, async_imports = _build_endpoint_method(
-            endpoint=endpoint,
-            is_async=True,
-        )
-        endpoint_methods.append(async_method)
-        _merge_imports(imports, async_imports)
+    # Build _request_json_async method (async) - request + json parsing
+    async_request_json_method = _build_request_json_method(is_async=True)
+
+    # Build _parse_response method (sync)
+    parse_response_method = _build_parse_response_method(is_async=False)
+
+    # Build _parse_response_async method (async)
+    async_parse_response_method = _build_parse_response_method(is_async=True)
 
     # Build class body
     class_body: list[ast.stmt] = [
         ast.Expr(
             value=ast.Constant(
-                value=f"""Base client for API requests.
+                value=f"""Base HTTP client with request infrastructure.
 
 This class is regenerated on each code generation run.
 To customize, subclass this in client.py.
+
+Endpoint implementations are in the module files (e.g., pet.py, store.py).
 
 Args:
     base_url: Base URL for API requests. Default: {default_base_url}
@@ -113,7 +121,10 @@ Args:
         init_method,
         request_method,
         async_request_method,
-        *endpoint_methods,
+        request_json_method,
+        async_request_json_method,
+        parse_response_method,
+        async_parse_response_method,
     ]
 
     class_def = ast.ClassDef(
@@ -207,6 +218,172 @@ def _build_init_method(
     )
 
     return init_method
+
+
+def _build_parse_response_method(
+    is_async: bool,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Build the _parse_response or _parse_response_async method.
+
+    This method handles JSON parsing and Pydantic validation of responses.
+    """
+    method_name = '_parse_response_async' if is_async else '_parse_response'
+
+    # T = TypeVar('T') is module-level, we reference it here
+    args = ast.arguments(
+        posonlyargs=[],
+        args=[
+            _argument('self'),
+            _argument('response', _name('Response')),
+            _argument('response_type', _subscript('Type', _name('T'))),
+        ],
+        kwonlyargs=[],
+        kw_defaults=[],
+        kwarg=None,
+        defaults=[],
+    )
+
+    # Build the method body:
+    # data = response.json()
+    # validated = TypeAdapter(response_type).validate_python(data)
+    # if isinstance(validated, RootModel):
+    #     return validated.root
+    # return validated
+    body: list[ast.stmt] = [
+        # data = response.json()
+        _assign(
+            _name('data'),
+            _call(func=_attr('response', 'json')),
+        ),
+        # validated = TypeAdapter(response_type).validate_python(data)
+        _assign(
+            _name('validated'),
+            _call(
+                func=_attr(
+                    _call(
+                        func=_name('TypeAdapter'),
+                        args=[_name('response_type')],
+                    ),
+                    'validate_python',
+                ),
+                args=[_name('data')],
+            ),
+        ),
+        # if isinstance(validated, RootModel): return validated.root
+        ast.If(
+            test=_call(
+                func=_name('isinstance'),
+                args=[_name('validated'), _name('RootModel')],
+            ),
+            body=[ast.Return(value=_attr('validated', 'root'))],
+            orelse=[],
+        ),
+        # return validated
+        ast.Return(value=_name('validated')),
+    ]
+
+    if is_async:
+        return ast.AsyncFunctionDef(
+            name=method_name,
+            args=args,
+            body=body,
+            decorator_list=[],
+            returns=_name('T'),
+        )
+    else:
+        return ast.FunctionDef(
+            name=method_name,
+            args=args,
+            body=body,
+            decorator_list=[],
+            returns=_name('T'),
+        )
+
+
+def _build_request_json_method(
+    is_async: bool,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Build the _request_json or _request_json_async method.
+
+    This method combines _request and .json() parsing for convenience.
+    """
+    method_name = '_request_json_async' if is_async else '_request_json'
+    request_method = '_request_async' if is_async else '_request'
+
+    args = ast.arguments(
+        posonlyargs=[],
+        args=[
+            _argument('self'),
+            _argument('method', _name('str')),
+            _argument('path', _name('str')),
+        ],
+        kwonlyargs=[
+            _argument('params', _union_expr([_name('dict'), ast.Constant(value=None)])),
+            _argument(
+                'headers', _union_expr([_name('dict'), ast.Constant(value=None)])
+            ),
+            _argument('json', _union_expr([_name('Any'), ast.Constant(value=None)])),
+            _argument('data', _union_expr([_name('Any'), ast.Constant(value=None)])),
+            _argument('files', _union_expr([_name('Any'), ast.Constant(value=None)])),
+            _argument('content', _union_expr([_name('Any'), ast.Constant(value=None)])),
+            _argument(
+                'timeout', _union_expr([_name('float'), ast.Constant(value=None)])
+            ),
+        ],
+        kw_defaults=[
+            ast.Constant(value=None),  # params
+            ast.Constant(value=None),  # headers
+            ast.Constant(value=None),  # json
+            ast.Constant(value=None),  # data
+            ast.Constant(value=None),  # files
+            ast.Constant(value=None),  # content
+            ast.Constant(value=None),  # timeout
+        ],
+        kwarg=None,
+        defaults=[],
+    )
+
+    # Build the request call with all parameters
+    request_call = _call(
+        func=_attr('self', request_method),
+        args=[_name('method'), _name('path')],
+        keywords=[
+            ast.keyword(arg='params', value=_name('params')),
+            ast.keyword(arg='headers', value=_name('headers')),
+            ast.keyword(arg='json', value=_name('json')),
+            ast.keyword(arg='data', value=_name('data')),
+            ast.keyword(arg='files', value=_name('files')),
+            ast.keyword(arg='content', value=_name('content')),
+            ast.keyword(arg='timeout', value=_name('timeout')),
+        ],
+    )
+
+    if is_async:
+        request_call = ast.Await(value=request_call)
+
+    # response = self._request(...) or await self._request_async(...)
+    # return response.json()
+    body: list[ast.stmt] = [
+        _assign(_name('response'), request_call),
+        ast.Return(value=_call(func=_attr('response', 'json'))),
+    ]
+
+    if is_async:
+        return ast.AsyncFunctionDef(
+            name=method_name,
+            args=args,
+            body=body,
+            decorator_list=[],
+            returns=_name('Any'),
+        )
+    else:
+        return ast.FunctionDef(
+            name=method_name,
+            args=args,
+            body=body,
+            decorator_list=[],
+            returns=_name('Any'),
+        )
 
 
 def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -524,6 +701,181 @@ def _build_endpoint_method(
     else:
         returns = _name('Response')
         imports.setdefault('httpx', set()).add('Response')
+
+    args = ast.arguments(
+        posonlyargs=[],
+        args=args_list,
+        kwonlyargs=kwonlyargs,
+        kw_defaults=kw_defaults,
+        kwarg=None,
+        defaults=[],
+    )
+
+    if is_async:
+        method = ast.AsyncFunctionDef(
+            name=fn_name,
+            args=args,
+            body=body,
+            decorator_list=[],
+            returns=returns,
+        )
+    else:
+        method = ast.FunctionDef(
+            name=fn_name,
+            args=args,
+            body=body,
+            decorator_list=[],
+            returns=returns,
+        )
+
+    return method, imports
+
+
+def _build_dataframe_endpoint_method(
+    endpoint: EndpointInfo,
+    is_async: bool,
+    library: str,  # 'pandas' or 'polars'
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
+    """Build a DataFrame endpoint method for the client class.
+
+    Args:
+        endpoint: The endpoint information.
+        is_async: Whether to generate an async method.
+        library: The DataFrame library ('pandas' or 'polars').
+
+    Returns:
+        Tuple of (method AST node, required imports).
+    """
+    imports: ImportDict = {}
+
+    # Determine method name suffix and return type
+    if library == 'pandas':
+        suffix = '_df'
+        return_type_str = 'pd.DataFrame'
+    else:
+        suffix = '_pl'
+        return_type_str = 'pl.DataFrame'
+
+    base_name = endpoint.async_name if is_async else endpoint.name
+    fn_name = f'{base_name}{suffix}'
+    request_method = '_request_async' if is_async else '_request'
+
+    # Build function arguments
+    args_list = [_argument('self')]
+    kwonlyargs = []
+    kw_defaults = []
+
+    # Add parameters as arguments
+    if endpoint.parameters:
+        for param in endpoint.parameters:
+            if param.type:
+                annotation = param.type.annotation_ast
+                _merge_imports(imports, param.type.annotation_imports)
+            else:
+                annotation = _name('Any')
+                imports.setdefault('typing', set()).add('Any')
+
+            arg = _argument(param.name_sanitized, annotation)
+
+            if param.required:
+                args_list.append(arg)
+            else:
+                kwonlyargs.append(arg)
+                kw_defaults.append(ast.Constant(value=None))
+
+    # Add body parameter if present
+    if endpoint.request_body:
+        if endpoint.request_body.type:
+            body_annotation = endpoint.request_body.type.annotation_ast
+            _merge_imports(imports, endpoint.request_body.type.annotation_imports)
+        else:
+            body_annotation = _name('Any')
+            imports.setdefault('typing', set()).add('Any')
+
+        body_arg = _argument('body', body_annotation)
+        if endpoint.request_body.required:
+            args_list.append(body_arg)
+        else:
+            kwonlyargs.append(body_arg)
+            kw_defaults.append(ast.Constant(value=None))
+
+    # Add path parameter for DataFrame methods (keyword-only, optional)
+    kwonlyargs.append(
+        _argument(
+            'path',
+            _union_expr([_name('str'), ast.Constant(value=None)]),
+        )
+    )
+    # Use configured default path or None
+    default_path = endpoint.dataframe_config.path
+    kw_defaults.append(ast.Constant(value=default_path))
+
+    # Build arguments for _request call
+    request_keywords = [
+        ast.keyword(arg='method', value=ast.Constant(value=endpoint.method.lower())),
+        ast.keyword(
+            arg='path', value=_build_path_expr(endpoint.path, endpoint.parameters)
+        ),
+    ]
+
+    # Add query params
+    query_params = _build_query_params(endpoint.parameters)
+    if query_params:
+        request_keywords.append(ast.keyword(arg='params', value=query_params))
+
+    # Add header params
+    header_params = _build_header_params(endpoint.parameters)
+    if header_params:
+        request_keywords.append(ast.keyword(arg='headers', value=header_params))
+
+    # Add body
+    if endpoint.request_body:
+        body_expr, param_name = _build_body_expr(endpoint.request_body)
+        if body_expr and param_name:
+            request_keywords.append(ast.keyword(arg=param_name, value=body_expr))
+
+    # Build the method body
+    body: list[ast.stmt] = []
+
+    # Add docstring
+    doc = endpoint.description or ''
+    doc_suffix = f'\n\nReturns:\n    {return_type_str}'
+    body.append(ast.Expr(value=ast.Constant(value=doc + doc_suffix)))
+
+    # Call _request
+    request_call = _call(
+        _attr('self', request_method),
+        keywords=request_keywords,
+    )
+
+    if is_async:
+        request_call = ast.Await(value=request_call)
+
+    # response = self._request(...)
+    body.append(_assign(_name('response'), request_call))
+
+    # data = response.json()
+    body.append(_assign(_name('data'), _call(_attr('response', 'json'))))
+
+    # Determine conversion function
+    if library == 'pandas':
+        convert_func = 'to_pandas'
+    else:
+        convert_func = 'to_polars'
+
+    # return to_pandas(data, path=path) or to_polars(data, path=path)
+    body.append(
+        ast.Return(
+            value=_call(
+                _name(convert_func),
+                args=[_name('data')],
+                keywords=[ast.keyword(arg='path', value=_name('path'))],
+            )
+        )
+    )
+
+    # Build return type (using string annotation for TYPE_CHECKING)
+    returns = ast.Constant(value=return_type_str)
 
     args = ast.arguments(
         posonlyargs=[],

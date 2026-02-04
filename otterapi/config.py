@@ -71,6 +71,155 @@ class SplitStrategy(str, Enum):
     CUSTOM = 'custom'  # Use custom module_map only
 
 
+class EndpointDataFrameConfig(BaseModel):
+    """Per-endpoint DataFrame configuration.
+
+    Allows overriding the default DataFrame settings for specific endpoints.
+
+    Attributes:
+        enabled: Override whether to generate DataFrame methods for this endpoint.
+        path: JSON path to extract data from response (e.g., "data.users").
+        pandas: Override whether to generate _df method (pandas).
+        polars: Override whether to generate _pl method (polars).
+    """
+
+    enabled: bool | None = Field(
+        default=None,
+        description='Override whether to generate DataFrame methods.',
+    )
+
+    path: str | None = Field(
+        default=None,
+        description='JSON path to extract data from response.',
+    )
+
+    pandas: bool | None = Field(
+        default=None,
+        description='Override whether to generate _df method (pandas).',
+    )
+
+    polars: bool | None = Field(
+        default=None,
+        description='Override whether to generate _pl method (polars).',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+
+class DataFrameConfig(BaseModel):
+    """Configuration for DataFrame conversion methods.
+
+    When enabled, generates additional endpoint methods that return
+    pandas DataFrames (_df suffix) and/or polars DataFrames (_pl suffix).
+
+    Attributes:
+        enabled: Enable DataFrame method generation.
+        pandas: Generate _df methods returning pandas DataFrames.
+        polars: Generate _pl methods returning polars DataFrames.
+        default_path: Default JSON path for extracting list data from responses.
+        include_all: Generate DataFrame methods for all list-returning endpoints.
+        endpoints: Per-endpoint configuration overrides.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description='Enable DataFrame method generation.',
+    )
+
+    pandas: bool = Field(
+        default=True,
+        description='Generate _df methods (pandas DataFrames).',
+    )
+
+    polars: bool = Field(
+        default=False,
+        description='Generate _pl methods (polars DataFrames).',
+    )
+
+    default_path: str | None = Field(
+        default=None,
+        description='Default JSON path for extracting list data.',
+    )
+
+    include_all: bool = Field(
+        default=True,
+        description='Generate DataFrame methods for all list-returning endpoints.',
+    )
+
+    endpoints: dict[str, EndpointDataFrameConfig] = Field(
+        default_factory=dict,
+        description='Per-endpoint configuration overrides.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    def should_generate_for_endpoint(
+        self,
+        endpoint_name: str,
+        returns_list: bool = True,
+    ) -> tuple[bool, bool, str | None]:
+        """Determine if DataFrame methods should be generated for an endpoint.
+
+        Args:
+            endpoint_name: The name of the endpoint function.
+            returns_list: Whether the endpoint returns a list type.
+
+        Returns:
+            A tuple of (generate_pandas, generate_polars, path) indicating
+            which methods to generate and what path to use.
+        """
+        if not self.enabled:
+            return False, False, None
+
+        # Check for endpoint-specific override
+        endpoint_config = self.endpoints.get(endpoint_name)
+
+        if endpoint_config is not None:
+            # Endpoint has specific config
+            if endpoint_config.enabled is False:
+                return False, False, None
+
+            # Determine pandas generation
+            gen_pandas = (
+                endpoint_config.pandas
+                if endpoint_config.pandas is not None
+                else self.pandas
+            )
+
+            # Determine polars generation
+            gen_polars = (
+                endpoint_config.polars
+                if endpoint_config.polars is not None
+                else self.polars
+            )
+
+            # Determine path
+            path = (
+                endpoint_config.path
+                if endpoint_config.path is not None
+                else self.default_path
+            )
+
+            # If endpoint is explicitly enabled, generate regardless of return type
+            if endpoint_config.enabled is True:
+                return gen_pandas, gen_polars, path
+
+            # Otherwise, respect include_all and returns_list
+            if self.include_all and returns_list:
+                return gen_pandas, gen_polars, path
+
+            return False, False, None
+
+        # No endpoint-specific config - use defaults
+        if not self.include_all:
+            return False, False, None
+
+        if not returns_list:
+            return False, False, None
+
+        return self.pandas, self.polars, self.default_path
+
+
 class ModuleDefinition(BaseModel):
     """Definition for a single module or module group.
 
@@ -271,6 +420,11 @@ class DocumentConfig(BaseModel):
     module_split: ModuleSplitConfig = Field(
         default_factory=ModuleSplitConfig,
         description='Configuration for splitting endpoints into submodules.',
+    )
+
+    dataframe: DataFrameConfig = Field(
+        default_factory=DataFrameConfig,
+        description='Configuration for DataFrame conversion methods.',
     )
 
     @field_validator('source')

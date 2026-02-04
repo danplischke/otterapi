@@ -11,12 +11,14 @@ import os
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import _all, _name, _union_expr
+from otterapi.codegen.ast_utils import _all, _assign, _call, _name, _union_expr
 from otterapi.codegen.client_generator import (
+    DataFrameMethodConfig,
     EndpointInfo,
     generate_base_client_class,
     generate_client_stub,
 )
+from otterapi.codegen.dataframe_generator import generate_dataframe_module
 from otterapi.codegen.endpoints import async_request_fn, request_fn
 from otterapi.codegen.import_collector import ImportCollector
 from otterapi.codegen.schema_loader import SchemaLoader
@@ -559,9 +561,9 @@ class Codegen(OpenAPIProcessor):
     def _build_endpoint_file_body(
         self, baseurl: str, endpoints: list[Endpoint]
     ) -> tuple[list[ast.stmt], ImportCollector, set[str]]:
-        """Build the body of the endpoints file with delegating functions.
+        """Build the body of the endpoints file with standalone functions.
 
-        Generates thin wrapper functions that delegate to the Client class methods.
+        Generates standalone functions with full implementations that use the Client.
 
         Args:
             baseurl: The base URL for API requests (unused, kept for API compat).
@@ -572,7 +574,8 @@ class Codegen(OpenAPIProcessor):
         """
         from otterapi.codegen.endpoints import (
             build_default_client_code,
-            build_delegating_endpoint_fn,
+            build_standalone_dataframe_fn,
+            build_standalone_endpoint_fn,
         )
 
         body: list[ast.stmt] = []
@@ -583,16 +586,21 @@ class Codegen(OpenAPIProcessor):
         body.extend(client_stmts)
         import_collector.add_imports(client_imports)
 
-        # Add delegating endpoint functions
+        # Track if we need DataFrame type hints
+        has_dataframe_methods = False
+
+        # Add standalone endpoint functions
         endpoint_names = set()
         for endpoint in endpoints:
-            # Build sync delegating function
-            sync_fn, sync_imports = build_delegating_endpoint_fn(
+            # Build sync standalone function
+            sync_fn, sync_imports = build_standalone_endpoint_fn(
                 fn_name=endpoint.sync_fn_name,
-                client_method_name=endpoint.sync_fn_name,
+                method=endpoint.method,
+                path=endpoint.path,
                 parameters=endpoint.parameters,
                 request_body_info=endpoint.request_body,
                 response_type=endpoint.response_type,
+                response_infos=endpoint.response_infos,
                 docs=endpoint.description,
                 is_async=False,
             )
@@ -600,19 +608,125 @@ class Codegen(OpenAPIProcessor):
             body.append(sync_fn)
             import_collector.add_imports(sync_imports)
 
-            # Build async delegating function
-            async_fn, async_imports = build_delegating_endpoint_fn(
+            # Build async standalone function
+            async_fn, async_imports = build_standalone_endpoint_fn(
                 fn_name=endpoint.async_fn_name,
-                client_method_name=endpoint.async_fn_name,
+                method=endpoint.method,
+                path=endpoint.path,
                 parameters=endpoint.parameters,
                 request_body_info=endpoint.request_body,
                 response_type=endpoint.response_type,
+                response_infos=endpoint.response_infos,
                 docs=endpoint.description,
                 is_async=True,
             )
             endpoint_names.add(endpoint.async_fn_name)
             body.append(async_fn)
             import_collector.add_imports(async_imports)
+
+            # Generate DataFrame methods if configured
+            if self.config.dataframe.enabled:
+                df_config = self._get_dataframe_config(endpoint)
+
+                if df_config.generate_pandas:
+                    has_dataframe_methods = True
+                    # Sync pandas method
+                    pandas_fn_name = f'{endpoint.sync_fn_name}_df'
+                    pandas_fn, pandas_imports = build_standalone_dataframe_fn(
+                        fn_name=pandas_fn_name,
+                        method=endpoint.method,
+                        path=endpoint.path,
+                        parameters=endpoint.parameters,
+                        request_body_info=endpoint.request_body,
+                        library='pandas',
+                        default_path=df_config.path,
+                        docs=endpoint.description,
+                        is_async=False,
+                    )
+                    endpoint_names.add(pandas_fn_name)
+                    body.append(pandas_fn)
+                    import_collector.add_imports(pandas_imports)
+
+                    # Async pandas method
+                    async_pandas_fn_name = f'{endpoint.async_fn_name}_df'
+                    async_pandas_fn, async_pandas_imports = (
+                        build_standalone_dataframe_fn(
+                            fn_name=async_pandas_fn_name,
+                            method=endpoint.method,
+                            path=endpoint.path,
+                            parameters=endpoint.parameters,
+                            request_body_info=endpoint.request_body,
+                            library='pandas',
+                            default_path=df_config.path,
+                            docs=endpoint.description,
+                            is_async=True,
+                        )
+                    )
+                    endpoint_names.add(async_pandas_fn_name)
+                    body.append(async_pandas_fn)
+                    import_collector.add_imports(async_pandas_imports)
+
+                if df_config.generate_polars:
+                    has_dataframe_methods = True
+                    # Sync polars method
+                    polars_fn_name = f'{endpoint.sync_fn_name}_pl'
+                    polars_fn, polars_imports = build_standalone_dataframe_fn(
+                        fn_name=polars_fn_name,
+                        method=endpoint.method,
+                        path=endpoint.path,
+                        parameters=endpoint.parameters,
+                        request_body_info=endpoint.request_body,
+                        library='polars',
+                        default_path=df_config.path,
+                        docs=endpoint.description,
+                        is_async=False,
+                    )
+                    endpoint_names.add(polars_fn_name)
+                    body.append(polars_fn)
+                    import_collector.add_imports(polars_imports)
+
+                    # Async polars method
+                    async_polars_fn_name = f'{endpoint.async_fn_name}_pl'
+                    async_polars_fn, async_polars_imports = (
+                        build_standalone_dataframe_fn(
+                            fn_name=async_polars_fn_name,
+                            method=endpoint.method,
+                            path=endpoint.path,
+                            parameters=endpoint.parameters,
+                            request_body_info=endpoint.request_body,
+                            library='polars',
+                            default_path=df_config.path,
+                            docs=endpoint.description,
+                            is_async=True,
+                        )
+                    )
+                    endpoint_names.add(async_polars_fn_name)
+                    body.append(async_polars_fn)
+                    import_collector.add_imports(async_polars_imports)
+
+        # Add TYPE_CHECKING block for DataFrame type hints if needed
+        if has_dataframe_methods:
+            import_collector.add_imports({'typing': {'TYPE_CHECKING'}})
+            type_checking_block = ast.If(
+                test=_name('TYPE_CHECKING'),
+                body=[
+                    ast.Import(names=[ast.alias(name='pandas', asname='pd')]),
+                    ast.Import(names=[ast.alias(name='polars', asname='pl')]),
+                ],
+                orelse=[],
+            )
+            body.insert(0, type_checking_block)
+
+            # Add dataframe helper imports
+            dataframe_import = ast.ImportFrom(
+                module='._dataframe',
+                names=[
+                    ast.alias(name='to_pandas', asname=None),
+                    ast.alias(name='to_polars', asname=None),
+                ],
+                level=0,
+            )
+            body.insert(0, dataframe_import)
 
         return body, import_collector, endpoint_names
 
@@ -743,11 +857,21 @@ class Codegen(OpenAPIProcessor):
         body: list[ast.stmt] = []
         all_names: list[str] = []
 
-        # Get endpoint names
+        # Get endpoint names (including DataFrame methods if configured)
         endpoint_names = []
         for endpoint in endpoints:
             endpoint_names.append(endpoint.sync_fn_name)
             endpoint_names.append(endpoint.async_fn_name)
+
+            # Add DataFrame method names if configured
+            if self.config.dataframe.enabled:
+                df_config = self._get_dataframe_config(endpoint)
+                if df_config.generate_pandas:
+                    endpoint_names.append(f'{endpoint.sync_fn_name}_df')
+                    endpoint_names.append(f'{endpoint.async_fn_name}_df')
+                if df_config.generate_polars:
+                    endpoint_names.append(f'{endpoint.sync_fn_name}_pl')
+                    endpoint_names.append(f'{endpoint.async_fn_name}_pl')
 
         # Import endpoints from endpoints.py
         endpoints_file_stem = self.config.endpoints_file.replace('.py', '')
@@ -842,6 +966,7 @@ class Codegen(OpenAPIProcessor):
             models_file=models_file,
             models_import_path=self.config.models_import_path,
             client_class_name=client_class_name,
+            dataframe_config=self.config.dataframe,
         )
 
         emitter.emit(
@@ -878,6 +1003,7 @@ class Codegen(OpenAPIProcessor):
         Generates:
         - _client.py: Always regenerated, contains BaseClient class
         - client.py: Created once if missing, user can customize
+        - _dataframe.py: Generated if DataFrame methods are enabled
 
         Args:
             directory: Output directory.
@@ -890,10 +1016,19 @@ class Codegen(OpenAPIProcessor):
         # Convert endpoints to EndpointInfo for client generation
         endpoint_infos = self._endpoints_to_info(endpoints)
 
-        # Generate base client class
+        # Check if any endpoint has DataFrame methods
+        has_dataframe_methods = any(
+            ep.dataframe_config.generate_pandas or ep.dataframe_config.generate_polars
+            for ep in endpoint_infos
+        )
+
+        # Generate _dataframe.py if needed
+        if has_dataframe_methods:
+            generate_dataframe_module(directory)
+
+        # Generate base client class (infrastructure only, no endpoint methods)
         class_ast, client_imports = generate_base_client_class(
             class_name=base_client_name,
-            endpoints=endpoint_infos,
             default_base_url=base_url,
             default_timeout=30.0,
         )
@@ -903,16 +1038,21 @@ class Codegen(OpenAPIProcessor):
         import_collector = ImportCollector()
         import_collector.add_imports(client_imports)
 
-        # Add model imports
-        model_names = self._collect_used_model_names(endpoints)
-        if model_names:
-            models_file = directory / self.config.models_file
-            model_import = self._create_model_import(models_file, model_names)
-            body.append(model_import)
+        # No model imports needed in _client.py anymore - models are imported in module files
 
         # Add other imports
         for import_stmt in import_collector.to_ast():
             body.insert(0, import_stmt)
+
+        # Add TypeVar definition: T = TypeVar('T')
+        typevar_def = _assign(
+            _name('T'),
+            _call(
+                func=_name('TypeVar'),
+                args=[ast.Constant(value='T')],
+            ),
+        )
+        body.append(typevar_def)
 
         # Add __all__ export
         body.append(_all([base_client_name]))
@@ -938,6 +1078,9 @@ class Codegen(OpenAPIProcessor):
         """Convert Endpoint objects to EndpointInfo for client generation."""
         infos = []
         for ep in endpoints:
+            # Determine DataFrame configuration for this endpoint
+            dataframe_config = self._get_dataframe_config(ep)
+
             info = EndpointInfo(
                 name=ep.fn.name,
                 async_name=ep.async_fn.name,
@@ -948,6 +1091,63 @@ class Codegen(OpenAPIProcessor):
                 response_type=ep.response_type,
                 response_infos=ep.response_infos,
                 description=ep.description,
+                dataframe_config=dataframe_config,
             )
             infos.append(info)
         return infos
+
+    def _get_dataframe_config(self, endpoint: Endpoint) -> DataFrameMethodConfig:
+        """Get the DataFrame method configuration for an endpoint.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            DataFrameMethodConfig with generation flags and path.
+        """
+        df_config = self.config.dataframe
+
+        if not df_config.enabled:
+            return DataFrameMethodConfig()
+
+        # Check if this endpoint returns a list type
+        returns_list = self._endpoint_returns_list(endpoint)
+
+        # Get the sync function name for config lookup
+        endpoint_name = endpoint.fn.name
+
+        # Use the config method to determine what to generate
+        gen_pandas, gen_polars, path = df_config.should_generate_for_endpoint(
+            endpoint_name=endpoint_name,
+            returns_list=returns_list,
+        )
+
+        return DataFrameMethodConfig(
+            generate_pandas=gen_pandas,
+            generate_polars=gen_polars,
+            path=path,
+        )
+
+    def _endpoint_returns_list(self, endpoint: Endpoint) -> bool:
+        """Check if an endpoint returns a list type.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            True if the endpoint returns a list, False otherwise.
+        """
+        if not endpoint.response_type:
+            return False
+
+        response_type = endpoint.response_type
+
+        # Check the annotation AST for list type
+        # Array types have annotation_ast as a Subscript with value.id='list'
+        if response_type.annotation_ast:
+            ann = response_type.annotation_ast
+            if isinstance(ann, ast.Subscript):
+                if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
+                    return True
+
+        return False

@@ -346,6 +346,121 @@ documents:
 
 ---
 
+## 📊 DataFrame Conversion
+
+OtterAPI can generate additional methods that return pandas or polars DataFrames directly, making it easy to analyze API responses.
+
+### Enabling DataFrame Methods
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    dataframe:
+      enabled: true
+      pandas: true      # Generate _df methods (default: true when enabled)
+      polars: true      # Generate _pl methods (default: false)
+```
+
+### Generated Methods
+
+When enabled, endpoints that return lists get additional DataFrame methods:
+
+| Original Method | Pandas Method | Polars Method |
+|-----------------|---------------|---------------|
+| `get_users()` | `get_users_df()` | `get_users_pl()` |
+| `aget_users()` | `aget_users_df()` | `aget_users_pl()` |
+
+### Basic Usage
+
+```python
+from client import find_pets_by_status, find_pets_by_status_df, find_pets_by_status_pl
+
+# Get as Pydantic models (existing behavior)
+pets = find_pets_by_status("available")
+for pet in pets:
+    print(f"{pet.id}: {pet.name}")
+
+# Get as pandas DataFrame
+pdf = find_pets_by_status_df("available")
+print(pdf.head())
+print(pdf.describe())
+
+# Get as polars DataFrame
+plf = find_pets_by_status_pl("available")
+print(plf.schema)
+print(plf.head())
+```
+
+### Handling Nested Responses
+
+For APIs that return data nested under a key (e.g., `{"data": {"users": [...]}}`):
+
+```yaml
+dataframe:
+  enabled: true
+  pandas: true
+  polars: true
+  default_path: "data.items"      # Default path for all endpoints
+  endpoints:
+    get_users:
+      path: "data.users"          # Override for specific endpoint
+    get_analytics:
+      path: "response.events"
+```
+
+You can also override the path at runtime:
+
+```python
+# Use configured path
+df = get_users_df()
+
+# Override path at call time
+df = get_users_df(path="response.data.users")
+```
+
+### Selective Generation
+
+Control which endpoints get DataFrame methods:
+
+```yaml
+dataframe:
+  enabled: true
+  pandas: true
+  polars: true
+  include_all: false              # Don't generate for all endpoints
+  endpoints:
+    list_users:
+      enabled: true               # Only generate for this endpoint
+    get_analytics:
+      enabled: true
+      path: "events"
+      polars: true
+      pandas: false               # Only polars for this endpoint
+```
+
+### DataFrame Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable DataFrame method generation |
+| `pandas` | bool | `true` | Generate `_df` methods (pandas) |
+| `polars` | bool | `false` | Generate `_pl` methods (polars) |
+| `default_path` | string | `null` | Default JSON path for extracting data |
+| `include_all` | bool | `true` | Generate for all list-returning endpoints |
+| `endpoints` | object | `{}` | Per-endpoint configuration overrides |
+
+### Per-Endpoint Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | inherits | Override whether to generate methods |
+| `path` | string | inherits | JSON path to extract data |
+| `pandas` | bool | inherits | Override pandas generation |
+| `polars` | bool | inherits | Override polars generation |
+
+---
+
 ## 📖 Using Generated Code
 
 ### Direct Function Imports
