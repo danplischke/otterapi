@@ -86,7 +86,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --group dev --group test
 
       - name: Run tests with coverage
         run: uv run pytest otterapi/tests/ -v --cov=otterapi --cov-report=xml --cov-report=term-missing
