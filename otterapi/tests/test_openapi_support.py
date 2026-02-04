@@ -609,5 +609,8 @@ class TestCaching:
 
         loader = SchemaLoader(resolve_external_refs=True, base_path=temp_dir)
 
+        # Load the spec to trigger external ref resolution
+        loader.load(str(temp_dir / 'api.json'))
+
         # Should have cached the Pet.json file
         assert len(loader._external_cache) >= 1

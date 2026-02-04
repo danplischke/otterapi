@@ -1,7 +1,5 @@
 """Tests for OpenAPI version upgrade functionality."""
 
-import pytest
-
 from otterapi.openapi.v3_1.v3_1 import OpenAPI as OpenAPI31
 from otterapi.openapi.v3_2.v3_2 import OpenAPI as OpenAPI32
 

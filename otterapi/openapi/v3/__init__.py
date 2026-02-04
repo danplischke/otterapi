@@ -1,4 +1,5 @@
 from .v3 import (
+    XML,
     APIKeySecurityScheme,
     AuthorizationCodeOAuthFlow,
     Callback,
@@ -61,7 +62,6 @@ from .v3 import (
     Type2,
     Type4,
     Type5,
-    XML,
 )
 
 __all__ = [
@@ -129,4 +129,3 @@ __all__ = [
     'Type5',
     'XML',
 ]
-

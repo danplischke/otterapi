@@ -1,4 +1,5 @@
 from .v3_1 import (
+    XML,
     APIKeySecurityScheme,
     AuthorizationCodeOAuthFlow,
     Callback,
@@ -62,7 +63,6 @@ from .v3_1 import (
     Type4,
     Type5,
     Webhook,
-    XML,
 )
 
 __all__ = [
@@ -131,4 +131,3 @@ __all__ = [
     'Webhook',
     'XML',
 ]
-
