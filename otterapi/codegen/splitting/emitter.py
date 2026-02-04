@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 from upath import UPath
 
 from otterapi.codegen.ast_utils import _all, _name
+from otterapi.codegen.builders.model_collector import collect_used_model_names
+from otterapi.codegen.dataframe_utils import get_dataframe_config_for_endpoint
 from otterapi.codegen.import_collector import ImportCollector
 from otterapi.codegen.utils import write_mod
 
@@ -417,41 +419,15 @@ class SplitModuleEmitter:
 
         Returns:
             Tuple of (generate_pandas, generate_polars, path).
+
+        Note:
+            This method delegates to get_dataframe_config_for_endpoint() from dataframe_utils.
         """
         if not self.dataframe_config or not self.dataframe_config.enabled:
             return False, False, None
 
-        # Check if endpoint returns a list
-        returns_list = self._endpoint_returns_list(endpoint)
-
-        return self.dataframe_config.should_generate_for_endpoint(
-            endpoint_name=endpoint.sync_fn_name,
-            returns_list=returns_list,
-        )
-
-    def _endpoint_returns_list(self, endpoint: Endpoint) -> bool:
-        """Check if an endpoint returns a list type.
-
-        Args:
-            endpoint: The endpoint to check.
-
-        Returns:
-            True if the endpoint returns a list, False otherwise.
-        """
-        if not endpoint.response_type:
-            return False
-
-        response_type = endpoint.response_type
-
-        # Check the annotation AST for list type
-        # Array types have annotation_ast as a Subscript with value.id='list'
-        if response_type.annotation_ast:
-            ann = response_type.annotation_ast
-            if isinstance(ann, ast.Subscript):
-                if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
-                    return True
-
-        return False
+        config = get_dataframe_config_for_endpoint(endpoint, self.dataframe_config)
+        return config.generate_pandas, config.generate_polars, config.path
 
     def _create_client_import(
         self,
@@ -487,28 +463,11 @@ class SplitModuleEmitter:
 
         Returns:
             Set of model names used.
+
+        Note:
+            This method delegates to collect_used_model_names() from builders.model_collector.
         """
-        # Get all model names that have implementations
-        available_models = {
-            type_.name
-            for type_ in self._typegen_types.values()
-            if type_.name and type_.implementation_ast
-        }
-
-        used_models: set[str] = set()
-
-        class NameCollector(ast.NodeVisitor):
-            def visit_Name(self, node: ast.Name) -> None:
-                if node.id in available_models:
-                    used_models.add(node.id)
-                self.generic_visit(node)
-
-        collector = NameCollector()
-        for endpoint in endpoints:
-            collector.visit(endpoint.sync_ast)
-            collector.visit(endpoint.async_ast)
-
-        return used_models
+        return collect_used_model_names(endpoints, self._typegen_types)
 
     def _create_model_import(
         self,

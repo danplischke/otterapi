@@ -18,21 +18,16 @@ from otterapi.codegen.ast_utils import (
     _subscript,
     _union_expr,
 )
+from otterapi.codegen.builders.parameter_builder import ParameterASTBuilder
+
+# Re-export DataFrameMethodConfig from dataframe_utils for backward compatibility
+from otterapi.codegen.dataframe_utils import DataFrameMethodConfig
 
 if TYPE_CHECKING:
     from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type
 
 # Type alias for import dictionaries
 ImportDict = dict[str, set[str]]
-
-
-@dataclass
-class DataFrameMethodConfig:
-    """Configuration for DataFrame method generation."""
-
-    generate_pandas: bool = False
-    generate_polars: bool = False
-    path: str | None = None
 
 
 @dataclass
@@ -907,84 +902,45 @@ def _build_dataframe_endpoint_method(
 
 
 def _build_path_expr(path: str, parameters: list['Parameter'] | None) -> ast.expr:
-    """Build the path expression with parameter substitution."""
-    if not parameters:
-        return ast.Constant(value=path)
+    """Build the path expression with parameter substitution.
 
-    path_params = {p.name: p.name_sanitized for p in parameters if p.location == 'path'}
-    if not path_params:
-        return ast.Constant(value=path)
-
-    # Build f-string
-    import re
-
-    pattern = r'\{([^}]+)\}'
-    parts = re.split(pattern, path)
-    values: list[ast.expr] = []
-
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            if part:
-                values.append(ast.Constant(value=part))
-        else:
-            sanitized = path_params.get(part, part)
-            values.append(ast.FormattedValue(value=_name(sanitized), conversion=-1))
-
-    if len(values) == 1 and isinstance(values[0], ast.Constant):
-        return values[0]
-
-    return ast.JoinedStr(values=values)
+    Note:
+        This function delegates to ParameterASTBuilder.build_path_expr().
+    """
+    return ParameterASTBuilder.build_path_expr(path, parameters or [])
 
 
 def _build_query_params(parameters: list['Parameter'] | None) -> ast.Dict | None:
-    """Build query parameters dict."""
+    """Build query parameters dict.
+
+    Note:
+        This function delegates to ParameterASTBuilder.build_query_params().
+    """
     if not parameters:
         return None
-
-    query_params = [p for p in parameters if p.location == 'query']
-    if not query_params:
-        return None
-
-    return ast.Dict(
-        keys=[ast.Constant(value=p.name) for p in query_params],
-        values=[_name(p.name_sanitized) for p in query_params],
-    )
+    return ParameterASTBuilder.build_query_params(parameters)
 
 
 def _build_header_params(parameters: list['Parameter'] | None) -> ast.Dict | None:
-    """Build header parameters dict."""
+    """Build header parameters dict.
+
+    Note:
+        This function delegates to ParameterASTBuilder.build_header_params().
+    """
     if not parameters:
         return None
-
-    header_params = [p for p in parameters if p.location == 'header']
-    if not header_params:
-        return None
-
-    return ast.Dict(
-        keys=[ast.Constant(value=p.name) for p in header_params],
-        values=[_name(p.name_sanitized) for p in header_params],
-    )
+    return ParameterASTBuilder.build_header_params(parameters)
 
 
 def _build_body_expr(
     request_body: 'RequestBodyInfo',
 ) -> tuple[ast.expr | None, str | None]:
-    """Build the body expression for the request."""
-    if not request_body:
-        return None, None
+    """Build the body expression for the request.
 
-    body_name = 'body'
-
-    if (
-        request_body.is_json
-        and request_body.type
-        and request_body.type.type in ('model', 'root')
-    ):
-        body_expr = _call(_attr(_name(body_name), 'model_dump'))
-    else:
-        body_expr = _name(body_name)
-
-    return body_expr, request_body.httpx_param_name
+    Note:
+        This function delegates to ParameterASTBuilder.build_body_expr().
+    """
+    return ParameterASTBuilder.build_body_expr(request_body)
 
 
 def _build_response_processing(

@@ -31,6 +31,13 @@ from otterapi.codegen.ast_utils import (
     _subscript,
     _union_expr,
 )
+from otterapi.codegen.builders.endpoint_factory import (
+    build_delegating_dataframe_fn as _factory_build_delegating_dataframe_fn,
+    build_delegating_endpoint_fn as _factory_build_delegating_endpoint_fn,
+    build_standalone_dataframe_fn as _factory_build_standalone_dataframe_fn,
+    build_standalone_endpoint_fn as _factory_build_standalone_endpoint_fn,
+)
+from otterapi.codegen.builders.parameter_builder import ParameterASTBuilder
 from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type
 
 # Type alias for import dictionaries used throughout this module
@@ -511,15 +518,11 @@ def build_header_params(
 
     Returns:
         An AST Dict node for header parameters, or None if no header params.
-    """
-    header_params = [p for p in parameters if p.location == 'header']
-    if not header_params:
-        return None
 
-    return ast.Dict(
-        keys=[ast.Constant(value=param.name) for param in header_params],
-        values=[_name(param.name_sanitized) for param in header_params],
-    )
+    Note:
+        This function delegates to ParameterASTBuilder.build_header_params().
+    """
+    return ParameterASTBuilder.build_header_params(parameters)
 
 
 def build_query_params(
@@ -532,15 +535,11 @@ def build_query_params(
 
     Returns:
         An AST Dict node for query parameters, or None if no query params.
-    """
-    query_params = [p for p in parameters if p.location == 'query']
-    if not query_params:
-        return None
 
-    return ast.Dict(
-        keys=[ast.Constant(value=param.name) for param in query_params],
-        values=[_name(param.name_sanitized) for param in query_params],
-    )
+    Note:
+        This function delegates to ParameterASTBuilder.build_query_params().
+    """
+    return ParameterASTBuilder.build_query_params(parameters)
 
 
 def build_path_params(
@@ -558,34 +557,11 @@ def build_path_params(
 
     Returns:
         An AST expression (JoinedStr for f-strings, Constant for static paths).
+
+    Note:
+        This function delegates to ParameterASTBuilder.build_path_expr().
     """
-    path_params = {p.name: p.name_sanitized for p in parameters if p.location == 'path'}
-
-    # Check if there are any path parameters
-    if not path_params:
-        return ast.Constant(value=path)
-
-    # Build an f-string with interpolated path parameters
-    import re
-
-    pattern = r'\{([^}]+)\}'
-    parts = re.split(pattern, path)
-    values: list[ast.expr] = []
-
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            # Static part
-            if part:
-                values.append(ast.Constant(value=part))
-        else:
-            # Parameter placeholder
-            sanitized = path_params.get(part, part)
-            values.append(ast.FormattedValue(value=_name(sanitized), conversion=-1))
-
-    if len(values) == 1 and isinstance(values[0], ast.Constant):
-        return values[0]
-
-    return ast.JoinedStr(values=values)
+    return ParameterASTBuilder.build_path_expr(path, parameters)
 
 
 def build_body_params(
@@ -606,36 +582,11 @@ def build_body_params(
         A tuple of (body_expr, httpx_param_name) where:
         - body_expr: AST expression for the body value, or None
         - httpx_param_name: The httpx keyword to use ('json', 'data', 'files', 'content')
+
+    Note:
+        This function delegates to ParameterASTBuilder.build_body_expr().
     """
-    if not body:
-        return None, None
-
-    body_name = 'body'
-
-    # For JSON content with model types, use model_dump()
-    if body.is_json and body.type and body.type.type in ('model', 'root'):
-        body_expr = _call(
-            func=_attr(_name(body_name), 'model_dump'),
-            args=[],
-        )
-    elif body.is_multipart:
-        # For multipart, the body should be a dict of file tuples
-        # The user passes files as {'field': (filename, content, content_type)}
-        body_expr = _name(body_name)
-    elif body.is_form:
-        # For form data, pass as dict
-        if body.type and body.type.type in ('model', 'root'):
-            body_expr = _call(
-                func=_attr(_name(body_name), 'model_dump'),
-                args=[],
-            )
-        else:
-            body_expr = _name(body_name)
-    else:
-        # For other content types or primitive types, use the value directly
-        body_expr = _name(body_name)
-
-    return body_expr, body.httpx_param_name
+    return ParameterASTBuilder.build_body_expr(body)
 
 
 def prepare_call_from_parameters(
@@ -655,16 +606,11 @@ def prepare_call_from_parameters(
 
     Returns:
         A tuple of (query_params, header_params, body_expr, body_param_name, path_expr).
+
+    Note:
+        This function delegates to ParameterASTBuilder.prepare_all_params().
     """
-    if not parameters:
-        parameters = []
-
-    query_params = build_query_params(parameters)
-    header_params = build_header_params(parameters)
-    body_expr, body_param_name = build_body_params(request_body_info)
-    path_expr = build_path_params(path, parameters)
-
-    return query_params, header_params, body_expr, body_param_name, path_expr
+    return ParameterASTBuilder.prepare_all_params(parameters, path, request_body_info)
 
 
 def _build_endpoint_fn(
@@ -916,88 +862,20 @@ def build_delegating_endpoint_fn(
 
     Returns:
         A tuple of (function_ast, imports).
+
+    Note:
+        This function delegates to the EndpointFunctionFactory via
+        builders.endpoint_factory.build_delegating_endpoint_fn().
     """
-    imports: ImportDict = {}
-    func_builder = _async_func if is_async else _func
-
-    # Build function arguments from parameters
-    if parameters:
-        args, kwonlyargs, kw_defaults, param_imports = get_parameters(parameters)
-        imports.update(param_imports)
-    else:
-        args, kwonlyargs, kw_defaults = [], [], []
-
-    # Add body parameter if present
-    if request_body_info:
-        body_annotation = (
-            request_body_info.type.annotation_ast
-            if request_body_info.type
-            else _name('Any')
-        )
-        if request_body_info.type:
-            imports.update(request_body_info.type.annotation_imports)
-        else:
-            imports.setdefault('typing', set()).add('Any')
-
-        body_arg = _argument('body', body_annotation)
-        if request_body_info.required:
-            args.append(body_arg)
-        else:
-            kwonlyargs.append(body_arg)
-            kw_defaults.append(ast.Constant(value=None))
-
-    # Build the call arguments to pass to the client method
-    call_args: list[ast.expr] = []
-    call_keywords: list[ast.keyword] = []
-
-    # Add positional args (required parameters)
-    for arg in args:
-        call_args.append(_name(arg.arg))
-
-    # Add keyword args (optional parameters)
-    for kwarg in kwonlyargs:
-        call_keywords.append(ast.keyword(arg=kwarg.arg, value=_name(kwarg.arg)))
-
-    # Add **kwargs pass-through
-    call_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
-
-    # Build the client method call: _get_client().method_name(args, **kwargs)
-    client_call = _call(
-        func=_attr(_call(_name('_get_client')), client_method_name),
-        args=call_args,
-        keywords=call_keywords,
+    return _factory_build_delegating_endpoint_fn(
+        fn_name=fn_name,
+        client_method_name=client_method_name,
+        parameters=parameters,
+        request_body_info=request_body_info,
+        response_type=response_type,
+        docs=docs,
+        is_async=is_async,
     )
-
-    if is_async:
-        client_call = ast.Await(value=client_call)
-
-    # Build function body
-    body: list[ast.stmt] = []
-
-    if docs:
-        body.append(ast.Expr(value=ast.Constant(value=clean_docstring(docs))))
-
-    body.append(ast.Return(value=client_call))
-
-    # Build return type annotation
-    if response_type:
-        returns = response_type.annotation_ast
-        imports.update(response_type.annotation_imports)
-    else:
-        returns = _name('Any')
-        imports.setdefault('typing', set()).add('Any')
-
-    func_ast = func_builder(
-        name=fn_name,
-        args=args,
-        body=body,
-        kwargs=_argument('kwargs', _name('dict')),
-        kwonlyargs=kwonlyargs,
-        kw_defaults=kw_defaults,
-        returns=returns,
-    )
-
-    return func_ast, imports
 
 
 def build_standalone_endpoint_fn(
@@ -1033,137 +911,22 @@ def build_standalone_endpoint_fn(
 
     Returns:
         A tuple of (function_ast, imports).
+
+    Note:
+        This function delegates to the EndpointFunctionFactory via
+        builders.endpoint_factory.build_standalone_endpoint_fn().
     """
-    imports: ImportDict = {}
-    func_builder = _async_func if is_async else _func
-    request_method = '_request_async' if is_async else '_request'
-
-    # Build function arguments from parameters
-    if parameters:
-        args, kwonlyargs, kw_defaults, param_imports = get_parameters(parameters)
-        imports.update(param_imports)
-    else:
-        args, kwonlyargs, kw_defaults = [], [], []
-
-    # Add body parameter if present
-    if request_body_info:
-        body_annotation = (
-            request_body_info.type.annotation_ast
-            if request_body_info.type
-            else _name('Any')
-        )
-        if request_body_info.type:
-            imports.update(request_body_info.type.annotation_imports)
-        else:
-            imports.setdefault('typing', set()).add('Any')
-
-        body_arg = _argument('body', body_annotation)
-        if request_body_info.required:
-            args.append(body_arg)
-        else:
-            kwonlyargs.append(body_arg)
-            kw_defaults.append(ast.Constant(value=None))
-
-    # Add optional client parameter (keyword-only)
-    kwonlyargs.append(
-        _argument(
-            'client',
-            _union_expr([_name('Client'), ast.Constant(value=None)]),
-        )
+    return _factory_build_standalone_endpoint_fn(
+        fn_name=fn_name,
+        method=method,
+        path=path,
+        parameters=parameters,
+        request_body_info=request_body_info,
+        response_type=response_type,
+        response_infos=response_infos,
+        docs=docs,
+        is_async=is_async,
     )
-    kw_defaults.append(ast.Constant(value=None))
-
-    # Build the path expression with parameter substitution
-    path_expr = build_path_params(path, parameters or [])
-
-    # Build query params dict
-    query_params = build_query_params(parameters or [])
-
-    # Build header params dict
-    header_params = build_header_params(parameters or [])
-
-    # Build body expression
-    body_expr, body_param_name = build_body_params(request_body_info)
-
-    # Build request call keywords
-    request_keywords: list[ast.keyword] = [
-        ast.keyword(arg='method', value=ast.Constant(value=method.lower())),
-        ast.keyword(arg='path', value=path_expr),
-    ]
-
-    if query_params:
-        request_keywords.append(ast.keyword(arg='params', value=query_params))
-
-    if header_params:
-        request_keywords.append(ast.keyword(arg='headers', value=header_params))
-
-    if body_expr and body_param_name:
-        request_keywords.append(ast.keyword(arg=body_param_name, value=body_expr))
-
-    # Add **kwargs pass-through
-    request_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
-
-    # Build function body
-    body: list[ast.stmt] = []
-
-    if docs:
-        body.append(ast.Expr(value=ast.Constant(value=clean_docstring(docs))))
-
-    # c = client or _get_client()
-    body.append(
-        _assign(
-            _name('c'),
-            ast.BoolOp(
-                op=ast.Or(),
-                values=[_name('client'), _call(_name('_get_client'))],
-            ),
-        )
-    )
-
-    # Build the request call: c._request(...) or c._request_async(...)
-    request_call = _call(
-        func=_attr('c', request_method),
-        keywords=request_keywords,
-    )
-
-    if is_async:
-        request_call = ast.Await(value=request_call)
-
-    # Handle response based on whether we have a response type
-    if response_type:
-        imports.update(response_type.annotation_imports)
-
-        # response = c._request(...)
-        body.append(_assign(_name('response'), request_call))
-
-        # return c._parse_response(response, ResponseType)
-        parse_method = '_parse_response_async' if is_async else '_parse_response'
-        parse_call = _call(
-            func=_attr('c', parse_method),
-            args=[_name('response'), response_type.annotation_ast],
-        )
-        if is_async:
-            parse_call = ast.Await(value=parse_call)
-        body.append(ast.Return(value=parse_call))
-
-        returns = response_type.annotation_ast
-    else:
-        # No response type - just return the response
-        body.append(ast.Return(value=request_call))
-        returns = _name('Any')
-        imports.setdefault('typing', set()).add('Any')
-
-    func_ast = func_builder(
-        name=fn_name,
-        args=args,
-        body=body,
-        kwargs=_argument('kwargs', _name('dict')),
-        kwonlyargs=kwonlyargs,
-        kw_defaults=kw_defaults,
-        returns=returns,
-    )
-
-    return func_ast, imports
 
 
 def build_standalone_dataframe_fn(
@@ -1209,151 +972,22 @@ def build_standalone_dataframe_fn(
 
     Returns:
         A tuple of (function_ast, imports).
+
+    Note:
+        This function delegates to the EndpointFunctionFactory via
+        builders.endpoint_factory.build_standalone_dataframe_fn().
     """
-    imports: ImportDict = {}
-    func_builder = _async_func if is_async else _func
-
-    # Determine return type and helper function
-    if library == 'pandas':
-        return_type_str = 'pd.DataFrame'
-        helper_fn = 'to_pandas'
-    else:
-        return_type_str = 'pl.DataFrame'
-        helper_fn = 'to_polars'
-
-    # Build function arguments from parameters
-    if parameters:
-        args, kwonlyargs, kw_defaults, param_imports = get_parameters(parameters)
-        imports.update(param_imports)
-    else:
-        args, kwonlyargs, kw_defaults = [], [], []
-
-    # Add body parameter if present
-    if request_body_info:
-        body_annotation = (
-            request_body_info.type.annotation_ast
-            if request_body_info.type
-            else _name('Any')
-        )
-        if request_body_info.type:
-            imports.update(request_body_info.type.annotation_imports)
-        else:
-            imports.setdefault('typing', set()).add('Any')
-
-        body_arg = _argument('body', body_annotation)
-        if request_body_info.required:
-            args.append(body_arg)
-        else:
-            kwonlyargs.append(body_arg)
-            kw_defaults.append(ast.Constant(value=None))
-
-    # Add path parameter (keyword-only, optional)
-    kwonlyargs.append(
-        _argument(
-            'path',
-            _union_expr([_name('str'), ast.Constant(value=None)]),
-        )
+    return _factory_build_standalone_dataframe_fn(
+        fn_name=fn_name,
+        method=method,
+        path=path,
+        parameters=parameters,
+        request_body_info=request_body_info,
+        library=library,
+        default_path=default_path,
+        docs=docs,
+        is_async=is_async,
     )
-    kw_defaults.append(ast.Constant(value=default_path))
-
-    # Add optional client parameter (keyword-only)
-    kwonlyargs.append(
-        _argument(
-            'client',
-            _union_expr([_name('Client'), ast.Constant(value=None)]),
-        )
-    )
-    kw_defaults.append(ast.Constant(value=None))
-
-    # Build the path expression with parameter substitution
-    path_expr = build_path_params(path, parameters or [])
-
-    # Build query params dict
-    query_params = build_query_params(parameters or [])
-
-    # Build header params dict
-    header_params = build_header_params(parameters or [])
-
-    # Build body expression
-    body_expr, body_param_name = build_body_params(request_body_info)
-
-    # Build request call keywords
-    request_keywords: list[ast.keyword] = [
-        ast.keyword(arg='method', value=ast.Constant(value=method.lower())),
-        ast.keyword(arg='path', value=path_expr),
-    ]
-
-    if query_params:
-        request_keywords.append(ast.keyword(arg='params', value=query_params))
-
-    if header_params:
-        request_keywords.append(ast.keyword(arg='headers', value=header_params))
-
-    if body_expr and body_param_name:
-        request_keywords.append(ast.keyword(arg=body_param_name, value=body_expr))
-
-    # Add **kwargs pass-through
-    request_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
-
-    # Build function body
-    body: list[ast.stmt] = []
-
-    # Build docstring with return type info
-    doc_content = docs or ''
-    doc_suffix = f'\n\nReturns:\n    {return_type_str}'
-    body.append(
-        ast.Expr(value=ast.Constant(value=clean_docstring(doc_content + doc_suffix)))
-    )
-
-    # c = client or _get_client()
-    body.append(
-        _assign(
-            _name('c'),
-            ast.BoolOp(
-                op=ast.Or(),
-                values=[_name('client'), _call(_name('_get_client'))],
-            ),
-        )
-    )
-
-    # Build the request call: c._request_json(...) or c._request_json_async(...)
-    request_json_method = '_request_json_async' if is_async else '_request_json'
-    request_call = _call(
-        func=_attr('c', request_json_method),
-        keywords=request_keywords,
-    )
-
-    if is_async:
-        request_call = ast.Await(value=request_call)
-
-    # data = c._request_json(...)
-    body.append(_assign(_name('data'), request_call))
-
-    # return to_pandas(data, path=path) or to_polars(data, path=path)
-    body.append(
-        ast.Return(
-            value=_call(
-                func=_name(helper_fn),
-                args=[_name('data')],
-                keywords=[ast.keyword(arg='path', value=_name('path'))],
-            )
-        )
-    )
-
-    # Return type is a string annotation for TYPE_CHECKING
-    returns = ast.Constant(value=return_type_str)
-
-    func_ast = func_builder(
-        name=fn_name,
-        args=args,
-        body=body,
-        kwargs=_argument('kwargs', _name('dict')),
-        kwonlyargs=kwonlyargs,
-        kw_defaults=kw_defaults,
-        returns=returns,
-    )
-
-    return func_ast, imports
 
 
 def build_default_client_code() -> tuple[list[ast.stmt], ImportDict]:
@@ -1457,99 +1091,18 @@ def build_delegating_dataframe_fn(
 
     Returns:
         A tuple of (function_ast, imports).
+
+    Note:
+        This function delegates to the EndpointFunctionFactory via
+        builders.endpoint_factory.build_delegating_dataframe_fn().
     """
-    imports: ImportDict = {}
-    func_builder = _async_func if is_async else _func
-
-    # Determine return type annotation
-    if library == 'pandas':
-        return_type_str = 'pd.DataFrame'
-    else:
-        return_type_str = 'pl.DataFrame'
-
-    # Build function arguments from parameters
-    if parameters:
-        args, kwonlyargs, kw_defaults, param_imports = get_parameters(parameters)
-        imports.update(param_imports)
-    else:
-        args, kwonlyargs, kw_defaults = [], [], []
-
-    # Add body parameter if present
-    if request_body_info:
-        body_annotation = (
-            request_body_info.type.annotation_ast
-            if request_body_info.type
-            else _name('Any')
-        )
-        if request_body_info.type:
-            imports.update(request_body_info.type.annotation_imports)
-        else:
-            imports.setdefault('typing', set()).add('Any')
-
-        body_arg = _argument('body', body_annotation)
-        if request_body_info.required:
-            args.append(body_arg)
-        else:
-            kwonlyargs.append(body_arg)
-            kw_defaults.append(ast.Constant(value=None))
-
-    # Add path parameter (keyword-only, optional)
-    kwonlyargs.append(
-        _argument(
-            'path',
-            _union_expr([_name('str'), ast.Constant(value=None)]),
-        )
+    return _factory_build_delegating_dataframe_fn(
+        fn_name=fn_name,
+        client_method_name=client_method_name,
+        parameters=parameters,
+        request_body_info=request_body_info,
+        library=library,
+        default_path=default_path,
+        docs=docs,
+        is_async=is_async,
     )
-    kw_defaults.append(ast.Constant(value=default_path))
-
-    # Build the call arguments to pass to the client method
-    call_args: list[ast.expr] = []
-    call_keywords: list[ast.keyword] = []
-
-    # Add positional args (required parameters)
-    for arg in args:
-        call_args.append(_name(arg.arg))
-
-    # Add keyword args (optional parameters)
-    for kwarg in kwonlyargs:
-        call_keywords.append(ast.keyword(arg=kwarg.arg, value=_name(kwarg.arg)))
-
-    # Add **kwargs pass-through
-    call_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
-
-    # Build the client method call: _get_client().method_name(args, **kwargs)
-    client_call = _call(
-        func=_attr(_call(_name('_get_client')), client_method_name),
-        args=call_args,
-        keywords=call_keywords,
-    )
-
-    if is_async:
-        client_call = ast.Await(value=client_call)
-
-    # Build function body
-    body: list[ast.stmt] = []
-
-    # Build docstring with return type info
-    doc_content = docs or ''
-    doc_suffix = f'\n\nReturns:\n    {return_type_str}'
-    body.append(
-        ast.Expr(value=ast.Constant(value=clean_docstring(doc_content + doc_suffix)))
-    )
-
-    body.append(ast.Return(value=client_call))
-
-    # Return type is a string annotation for TYPE_CHECKING
-    returns = ast.Constant(value=return_type_str)
-
-    func_ast = func_builder(
-        name=fn_name,
-        args=args,
-        body=body,
-        kwargs=_argument('kwargs', _name('dict')),
-        kwonlyargs=kwonlyargs,
-        kw_defaults=kw_defaults,
-        returns=returns,
-    )
-
-    return func_ast, imports
