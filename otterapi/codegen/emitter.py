@@ -169,8 +169,8 @@ class FileEmitter(CodeEmitter):
         imports: dict[str, set[str]] = {}
 
         for type_obj in types:
-            if type_obj.definition_ast:
-                body.append(type_obj.definition_ast)
+            if type_obj.implementation_ast:
+                body.append(type_obj.implementation_ast)
 
             # Collect imports from type
             if hasattr(type_obj, 'implementation_imports'):
@@ -414,8 +414,8 @@ class StringEmitter(CodeEmitter):
         body: list[ast.stmt] = []
 
         for type_obj in types:
-            if type_obj.definition_ast:
-                body.append(type_obj.definition_ast)
+            if type_obj.implementation_ast:
+                body.append(type_obj.implementation_ast)
 
         return self.emit_module(body, module_name)
 

@@ -691,12 +691,12 @@ class Codegen(OpenAPIProcessor):
 
             # Add dataframe helper imports
             dataframe_import = ast.ImportFrom(
-                module='._dataframe',
+                module='_dataframe',
                 names=[
                     ast.alias(name='to_pandas', asname=None),
                     ast.alias(name='to_polars', asname=None),
                 ],
-                level=0,
+                level=1,
             )
             body.insert(0, dataframe_import)
 

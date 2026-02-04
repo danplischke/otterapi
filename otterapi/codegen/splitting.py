@@ -855,12 +855,12 @@ class SplitModuleEmitter:
             body.insert(0, type_checking_block)
 
             dataframe_import = ast.ImportFrom(
-                module='._dataframe',
+                module='_dataframe',
                 names=[
                     ast.alias(name='to_pandas', asname=None),
                     ast.alias(name='to_polars', asname=None),
                 ],
-                level=0,
+                level=1,
             )
             body.insert(0, dataframe_import)
 
