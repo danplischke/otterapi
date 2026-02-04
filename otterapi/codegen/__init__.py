@@ -23,19 +23,50 @@ Example:
     >>> codegen.generate()
 """
 
+from otterapi.codegen.ast_utils import ImportCollector
 from otterapi.codegen.codegen import Codegen
+
+# Re-export from dataframes module
+from otterapi.codegen.dataframes import (
+    DataFrameMethodConfig,
+    generate_dataframe_module,
+    get_dataframe_config_for_endpoint,
+)
 from otterapi.codegen.emitter import CodeEmitter, FileEmitter, StringEmitter
-from otterapi.codegen.import_collector import ImportCollector
-from otterapi.codegen.schema_loader import SchemaLoader
-from otterapi.codegen.schema_resolver import SchemaResolver
-from otterapi.codegen.type_registry import TypeInfo, TypeRegistry
+
+# Re-export from endpoints module
+from otterapi.codegen.endpoints import (
+    DataFrameLibrary,
+    EndpointFunctionConfig,
+    EndpointFunctionFactory,
+    EndpointMode,
+    FunctionSignature,
+    FunctionSignatureBuilder,
+    ParameterASTBuilder,
+)
+from otterapi.codegen.schema import SchemaLoader, SchemaResolver
+
+# Re-export from splitting module
+from otterapi.codegen.splitting import (
+    EmittedModule,
+    ModuleMapResolver,
+    ModuleTree,
+    ModuleTreeBuilder,
+    ResolvedModule,
+    SplitModuleEmitter,
+    build_module_tree,
+)
 from otterapi.codegen.types import (
     Endpoint,
+    ModelNameCollector,
     Parameter,
     RequestBodyInfo,
     ResponseInfo,
     Type,
     TypeGenerator,
+    TypeInfo,
+    TypeRegistry,
+    collect_used_model_names,
 )
 
 __all__ = [
@@ -46,6 +77,8 @@ __all__ = [
     'Type',
     'TypeRegistry',
     'TypeInfo',
+    'ModelNameCollector',
+    'collect_used_model_names',
     # Schema handling
     'SchemaLoader',
     'SchemaResolver',
@@ -59,4 +92,24 @@ __all__ = [
     'FileEmitter',
     'StringEmitter',
     'ImportCollector',
+    # Endpoint building
+    'EndpointFunctionConfig',
+    'EndpointFunctionFactory',
+    'EndpointMode',
+    'DataFrameLibrary',
+    'FunctionSignature',
+    'FunctionSignatureBuilder',
+    'ParameterASTBuilder',
+    # DataFrame utilities
+    'DataFrameMethodConfig',
+    'generate_dataframe_module',
+    'get_dataframe_config_for_endpoint',
+    # Module splitting
+    'ModuleTree',
+    'ModuleTreeBuilder',
+    'ModuleMapResolver',
+    'ResolvedModule',
+    'EmittedModule',
+    'SplitModuleEmitter',
+    'build_module_tree',
 ]

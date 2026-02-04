@@ -6,7 +6,7 @@ used for organizing endpoints into a hierarchical structure.
 
 import ast
 
-from otterapi.codegen.splitting.tree import (
+from otterapi.codegen.splitting import (
     ModuleTree,
     ModuleTreeBuilder,
     build_module_tree,

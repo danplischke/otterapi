@@ -6,10 +6,7 @@ from OpenAPI specifications.
 
 import json
 import logging
-import os
-import sys
 import traceback
-from difflib import unified_diff
 from pathlib import Path
 from typing import Annotated
 
@@ -23,7 +20,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from otterapi.codegen.codegen import Codegen
-from otterapi.codegen.schema_loader import SchemaLoader
+from otterapi.codegen.schema import SchemaLoader
 from otterapi.config import CodegenConfig, DocumentConfig, get_config
 from otterapi.exceptions import OtterAPIError, SchemaLoadError, SchemaValidationError
 
@@ -417,7 +414,6 @@ def diff(
         otterapi diff ./api.yaml ./client
         otterapi diff https://api.example.com/openapi.json ./generated
     """
-    from otterapi.codegen.emitter import StringEmitter
 
     output_path = Path(output)
 

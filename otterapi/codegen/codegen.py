@@ -6,28 +6,32 @@ of Python client code from OpenAPI specifications.
 
 import ast
 import http
+import logging
 import os
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import _all, _assign, _call, _name
-from otterapi.codegen.builders.model_collector import collect_used_model_names
-from otterapi.codegen.client_generator import (
+from otterapi.codegen.ast_utils import (
+    ImportCollector,
+    _all,
+    _assign,
+    _call,
+    _name,
+    _union_expr,
+)
+from otterapi.codegen.client import (
     EndpointInfo,
     generate_base_client_class,
     generate_client_stub,
 )
-from otterapi.codegen.dataframe_generator import generate_dataframe_module
-from otterapi.codegen.dataframe_utils import (
+from otterapi.codegen.dataframes import (
     DataFrameMethodConfig,
     endpoint_returns_list,
+    generate_dataframe_module,
     get_dataframe_config_for_endpoint,
 )
 from otterapi.codegen.endpoints import async_request_fn, request_fn
-from otterapi.codegen.import_collector import ImportCollector
-from otterapi.codegen.processors.parameter_processor import ParameterProcessor
-from otterapi.codegen.processors.response_processor import ResponseProcessor
-from otterapi.codegen.schema_loader import SchemaLoader
+from otterapi.codegen.schema import SchemaLoader
 from otterapi.codegen.types import (
     Endpoint,
     Parameter,
@@ -35,15 +39,20 @@ from otterapi.codegen.types import (
     ResponseInfo,
     Type,
     TypeGenerator,
+    collect_used_model_names,
 )
 from otterapi.codegen.utils import (
     OpenAPIProcessor,
     sanitize_identifier,
+    sanitize_parameter_field_name,
     to_snake_case,
     write_mod,
 )
 from otterapi.config import DocumentConfig
 from otterapi.openapi.v3_2.v3_2 import OpenAPI as OpenAPIv3_2, Operation
+
+# Content types that should be treated as JSON
+JSON_CONTENT_TYPES = {'application/json', 'text/json'}
 
 HTTP_METHODS = [method.value.lower() for method in http.HTTPMethod]
 
@@ -114,10 +123,6 @@ class Codegen(OpenAPIProcessor):
         self.openapi = self._schema_loader.load(self.config.source)
         self.typegen = TypeGenerator(self.openapi)
 
-        # Initialize processors
-        self._response_processor = ResponseProcessor(self.typegen)
-        self._parameter_processor = ParameterProcessor(self.typegen, self)
-
     def _extract_response_info(self, operation: Operation) -> dict[int, ResponseInfo]:
         """Extract response information including content type from an operation.
 
@@ -130,11 +135,57 @@ class Codegen(OpenAPIProcessor):
 
         Returns:
             Dictionary mapping status codes to ResponseInfo objects.
-
-        Note:
-            This method delegates to ResponseProcessor.extract_response_info().
         """
-        return self._response_processor.extract_response_info(operation)
+        responses: dict[int, ResponseInfo] = {}
+
+        if not operation.responses:
+            return responses
+
+        for status_code_str, response in operation.responses.root.items():
+            try:
+                status_code = int(status_code_str)
+            except ValueError:
+                logging.debug(f'Skipping non-numeric status code: {status_code_str}')
+                continue
+
+            if not response.content:
+                continue
+
+            selected_content_type, selected_media_type = self._select_content_type(
+                response.content
+            )
+
+            response_type = None
+            if selected_media_type.schema_:
+                response_type = self.typegen.schema_to_type(
+                    selected_media_type.schema_,
+                    base_name=f'{sanitize_identifier(operation.operationId)}Response',
+                )
+
+            responses[status_code] = ResponseInfo(
+                status_code=status_code,
+                content_type=selected_content_type,
+                type=response_type,
+            )
+
+        return responses
+
+    def _select_content_type(self, content: dict) -> tuple[str, any]:
+        """Select the best content type from available options.
+
+        Prefers JSON content types for better type safety.
+
+        Args:
+            content: Dictionary mapping content types to media type objects.
+
+        Returns:
+            Tuple of (selected_content_type, selected_media_type).
+        """
+        for content_type, media_type in content.items():
+            if content_type in JSON_CONTENT_TYPES or content_type.endswith('+json'):
+                return content_type, media_type
+
+        return next(iter(content.items()))
 
     def _create_response_union(self, types: list[Type]) -> Type:
         """Create a union type from multiple response types.
@@ -144,11 +195,56 @@ class Codegen(OpenAPIProcessor):
 
         Returns:
             A union Type combining all the input types.
-
-        Note:
-            This method delegates to ResponseProcessor.create_response_union().
         """
-        return self._response_processor.create_response_union(types)
+        union_type = Type(
+            None,
+            None,
+            annotation_ast=_union_expr([t.annotation_ast for t in types]),
+            implementation_ast=None,
+            type='primitive',
+        )
+        union_type.copy_imports_from_sub_types(types)
+        union_type.add_annotation_import('typing', 'Union')
+        return union_type
+
+    def _collect_non_json_types(self, response_list: list[ResponseInfo]) -> list[Type]:
+        """Collect non-JSON response types (bytes, str, Response)."""
+        non_json_types = []
+        has_binary = False
+        has_text = False
+        has_raw = False
+
+        for r in response_list:
+            if r.is_binary and not has_binary:
+                bytes_type = Type(
+                    reference=None,
+                    name=None,
+                    type='primitive',
+                    annotation_ast=_name('bytes'),
+                )
+                non_json_types.append(bytes_type)
+                has_binary = True
+            elif r.is_text and not has_text:
+                str_type = Type(
+                    reference=None,
+                    name=None,
+                    type='primitive',
+                    annotation_ast=_name('str'),
+                )
+                non_json_types.append(str_type)
+                has_text = True
+            elif r.is_raw and not has_raw:
+                response_type = Type(
+                    reference=None,
+                    name=None,
+                    type='primitive',
+                    annotation_ast=_name('Response'),
+                )
+                response_type.add_annotation_import('httpx', 'Response')
+                non_json_types.append(response_type)
+                has_raw = True
+
+        return non_json_types
 
     def _get_response_models(
         self, operation: Operation
@@ -162,11 +258,25 @@ class Codegen(OpenAPIProcessor):
             A tuple of (response_infos, response_type) where:
             - response_infos: List of ResponseInfo objects for all status codes
             - response_type: The unified response type (single or union), or None
-
-        Note:
-            This method delegates to ResponseProcessor.get_response_models().
         """
-        return self._response_processor.get_response_models(operation)
+        responses = self._extract_response_info(operation)
+
+        if not responses:
+            return [], None
+
+        response_list = list(responses.values())
+
+        json_types = [r.type for r in response_list if r.is_json and r.type]
+        non_json_types = self._collect_non_json_types(response_list)
+
+        all_types = json_types + non_json_types
+
+        if len(all_types) == 0:
+            return response_list, None
+        elif len(all_types) == 1:
+            return response_list, all_types[0]
+        else:
+            return response_list, self._create_response_union(all_types)
 
     def _extract_operation_parameters(self, operation: Operation) -> list[Parameter]:
         """Extract path, query, header, and cookie parameters from an operation.
@@ -176,31 +286,58 @@ class Codegen(OpenAPIProcessor):
 
         Returns:
             List of Parameter objects for path/query/header/cookie parameters.
-
-        Note:
-            This method delegates to ParameterProcessor.extract_operation_parameters().
         """
-        return self._parameter_processor.extract_operation_parameters(operation)
+        params = []
+        for param in operation.parameters or []:
+            param_type = None
+            if param.schema_:
+                param_type = self.typegen.schema_to_type(param.schema_)
+
+            params.append(
+                Parameter(
+                    name=param.name,
+                    name_sanitized=sanitize_parameter_field_name(param.name),
+                    location=param.in_,
+                    required=param.required or False,
+                    type=param_type,
+                    description=param.description,
+                )
+            )
+        return params
 
     def _extract_request_body(self, operation: Operation) -> RequestBodyInfo | None:
         """Extract request body information from an operation.
-
-        Handles different content types including:
-        - application/json: JSON body with schema validation
-        - multipart/form-data: File uploads and form data
-        - application/x-www-form-urlencoded: URL-encoded form data
-        - application/octet-stream: Binary data
 
         Args:
             operation: The OpenAPI operation to extract request body from.
 
         Returns:
             RequestBodyInfo object with content type and schema, or None if no body exists.
-
-        Note:
-            This method delegates to ParameterProcessor.extract_request_body().
         """
-        return self._parameter_processor.extract_request_body(operation)
+        if not operation.requestBody:
+            return None
+
+        body, _ = self._resolve_reference(operation.requestBody)
+        if not body.content:
+            return None
+
+        selected_content_type, selected_media_type = self._select_content_type(
+            body.content
+        )
+
+        body_type = None
+        if selected_media_type.schema_:
+            body_type = self.typegen.schema_to_type(
+                selected_media_type.schema_,
+                base_name=f'{sanitize_identifier(operation.operationId)}RequestBody',
+            )
+
+        return RequestBodyInfo(
+            content_type=selected_content_type,
+            type=body_type,
+            required=body.required or False,
+            description=body.description,
+        )
 
     def _get_param_model(
         self, operation: Operation
@@ -214,11 +351,11 @@ class Codegen(OpenAPIProcessor):
             A tuple of (parameters, request_body_info) where:
             - parameters: List of Parameter objects (path, query, header)
             - request_body_info: RequestBodyInfo object or None
-
-        Note:
-            This method delegates to ParameterProcessor.get_param_model().
         """
-        return self._parameter_processor.get_param_model(operation)
+        params = self._extract_operation_parameters(operation)
+        body_info = self._extract_request_body(operation)
+
+        return params, body_info
 
     def _generate_endpoint(
         self, path: str, method: str, operation: Operation

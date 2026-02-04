@@ -261,7 +261,7 @@ class TestDataFrameModuleGenerator:
 
     def test_generate_dataframe_module(self, tmp_path):
         """Test generating the _dataframe.py module."""
-        from otterapi.codegen.dataframe_generator import generate_dataframe_module
+        from otterapi.codegen.dataframes import generate_dataframe_module
 
         output_path = generate_dataframe_module(tmp_path)
 
@@ -277,7 +277,7 @@ class TestDataFrameModuleGenerator:
 
     def test_dataframe_module_is_valid_python(self, tmp_path):
         """Test that generated module is valid Python."""
-        from otterapi.codegen.dataframe_generator import generate_dataframe_module
+        from otterapi.codegen.dataframes import generate_dataframe_module
 
         output_path = generate_dataframe_module(tmp_path)
         content = output_path.read_text()
@@ -291,7 +291,7 @@ class TestDataFrameMethodConfig:
 
     def test_default_values(self):
         """Test default values are all False/None."""
-        from otterapi.codegen.client_generator import DataFrameMethodConfig
+        from otterapi.codegen.dataframes import DataFrameMethodConfig
 
         config = DataFrameMethodConfig()
         assert config.generate_pandas is False
@@ -300,7 +300,7 @@ class TestDataFrameMethodConfig:
 
     def test_explicit_values(self):
         """Test setting explicit values."""
-        from otterapi.codegen.client_generator import DataFrameMethodConfig
+        from otterapi.codegen.dataframes import DataFrameMethodConfig
 
         config = DataFrameMethodConfig(
             generate_pandas=True,

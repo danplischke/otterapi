@@ -4,7 +4,7 @@ This module tests the ModuleMapResolver class and ResolvedModule dataclass
 used for matching endpoint paths to target modules.
 """
 
-from otterapi.codegen.splitting.resolver import ModuleMapResolver, ResolvedModule
+from otterapi.codegen.splitting import ModuleMapResolver, ResolvedModule
 from otterapi.config import ModuleDefinition, ModuleSplitConfig
 
 

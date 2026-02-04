@@ -18,10 +18,10 @@ from otterapi.codegen.ast_utils import (
     _subscript,
     _union_expr,
 )
-from otterapi.codegen.builders.parameter_builder import ParameterASTBuilder
 
-# Re-export DataFrameMethodConfig from dataframe_utils for backward compatibility
-from otterapi.codegen.dataframe_utils import DataFrameMethodConfig
+# Re-export DataFrameMethodConfig from dataframes for backward compatibility
+from otterapi.codegen.dataframes import DataFrameMethodConfig
+from otterapi.codegen.endpoints import ParameterASTBuilder
 
 if TYPE_CHECKING:
     from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type

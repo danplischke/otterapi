@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from otterapi.codegen.schema_loader import SchemaLoader
+from otterapi.codegen.schema import SchemaLoader
 from otterapi.exceptions import SchemaLoadError, SchemaValidationError
 
 # Sample OpenAPI specs for different versions
@@ -410,7 +410,7 @@ class TestExternalRefResolution:
         # The validation might fail or pass depending on the spec
         # Just test that it doesn't crash
         try:
-            schema = loader.load(str(temp_dir / 'api.json'))
+            loader.load(str(temp_dir / 'api.json'))
         except (SchemaLoadError, SchemaValidationError):
             pass  # Expected if external ref can't be validated
 
@@ -608,7 +608,6 @@ class TestCaching:
         (temp_dir / 'api.json').write_text(json.dumps(main_spec))
 
         loader = SchemaLoader(resolve_external_refs=True, base_path=temp_dir)
-        schema = loader.load(str(temp_dir / 'api.json'))
 
         # Should have cached the Pet.json file
         assert len(loader._external_cache) >= 1

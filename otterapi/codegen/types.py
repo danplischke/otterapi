@@ -1,6 +1,15 @@
+"""Type definitions and generation for OtterAPI code generation.
+
+This module provides:
+- Type dataclasses for representing generated types, parameters, responses, and endpoints
+- TypeGenerator for creating Pydantic models from OpenAPI schemas
+- TypeRegistry for managing generated types and their dependencies
+- ModelNameCollector for tracking model usage in generated code
+"""
+
 import ast
 import dataclasses
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -14,6 +23,19 @@ from otterapi.codegen.utils import (
     sanitize_parameter_field_name,
 )
 from otterapi.openapi.v3_2 import Reference, Schema, Type as DataType
+
+__all__ = [
+    'Type',
+    'Parameter',
+    'ResponseInfo',
+    'RequestBodyInfo',
+    'Endpoint',
+    'TypeGenerator',
+    'TypeInfo',
+    'TypeRegistry',
+    'ModelNameCollector',
+    'collect_used_model_names',
+]
 
 _PRIMITIVE_TYPE_MAP = {
     ('string', None): str,
@@ -698,3 +720,320 @@ class TypeGenerator(OpenAPIProcessor):
                 visit(type_)
 
         return list(reversed(sorted_types))
+
+
+# =============================================================================
+# Type Registry
+# =============================================================================
+
+
+@dataclasses.dataclass
+class TypeInfo:
+    """Information about a registered type.
+
+    Attributes:
+        name: The Python name for this type.
+        reference: The original OpenAPI reference (e.g., '#/components/schemas/Pet').
+        type_obj: The Type object containing AST and metadata.
+        dependencies: Set of type names this type depends on.
+        is_root_model: Whether this is a Pydantic RootModel.
+        is_generated: Whether the AST has been generated for this type.
+    """
+
+    name: str
+    reference: str | None
+    type_obj: 'Type'
+    dependencies: set[str] = dataclasses.field(default_factory=set)
+    is_root_model: bool = False
+    is_generated: bool = False
+
+
+class TypeRegistry:
+    """Registry for managing generated types during code generation.
+
+    This class provides a centralized location for tracking all types generated
+    from an OpenAPI schema, handling dependencies between types, and ensuring
+    types are generated in the correct order.
+
+    Example:
+        >>> registry = TypeRegistry()
+        >>> registry.register(type_obj, name='Pet', reference='#/components/schemas/Pet')
+        >>> if registry.has_type('Pet'):
+        ...     pet_type = registry.get_type('Pet')
+        >>> for type_info in registry.get_types_in_dependency_order():
+        ...     generate_code(type_info)
+    """
+
+    def __init__(self):
+        """Initialize an empty type registry."""
+        self._types: dict[str, TypeInfo] = {}
+        self._by_reference: dict[str, str] = {}
+        self._primitive_types: set[str] = {'str', 'int', 'float', 'bool', 'None'}
+
+    def register(
+        self,
+        type_obj: 'Type',
+        name: str,
+        reference: str | None = None,
+        dependencies: set[str] | None = None,
+        is_root_model: bool = False,
+    ) -> TypeInfo:
+        """Register a new type in the registry.
+
+        Args:
+            type_obj: The Type object containing the type information.
+            name: The Python name for this type.
+            reference: The OpenAPI reference string, if applicable.
+            dependencies: Set of type names this type depends on.
+            is_root_model: Whether this is a Pydantic RootModel.
+
+        Returns:
+            The TypeInfo object for the registered type.
+
+        Raises:
+            ValueError: If a type with the same name is already registered.
+        """
+        if name in self._types:
+            raise ValueError(f"Type '{name}' is already registered")
+
+        type_info = TypeInfo(
+            name=name,
+            reference=reference,
+            type_obj=type_obj,
+            dependencies=dependencies or set(),
+            is_root_model=is_root_model,
+        )
+
+        self._types[name] = type_info
+
+        if reference:
+            self._by_reference[reference] = name
+
+        return type_info
+
+    def register_or_get(
+        self,
+        type_obj: 'Type',
+        name: str,
+        reference: str | None = None,
+        dependencies: set[str] | None = None,
+        is_root_model: bool = False,
+    ) -> TypeInfo:
+        """Register a type if not exists, otherwise return the existing one.
+
+        Args:
+            type_obj: The Type object containing the type information.
+            name: The Python name for this type.
+            reference: The OpenAPI reference string, if applicable.
+            dependencies: Set of type names this type depends on.
+            is_root_model: Whether this is a Pydantic RootModel.
+
+        Returns:
+            The TypeInfo object (existing or newly registered).
+        """
+        if name in self._types:
+            return self._types[name]
+        return self.register(type_obj, name, reference, dependencies, is_root_model)
+
+    def has_type(self, name: str) -> bool:
+        """Check if a type is registered."""
+        return name in self._types
+
+    def has_reference(self, reference: str) -> bool:
+        """Check if a reference has been registered."""
+        return reference in self._by_reference
+
+    def get_type(self, name: str) -> TypeInfo | None:
+        """Get a registered type by name."""
+        return self._types.get(name)
+
+    def get_type_by_reference(self, reference: str) -> TypeInfo | None:
+        """Get a registered type by its OpenAPI reference."""
+        name = self._by_reference.get(reference)
+        if name:
+            return self._types.get(name)
+        return None
+
+    def get_name_for_reference(self, reference: str) -> str | None:
+        """Get the registered name for an OpenAPI reference."""
+        return self._by_reference.get(reference)
+
+    def get_all_types(self) -> dict[str, TypeInfo]:
+        """Get all registered types."""
+        return dict(self._types)
+
+    def get_type_names(self) -> list[str]:
+        """Get all registered type names, sorted alphabetically."""
+        return sorted(self._types.keys())
+
+    def add_dependency(self, type_name: str, depends_on: str) -> None:
+        """Add a dependency relationship between types."""
+        if type_name not in self._types:
+            raise KeyError(f"Type '{type_name}' is not registered")
+        self._types[type_name].dependencies.add(depends_on)
+
+    def get_dependencies(self, type_name: str) -> set[str]:
+        """Get all dependencies for a type."""
+        if type_name not in self._types:
+            raise KeyError(f"Type '{type_name}' is not registered")
+        return self._types[type_name].dependencies.copy()
+
+    def get_types_in_dependency_order(self) -> list[TypeInfo]:
+        """Get all types sorted in dependency order.
+
+        Types are sorted so that dependencies come before the types that
+        depend on them.
+        """
+        result: list[TypeInfo] = []
+        visited: set[str] = set()
+        visiting: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in visited:
+                return
+            if name in visiting:
+                return
+            if name in self._primitive_types:
+                return
+            if name not in self._types:
+                return
+
+            visiting.add(name)
+            type_info = self._types[name]
+
+            for dep in type_info.dependencies:
+                visit(dep)
+
+            visiting.remove(name)
+            visited.add(name)
+            result.append(type_info)
+
+        for name in sorted(self._types.keys()):
+            visit(name)
+
+        return result
+
+    def mark_generated(self, name: str) -> None:
+        """Mark a type as having its AST generated."""
+        if name not in self._types:
+            raise KeyError(f"Type '{name}' is not registered")
+        self._types[name].is_generated = True
+
+    def get_ungenerated_types(self) -> list[TypeInfo]:
+        """Get all types that haven't been generated yet."""
+        return [t for t in self._types.values() if not t.is_generated]
+
+    def clear(self) -> None:
+        """Clear all registered types."""
+        self._types.clear()
+        self._by_reference.clear()
+
+    def __len__(self) -> int:
+        """Return the number of registered types."""
+        return len(self._types)
+
+    def __iter__(self) -> Iterator[TypeInfo]:
+        """Iterate over all registered types."""
+        return iter(self._types.values())
+
+    def __contains__(self, name: str) -> bool:
+        """Check if a type name is registered."""
+        return name in self._types
+
+    def get_root_models(self) -> list[TypeInfo]:
+        """Get all registered root models."""
+        return [t for t in self._types.values() if t.is_root_model]
+
+    def get_regular_models(self) -> list[TypeInfo]:
+        """Get all registered non-root models."""
+        return [t for t in self._types.values() if not t.is_root_model]
+
+    def merge(self, other: 'TypeRegistry') -> None:
+        """Merge another registry into this one."""
+        for type_info in other:
+            if type_info.name not in self._types:
+                self._types[type_info.name] = type_info
+                if type_info.reference:
+                    self._by_reference[type_info.reference] = type_info.name
+
+
+# =============================================================================
+# Model Name Collector
+# =============================================================================
+
+
+class ModelNameCollector(ast.NodeVisitor):
+    """AST visitor that collects model names from function definitions.
+
+    This visitor walks AST nodes and identifies Name nodes that match
+    a set of available model names, allowing us to determine which
+    models are actually referenced in generated code.
+
+    Example:
+        >>> available = {'Pet', 'User', 'Order'}
+        >>> collector = ModelNameCollector(available)
+        >>> collector.visit(some_function_ast)
+        >>> print(collector.used_models)
+        {'Pet', 'User'}
+    """
+
+    def __init__(self, available_models: set[str]):
+        """Initialize the collector.
+
+        Args:
+            available_models: Set of model names that are available for import.
+        """
+        self.available_models = available_models
+        self.used_models: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        """Visit a Name node and check if it's an available model."""
+        if node.id in self.available_models:
+            self.used_models.add(node.id)
+        self.generic_visit(node)
+
+    @classmethod
+    def collect_from_endpoints(
+        cls,
+        endpoints: list['Endpoint'],
+        available_models: set[str],
+    ) -> set[str]:
+        """Collect model names used across multiple endpoints.
+
+        Args:
+            endpoints: List of Endpoint objects to scan.
+            available_models: Set of model names that are available.
+
+        Returns:
+            Set of model names that are actually used in the endpoints.
+        """
+        collector = cls(available_models)
+        for endpoint in endpoints:
+            collector.visit(endpoint.sync_ast)
+            collector.visit(endpoint.async_ast)
+        return collector.used_models
+
+
+def collect_used_model_names(
+    endpoints: list['Endpoint'],
+    typegen_types: dict[str, 'Type'],
+) -> set[str]:
+    """Collect model names that are actually used in endpoint signatures.
+
+    Only collects models that have implementations (defined in models.py)
+    and are referenced in endpoint parameters, request bodies, or responses.
+
+    Args:
+        endpoints: List of Endpoint objects to check for model usage.
+        typegen_types: Dictionary mapping type names to Type objects.
+
+    Returns:
+        Set of model names actually used in endpoints.
+    """
+    available_models = {
+        type_.name
+        for type_ in typegen_types.values()
+        if type_.name and type_.implementation_ast
+    }
+
+    return ModelNameCollector.collect_from_endpoints(endpoints, available_models)

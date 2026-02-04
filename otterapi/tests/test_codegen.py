@@ -9,19 +9,16 @@ import ast
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from otterapi.codegen.codegen import Codegen
-from otterapi.codegen.schema_loader import SchemaLoader
+from otterapi.codegen.schema import SchemaLoader
 from otterapi.codegen.types import Type, TypeGenerator
 from otterapi.config import DocumentConfig
 from otterapi.openapi.v3_2.v3_2 import OpenAPI, Schema
 
 from .fixtures import (
-    AUTH_API_SPEC,
-    COMPLEX_TYPES_SPEC,
     MINIMAL_OPENAPI_SPEC,
     PARAMETERS_SPEC,
     PETSTORE_SPEC,
@@ -155,8 +152,6 @@ class TestTypeGenerator:
     def test_add_type_registers_type(self):
         """Test that add_type properly registers types."""
         typegen = self._create_type_generator(PETSTORE_SPEC)
-
-        initial_count = len(typegen.types)
 
         # Use schema_to_type which creates a Type object
         schema = Schema(

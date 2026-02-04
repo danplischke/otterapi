@@ -24,10 +24,8 @@ https://github.com/yourusername/otterapi
 """
 
 from otterapi.codegen.codegen import Codegen
-from otterapi.codegen.schema_loader import SchemaLoader
-from otterapi.codegen.schema_resolver import SchemaResolver
-from otterapi.codegen.type_registry import TypeRegistry
-from otterapi.codegen.types import TypeGenerator
+from otterapi.codegen.schema import SchemaLoader, SchemaResolver
+from otterapi.codegen.types import TypeGenerator, TypeRegistry
 from otterapi.config import CodegenConfig, DocumentConfig, get_config
 from otterapi.exceptions import (
     CodeGenerationError,
