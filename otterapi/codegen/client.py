@@ -506,7 +506,7 @@ def generate_base_client_class(
     """
     imports: ImportDict = {
         'httpx': {'Client', 'AsyncClient', 'Response'},
-        'typing': {'Any', 'Union', 'Type', 'TypeVar'},
+        'typing': {'Any', 'Type', 'TypeVar'},
         'pydantic': {'TypeAdapter', 'RootModel'},
     }
 

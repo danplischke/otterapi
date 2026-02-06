@@ -734,6 +734,9 @@ class SplitModuleEmitter:
         endpoint_names: list[str] = []
 
         for endpoint in endpoints:
+            # Track whether we generated paginated DataFrame methods for this endpoint
+            generated_paginated_df = False
+
             # Check if this endpoint has pagination configured
             pag_config = None
             if self.pagination_config and self.pagination_config.enabled:
@@ -840,6 +843,7 @@ class SplitModuleEmitter:
 
                 # Generate paginated DataFrame methods if dataframe is enabled
                 # For paginated endpoints, we know they return lists, so check config directly
+
                 if self.dataframe_config and self.dataframe_config.enabled:
                     # Check if endpoint is explicitly disabled
                     endpoint_df_config = self.dataframe_config.endpoints.get(
@@ -848,6 +852,7 @@ class SplitModuleEmitter:
                     if endpoint_df_config and endpoint_df_config.enabled is False:
                         pass  # Skip DataFrame generation for this endpoint
                     elif self.dataframe_config.pandas:
+                        generated_paginated_df = True
                         has_dataframe_methods = True
                         # Sync pandas paginated method
                         pandas_fn_name = f'{endpoint.sync_fn_name}_df'
@@ -894,6 +899,7 @@ class SplitModuleEmitter:
                         import_collector.add_imports(async_pandas_imports)
 
                     if self.dataframe_config.polars:
+                        generated_paginated_df = True
                         has_dataframe_methods = True
                         # Sync polars paginated method
                         polars_fn_name = f'{endpoint.sync_fn_name}_pl'
@@ -972,7 +978,12 @@ class SplitModuleEmitter:
                 import_collector.add_imports(async_imports)
 
             # Generate DataFrame methods if configured
-            if self.dataframe_config and self.dataframe_config.enabled:
+            # Skip if paginated DataFrame methods were already generated for this endpoint
+            if (
+                self.dataframe_config
+                and self.dataframe_config.enabled
+                and not generated_paginated_df
+            ):
                 df_config = get_dataframe_config_for_endpoint(
                     endpoint, self.dataframe_config
                 )

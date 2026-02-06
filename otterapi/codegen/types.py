@@ -594,7 +594,6 @@ class TypeGenerator(OpenAPIProcessor):
             implementation_imports=base_type.implementation_imports.copy(),
             annotation_imports=base_type.annotation_imports.copy(),
         )
-        type_.add_annotation_import('typing', 'Union')
         return type_
 
     def _get_primitive_type_ast(
@@ -656,7 +655,6 @@ class TypeGenerator(OpenAPIProcessor):
             annotation_ast = _union_expr(
                 [field_type.annotation_ast, ast.Constant(value=None)]
             )
-            field_type.add_annotation_import('typing', 'Union')
 
         value = None
         if field_schema.default is not None and isinstance(
@@ -773,7 +771,6 @@ class TypeGenerator(OpenAPIProcessor):
                 type='primitive',
             )
             union_type.copy_imports_from_sub_types(types_)
-            union_type.add_annotation_import('typing', 'Union')
             return union_type
 
         name = name or (

@@ -220,7 +220,6 @@ class Codegen(OpenAPIProcessor):
             type='primitive',
         )
         union_type.copy_imports_from_sub_types(types)
-        union_type.add_annotation_import('typing', 'Union')
         return union_type
 
     def _collect_non_json_types(self, response_list: list[ResponseInfo]) -> list[Type]:
@@ -656,6 +655,9 @@ class Codegen(OpenAPIProcessor):
         # Add standalone endpoint functions
         endpoint_names = set()
         for endpoint in endpoints:
+            # Track whether paginated DataFrame methods were generated for this endpoint
+            generated_paginated_df = False
+
             # Check if this endpoint has pagination configured
             pag_config = None
             if self.config.pagination.enabled:
@@ -766,6 +768,7 @@ class Codegen(OpenAPIProcessor):
                     if endpoint_df_config and endpoint_df_config.enabled is False:
                         pass  # Skip DataFrame generation for this endpoint
                     elif self.config.dataframe.pandas:
+                        generated_paginated_df = True
                         has_dataframe_methods = True
                         has_pagination_methods = True
                         # Sync pandas paginated method
@@ -813,6 +816,7 @@ class Codegen(OpenAPIProcessor):
                         import_collector.add_imports(async_pandas_imports)
 
                     if self.config.dataframe.polars:
+                        generated_paginated_df = True
                         has_dataframe_methods = True
                         has_pagination_methods = True
                         # Sync polars paginated method
@@ -896,7 +900,8 @@ class Codegen(OpenAPIProcessor):
                 pass
 
             # Generate DataFrame methods if configured
-            if self.config.dataframe.enabled:
+            # Skip if paginated DataFrame methods were already generated for this endpoint
+            if self.config.dataframe.enabled and not generated_paginated_df:
                 df_config = self._get_dataframe_config(endpoint)
 
                 if df_config.generate_pandas:

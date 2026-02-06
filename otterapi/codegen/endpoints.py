@@ -1962,7 +1962,7 @@ def _build_base_request_fn(
     imports: ImportDict = {
         **http_imports,
         'pydantic': {'TypeAdapter', 'Json', 'RootModel'},
-        'typing': {'Type', 'TypeVar', 'Union'},
+        'typing': {'Type', 'TypeVar'},
     }
 
     return func_ast, imports

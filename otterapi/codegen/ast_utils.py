@@ -45,9 +45,17 @@ def _subscript(generic: str, inner: ast.expr) -> ast.Subscript:
     return ast.Subscript(value=_name(generic), slice=inner, ctx=ast.Load())
 
 
-def _union_expr(types: list[ast.expr]) -> ast.Subscript:
-    # Union[A, B, C]
-    return _subscript('Union', ast.Tuple(elts=types, ctx=ast.Load()))
+def _union_expr(types: list[ast.expr]) -> ast.expr:
+    # A | B | C (using pipe operator instead of Union[A, B, C])
+    if not types:
+        raise ValueError('_union_expr requires at least one type')
+    if len(types) == 1:
+        return types[0]
+    # Build a chain of BinOp with BitOr: A | B | C
+    result = types[0]
+    for t in types[1:]:
+        result = ast.BinOp(left=result, op=ast.BitOr(), right=t)
+    return result
 
 
 def _optional_expr(inner: ast.expr) -> ast.Subscript:
