@@ -121,7 +121,7 @@ def extract_path(data: dict | list, path: str | None) -> list | dict:
         if isinstance(current, dict):
             if key not in current:
                 raise KeyError(
-                    f"Key \\'{key}\\' not found in response. "
+                    f"Key '{key}' not found in response. "
                     f"Available keys: {list(current.keys())}. Full path: {path}"
                 )
             current = current[key]
@@ -129,7 +129,7 @@ def extract_path(data: dict | list, path: str | None) -> list | dict:
             current = current[int(key)]
         else:
             raise KeyError(
-                f"Cannot access \\'{key}\\' on {type(current).__name__}. "
+                f"Cannot access '{key}' on {type(current).__name__}. "
                 f"Full path: {path}"
             )
 
