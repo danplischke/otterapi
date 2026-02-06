@@ -1190,6 +1190,8 @@ class Codegen(OpenAPIProcessor):
                     ast.alias(name='iterate_offset_async', asname=None),
                     ast.alias(name='iterate_cursor', asname=None),
                     ast.alias(name='iterate_cursor_async', asname=None),
+                    ast.alias(name='iterate_page', asname=None),
+                    ast.alias(name='iterate_page_async', asname=None),
                     ast.alias(name='extract_path', asname=None),
                 ],
                 level=1,

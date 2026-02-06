@@ -495,6 +495,115 @@ async def iterate_cursor_async(
             return
 
 
+def iterate_page(
+    fetch_page: Callable[[int, int], PageT],
+    extract_items: Callable[[PageT], list[T]],
+    get_total_pages: Callable[[PageT], int | None] | None = None,
+    *,
+    start_page: int = 1,
+    page_size: int = 100,
+    max_items: int | None = None,
+    max_pages: int | None = None,
+) -> Iterator[T]:
+    """Generic page-based pagination iterator (streaming).
+
+    Yields items one at a time for memory-efficient processing.
+
+    Args:
+        fetch_page: Function that fetches a page given (page, per_page).
+        extract_items: Function that extracts items from a page response.
+        get_total_pages: Optional function to get total pages from response.
+        start_page: Starting page number (default: 1).
+        page_size: Items per page (default: 100).
+        max_items: Maximum items to yield (default: unlimited).
+        max_pages: Maximum pages to fetch (default: unlimited).
+
+    Yields:
+        Items one at a time.
+    """
+    current_page = start_page
+    items_yielded = 0
+    pages_fetched = 0
+
+    while True:
+        if max_items is not None and items_yielded >= max_items:
+            return
+
+        if max_pages is not None and pages_fetched >= max_pages:
+            return
+
+        page = fetch_page(current_page, page_size)
+        items = extract_items(page)
+        pages_fetched += 1
+
+        if not items:
+            return
+
+        for item in items:
+            yield item
+            items_yielded += 1
+
+            if max_items is not None and items_yielded >= max_items:
+                return
+
+        if len(items) < page_size:
+            return
+
+        if get_total_pages is not None:
+            total_pages = get_total_pages(page)
+            if total_pages is not None and current_page >= total_pages:
+                return
+
+        current_page += 1
+
+
+async def iterate_page_async(
+    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[PageT]
+    extract_items: Callable[[PageT], list[T]],
+    get_total_pages: Callable[[PageT], int | None] | None = None,
+    *,
+    start_page: int = 1,
+    page_size: int = 100,
+    max_items: int | None = None,
+    max_pages: int | None = None,
+) -> AsyncIterator[T]:
+    """Async version of iterate_page."""
+    current_page = start_page
+    items_yielded = 0
+    pages_fetched = 0
+
+    while True:
+        if max_items is not None and items_yielded >= max_items:
+            return
+
+        if max_pages is not None and pages_fetched >= max_pages:
+            return
+
+        page = await fetch_page(current_page, page_size)
+        items = extract_items(page)
+        pages_fetched += 1
+
+        if not items:
+            return
+
+        for item in items:
+            yield item
+            items_yielded += 1
+
+            if max_items is not None and items_yielded >= max_items:
+                return
+
+        if len(items) < page_size:
+            return
+
+        if get_total_pages is not None:
+            total_pages = get_total_pages(page)
+            if total_pages is not None and current_page >= total_pages:
+                return
+
+        current_page += 1
+
+
 def paginate_page(
     fetch_page: Callable[[int, int], PageT],
     extract_items: Callable[[PageT], list[T]],

@@ -1395,10 +1395,9 @@ class EndpointFunctionFactory:
             ]
 
         elif self.config.pagination_style == PaginationStyle.PAGE:
-            # Page-based doesn't have a separate iterator in the module content
-            # We'll use yield from with paginate_page
+            # Page-based pagination iterator
             iterate_fn = (
-                'paginate_page_async' if self.config.is_async else 'paginate_page'
+                'iterate_page_async' if self.config.is_async else 'iterate_page'
             )
 
             total_pages_path = pag_config.get('total_pages_path')
