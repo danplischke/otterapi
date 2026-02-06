@@ -23,7 +23,12 @@ from otterapi.codegen.utils import write_mod
 
 if TYPE_CHECKING:
     from otterapi.codegen.types import Endpoint, Type
-    from otterapi.config import DataFrameConfig, ModuleDefinition, ModuleSplitConfig
+    from otterapi.config import (
+        DataFrameConfig,
+        ModuleDefinition,
+        ModuleSplitConfig,
+        PaginationConfig,
+    )
 
 __all__ = [
     # Tree classes
@@ -571,6 +576,7 @@ class SplitModuleEmitter:
         models_import_path: str | None = None,
         client_class_name: str = 'APIClient',
         dataframe_config: DataFrameConfig | None = None,
+        pagination_config: PaginationConfig | None = None,
     ):
         """Initialize the split module emitter.
 
@@ -581,6 +587,7 @@ class SplitModuleEmitter:
             models_import_path: Optional custom import path for models.
             client_class_name: Name of the client class.
             dataframe_config: Optional DataFrame configuration.
+            pagination_config: Optional pagination configuration.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -588,8 +595,10 @@ class SplitModuleEmitter:
         self.models_import_path = models_import_path
         self.client_class_name = client_class_name
         self.dataframe_config = dataframe_config
+        self.pagination_config = pagination_config
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
+        self._is_flat: bool = False  # Track if we're emitting flat structure
 
     def emit(
         self,
@@ -611,8 +620,10 @@ class SplitModuleEmitter:
         self._typegen_types = typegen_types or {}
 
         if self.config.flat_structure:
+            self._is_flat = True
             self._emit_flat(tree, base_url)
         else:
+            self._is_flat = False
             self._emit_nested(tree, base_url)
 
         return self._emitted_modules
@@ -701,7 +712,11 @@ class SplitModuleEmitter:
             build_default_client_code,
             build_standalone_dataframe_fn,
             build_standalone_endpoint_fn,
+            build_standalone_paginated_dataframe_fn,
+            build_standalone_paginated_fn,
+            build_standalone_paginated_iter_fn,
         )
+        from otterapi.codegen.pagination import get_pagination_config_for_endpoint
 
         body: list[ast.stmt] = []
 
@@ -715,40 +730,246 @@ class SplitModuleEmitter:
         import_collector.add_imports(client_imports)
 
         has_dataframe_methods = False
+        has_pagination_methods = False
         endpoint_names: list[str] = []
 
         for endpoint in endpoints:
-            # Build sync standalone function
-            sync_fn, sync_imports = build_standalone_endpoint_fn(
-                fn_name=endpoint.sync_fn_name,
-                method=endpoint.method,
-                path=endpoint.path,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                response_type=endpoint.response_type,
-                response_infos=endpoint.response_infos,
-                docs=endpoint.description,
-                is_async=False,
-            )
-            endpoint_names.append(endpoint.sync_fn_name)
-            body.append(sync_fn)
-            import_collector.add_imports(sync_imports)
+            # Check if this endpoint has pagination configured
+            pag_config = None
+            if self.pagination_config and self.pagination_config.enabled:
+                pag_config = get_pagination_config_for_endpoint(
+                    endpoint.sync_fn_name,
+                    self.pagination_config,
+                    endpoint.parameters,
+                )
 
-            # Build async standalone function
-            async_fn, async_imports = build_standalone_endpoint_fn(
-                fn_name=endpoint.async_fn_name,
-                method=endpoint.method,
-                path=endpoint.path,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                response_type=endpoint.response_type,
-                response_infos=endpoint.response_infos,
-                docs=endpoint.description,
-                is_async=True,
-            )
-            endpoint_names.append(endpoint.async_fn_name)
-            body.append(async_fn)
-            import_collector.add_imports(async_imports)
+            # Generate pagination methods if configured, otherwise regular functions
+            if pag_config:
+                has_pagination_methods = True
+
+                # Get item type from response type if it's a list
+                item_type_ast = self._get_item_type_ast(endpoint)
+
+                # Build pagination config dict
+                pag_dict = {
+                    'offset_param': pag_config.offset_param,
+                    'limit_param': pag_config.limit_param,
+                    'cursor_param': pag_config.cursor_param,
+                    'page_param': pag_config.page_param,
+                    'per_page_param': pag_config.per_page_param,
+                    'data_path': pag_config.data_path,
+                    'total_path': pag_config.total_path,
+                    'next_cursor_path': pag_config.next_cursor_path,
+                    'total_pages_path': pag_config.total_pages_path,
+                    'default_page_size': pag_config.default_page_size,
+                }
+
+                # Sync paginated function
+                pag_fn, pag_imports = build_standalone_paginated_fn(
+                    fn_name=endpoint.sync_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=False,
+                )
+                endpoint_names.append(endpoint.sync_fn_name)
+                body.append(pag_fn)
+                import_collector.add_imports(pag_imports)
+
+                # Async paginated function
+                async_pag_fn, async_pag_imports = build_standalone_paginated_fn(
+                    fn_name=endpoint.async_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=True,
+                )
+                endpoint_names.append(endpoint.async_fn_name)
+                body.append(async_pag_fn)
+                import_collector.add_imports(async_pag_imports)
+
+                # Sync iterator function
+                iter_fn_name = f'{endpoint.sync_fn_name}_iter'
+                iter_fn, iter_imports = build_standalone_paginated_iter_fn(
+                    fn_name=iter_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=False,
+                )
+                endpoint_names.append(iter_fn_name)
+                body.append(iter_fn)
+                import_collector.add_imports(iter_imports)
+
+                # Async iterator function
+                async_iter_fn_name = f'{endpoint.async_fn_name}_iter'
+                async_iter_fn, async_iter_imports = build_standalone_paginated_iter_fn(
+                    fn_name=async_iter_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=True,
+                )
+                endpoint_names.append(async_iter_fn_name)
+                body.append(async_iter_fn)
+                import_collector.add_imports(async_iter_imports)
+
+                # Generate paginated DataFrame methods if dataframe is enabled
+                # For paginated endpoints, we know they return lists, so check config directly
+                if self.dataframe_config and self.dataframe_config.enabled:
+                    # Check if endpoint is explicitly disabled
+                    endpoint_df_config = self.dataframe_config.endpoints.get(
+                        endpoint.sync_fn_name
+                    )
+                    if endpoint_df_config and endpoint_df_config.enabled is False:
+                        pass  # Skip DataFrame generation for this endpoint
+                    elif self.dataframe_config.pandas:
+                        has_dataframe_methods = True
+                        # Sync pandas paginated method
+                        pandas_fn_name = f'{endpoint.sync_fn_name}_df'
+                        pandas_fn, pandas_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=pandas_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='pandas',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=False,
+                            )
+                        )
+                        endpoint_names.append(pandas_fn_name)
+                        body.append(pandas_fn)
+                        import_collector.add_imports(pandas_imports)
+
+                        # Async pandas paginated method
+                        async_pandas_fn_name = f'{endpoint.async_fn_name}_df'
+                        async_pandas_fn, async_pandas_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=async_pandas_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='pandas',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=True,
+                            )
+                        )
+                        endpoint_names.append(async_pandas_fn_name)
+                        body.append(async_pandas_fn)
+                        import_collector.add_imports(async_pandas_imports)
+
+                    if self.dataframe_config.polars:
+                        has_dataframe_methods = True
+                        # Sync polars paginated method
+                        polars_fn_name = f'{endpoint.sync_fn_name}_pl'
+                        polars_fn, polars_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=polars_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='polars',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=False,
+                            )
+                        )
+                        endpoint_names.append(polars_fn_name)
+                        body.append(polars_fn)
+                        import_collector.add_imports(polars_imports)
+
+                        # Async polars paginated method
+                        async_polars_fn_name = f'{endpoint.async_fn_name}_pl'
+                        async_polars_fn, async_polars_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=async_polars_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='polars',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=True,
+                            )
+                        )
+                        endpoint_names.append(async_polars_fn_name)
+                        body.append(async_polars_fn)
+                        import_collector.add_imports(async_polars_imports)
+            else:
+                # Build sync standalone function
+                sync_fn, sync_imports = build_standalone_endpoint_fn(
+                    fn_name=endpoint.sync_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    response_infos=endpoint.response_infos,
+                    docs=endpoint.description,
+                    is_async=False,
+                )
+                endpoint_names.append(endpoint.sync_fn_name)
+                body.append(sync_fn)
+                import_collector.add_imports(sync_imports)
+
+                # Build async standalone function
+                async_fn, async_imports = build_standalone_endpoint_fn(
+                    fn_name=endpoint.async_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    response_infos=endpoint.response_infos,
+                    docs=endpoint.description,
+                    is_async=True,
+                )
+                endpoint_names.append(endpoint.async_fn_name)
+                body.append(async_fn)
+                import_collector.add_imports(async_imports)
 
             # Generate DataFrame methods if configured
             if self.dataframe_config and self.dataframe_config.enabled:
@@ -864,6 +1085,30 @@ class SplitModuleEmitter:
             )
             body.insert(0, dataframe_import)
 
+        # Add pagination imports if needed
+        if has_pagination_methods:
+            import_collector.add_imports(
+                {'collections.abc': {'Iterator', 'AsyncIterator'}}
+            )
+            pagination_import = ast.ImportFrom(
+                module='_pagination',
+                names=[
+                    ast.alias(name='paginate_offset', asname=None),
+                    ast.alias(name='paginate_offset_async', asname=None),
+                    ast.alias(name='paginate_cursor', asname=None),
+                    ast.alias(name='paginate_cursor_async', asname=None),
+                    ast.alias(name='paginate_page', asname=None),
+                    ast.alias(name='paginate_page_async', asname=None),
+                    ast.alias(name='iterate_offset', asname=None),
+                    ast.alias(name='iterate_offset_async', asname=None),
+                    ast.alias(name='iterate_cursor', asname=None),
+                    ast.alias(name='iterate_cursor_async', asname=None),
+                    ast.alias(name='extract_path', asname=None),
+                ],
+                level=1,
+            )
+            body.insert(0, pagination_import)
+
         # Add all other imports at the beginning
         for import_stmt in import_collector.to_ast():
             body.insert(0, import_stmt)
@@ -875,14 +1120,49 @@ class SplitModuleEmitter:
 
         return endpoint_names
 
+    def _get_item_type_ast(self, endpoint: Endpoint) -> ast.expr | None:
+        """Extract the item type AST from a list response type.
+
+        For example, if response_type is list[User], returns the AST for User.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            The AST expression for the item type, or None if not a list type.
+        """
+        if not endpoint.response_type or not endpoint.response_type.annotation_ast:
+            return None
+
+        ann = endpoint.response_type.annotation_ast
+        if isinstance(ann, ast.Subscript):
+            if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
+                return ann.slice
+
+        return None
+
     def _create_client_import(
         self, module_path: list[str] | None = None
     ) -> ast.ImportFrom:
-        """Create import statement for the Client class."""
-        depth = len(module_path) if module_path else 0
-        if depth == 0:
+        """Create import statement for the Client class.
+
+        For flat structure, all files are in the same directory as client.py,
+        so we always use level=1 (single dot relative import).
+
+        For nested structure, we need to go up the directory tree based on
+        the actual file location:
+        - module_path=['loot'] -> file at output_dir/loot.py -> level=1
+        - module_path=['api', 'users'] -> file at output_dir/api/users.py -> level=2
+        """
+        if self._is_flat:
+            # Flat structure: all files in same directory as client.py
             level = 1
         else:
+            # Nested structure: actual directory depth is len(module_path) - 1
+            # because the last element is the filename, not a directory
+            # e.g., ['loot'] -> depth 0 -> level 1
+            # e.g., ['api', 'users'] -> depth 1 -> level 2
+            depth = len(module_path) - 1 if module_path and len(module_path) > 1 else 0
             level = depth + 1
 
         return ast.ImportFrom(
@@ -900,11 +1180,25 @@ class SplitModuleEmitter:
     def _create_model_import(
         self, model_names: set[str], module_path: list[str] | None = None
     ) -> ast.ImportFrom:
-        """Create import statement for models."""
-        depth = len(module_path) if module_path else 0
-        if depth == 0:
+        """Create import statement for models.
+
+        For flat structure, all files are in the same directory as models.py,
+        so we always use level=1 (single dot relative import).
+
+        For nested structure, we need to go up the directory tree based on
+        the actual file location:
+        - module_path=['loot'] -> file at output_dir/loot.py -> level=1
+        - module_path=['api', 'users'] -> file at output_dir/api/users.py -> level=2
+        """
+        if self._is_flat:
+            # Flat structure: all files in same directory as models.py
             level = 1
         else:
+            # Nested structure: actual directory depth is len(module_path) - 1
+            # because the last element is the filename, not a directory
+            # e.g., ['loot'] -> depth 0 -> level 1
+            # e.g., ['api', 'users'] -> depth 1 -> level 2
+            depth = len(module_path) - 1 if module_path and len(module_path) > 1 else 0
             level = depth + 1
 
         return ast.ImportFrom(

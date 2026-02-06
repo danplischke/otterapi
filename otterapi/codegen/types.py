@@ -402,8 +402,220 @@ class TypeGenerator(OpenAPIProcessor):
             reference.title
         ) if reference.title else None
 
-    def _get_primitive_type_ast(self, schema: Schema) -> Type:
-        key = (schema.type, schema.format or None)
+    def _create_enum_type(
+        self,
+        schema: Schema,
+        name: str | None = None,
+        base_name: str | None = None,
+        field_name: str | None = None,
+    ) -> Type:
+        """Create an Enum class for schema with enum values.
+
+        Args:
+            schema: The schema containing enum values.
+            name: Optional explicit name for the enum.
+            base_name: Optional base name prefix (e.g., parent model name).
+            field_name: Optional field name this enum is used for (e.g., 'status').
+
+        Returns:
+            A Type representing the generated Enum class.
+        """
+        # Determine enum name - prefer schema title, then derive from context
+        enum_name = name or (
+            sanitize_identifier(schema.title) if schema.title else None
+        )
+        if not enum_name:
+            # Generate name from field_name with base_name context for uniqueness
+            if field_name:
+                # e.g., Pet + status -> 'PetStatus', Order + status -> 'OrderStatus'
+                # Capitalize the field part to ensure proper PascalCase
+                field_part = sanitize_identifier(field_name)
+                # Ensure first letter is capitalized for PascalCase
+                if field_part:
+                    field_part = field_part[0].upper() + field_part[1:]
+                if base_name:
+                    base_part = sanitize_identifier(base_name)
+                    enum_name = f'{base_part}{field_part}'
+                else:
+                    enum_name = field_part
+            elif base_name:
+                enum_name = f'{sanitize_identifier(base_name)}Enum'
+            else:
+                enum_name = 'AutoEnum'
+
+        # Create a hashable key from enum values to detect duplicates
+        enum_values_key = tuple(sorted(str(v) for v in schema.enum if v is not None))
+
+        # Check if an identical enum already exists
+        for existing_name, existing_type in self.types.items():
+            if existing_type.type == 'model' and isinstance(
+                existing_type.implementation_ast, ast.ClassDef
+            ):
+                # Check if it's an Enum class with same values
+                existing_class = existing_type.implementation_ast
+                if any(
+                    isinstance(base, ast.Name) and base.id == 'Enum'
+                    for base in existing_class.bases
+                ):
+                    # Extract values from existing enum
+                    existing_values = []
+                    for node in existing_class.body:
+                        if isinstance(node, ast.Assign) and node.value:
+                            if isinstance(node.value, ast.Constant):
+                                existing_values.append(str(node.value.value))
+                    if tuple(sorted(existing_values)) == enum_values_key:
+                        # Reuse existing enum
+                        return existing_type
+
+        # Ensure the name is unique
+        if enum_name in self.types:
+            counter = 1
+            original_name = enum_name
+            while f'{original_name}{counter}' in self.types:
+                counter += 1
+            enum_name = f'{original_name}{counter}'
+
+        # Build enum members: NAME = 'value'
+        # For string enums, use the value as the member name (sanitized)
+        enum_body = []
+        seen_member_names: dict[str, int] = {}  # Track seen names to handle duplicates
+        for value in schema.enum:
+            if value is None:
+                continue  # Skip None values in enums
+            # Create a valid Python identifier for the enum member
+            if isinstance(value, str):
+                member_name = sanitize_identifier(value).upper()
+                # If the sanitized name starts with a digit, prefix with underscore
+                if member_name and member_name[0].isdigit():
+                    member_name = f'_{member_name}'
+            else:
+                # For numeric enums, create VALUE_X names
+                member_name = f'VALUE_{value}'
+
+            # Handle duplicate member names (e.g., 'mesoderm' and 'Mesoderm' both -> 'MESODERM')
+            if member_name in seen_member_names:
+                seen_member_names[member_name] += 1
+                member_name = f'{member_name}_{seen_member_names[member_name]}'
+            else:
+                seen_member_names[member_name] = 0
+
+            enum_body.append(
+                ast.Assign(
+                    targets=[ast.Name(id=member_name, ctx=ast.Store())],
+                    value=ast.Constant(value=value),
+                )
+            )
+
+        # If no valid members, fall back to Literal
+        if not enum_body:
+            return self._create_literal_type(schema)
+
+        # Create the Enum class
+        # class EnumName(str, Enum):  # str mixin for string enums
+        #     MEMBER = 'value'
+        bases = (
+            [_name('str'), _name('Enum')]
+            if schema.type and schema.type.value == 'string'
+            else [_name('Enum')]
+        )
+
+        enum_class = ast.ClassDef(
+            name=enum_name,
+            bases=bases,
+            keywords=[],
+            body=enum_body,
+            decorator_list=[],
+            type_params=[],
+        )
+
+        type_ = Type(
+            reference=None,
+            name=enum_name,
+            annotation_ast=_name(enum_name),
+            implementation_ast=enum_class,
+            type='model',  # Treat as model so it gets included in models.py
+        )
+        type_.add_implementation_import('enum', 'Enum')
+
+        # Register the type
+        self.types[enum_name] = type_
+
+        return type_
+
+    def _create_literal_type(self, schema: Schema) -> Type:
+        """Create a Literal type for enum values (fallback)."""
+        literal_values = [ast.Constant(value=v) for v in schema.enum]
+        type_ = Type(
+            None,
+            sanitize_identifier(schema.title) if schema.title else None,
+            annotation_ast=_subscript(
+                'Literal', ast.Tuple(elts=literal_values, ctx=ast.Load())
+            ),
+            implementation_ast=None,
+            type='primitive',
+        )
+        type_.add_annotation_import('typing', 'Literal')
+        return type_
+
+    def _is_nullable(self, schema: Schema) -> bool:
+        """Check if a schema represents a nullable type.
+
+        In OpenAPI 3.1+, nullable is expressed via type arrays like ["string", "null"].
+        """
+        if isinstance(schema.type, list):
+            return any(
+                t == DataType.null or (hasattr(t, 'value') and t.value == 'null')
+                for t in schema.type
+            )
+        return False
+
+    def _get_non_null_type(self, schema: Schema) -> DataType | None:
+        """Extract the non-null type from a potentially nullable schema."""
+        if isinstance(schema.type, list):
+            for t in schema.type:
+                if t != DataType.null and (
+                    not hasattr(t, 'value') or t.value != 'null'
+                ):
+                    return t
+            return None
+        return schema.type
+
+    def _make_nullable_type(self, base_type: Type) -> Type:
+        """Wrap a type annotation to make it nullable (T | None)."""
+        nullable_ast = _union_expr([base_type.annotation_ast, ast.Constant(value=None)])
+
+        type_ = Type(
+            reference=base_type.reference,
+            name=base_type.name,
+            annotation_ast=nullable_ast,
+            implementation_ast=base_type.implementation_ast,
+            type=base_type.type,
+            dependencies=base_type.dependencies.copy(),
+            implementation_imports=base_type.implementation_imports.copy(),
+            annotation_imports=base_type.annotation_imports.copy(),
+        )
+        type_.add_annotation_import('typing', 'Union')
+        return type_
+
+    def _get_primitive_type_ast(
+        self,
+        schema: Schema,
+        base_name: str | None = None,
+        field_name: str | None = None,
+    ) -> Type:
+        # Handle enum types - generate Enum class
+        if schema.enum:
+            return self._create_enum_type(
+                schema, base_name=base_name, field_name=field_name
+            )
+
+        # Check for nullable type (type array with null)
+        is_nullable = self._is_nullable(schema)
+        actual_type = self._get_non_null_type(schema)
+
+        # Fix: schema.type is a Type enum, need to use .value for string lookup
+        type_value = actual_type.value if actual_type else None
+        key = (type_value, schema.format or None)
         mapped = _PRIMITIVE_TYPE_MAP.get(key, Any)
 
         type_ = Type(
@@ -416,10 +628,20 @@ class TypeGenerator(OpenAPIProcessor):
 
         if mapped is not None and mapped.__module__ != 'builtins':
             type_.add_annotation_import(mapped.__module__, mapped.__name__)
+
+        # Wrap in Union with None if nullable
+        if is_nullable:
+            type_ = self._make_nullable_type(type_)
+
         return type_
 
     def _create_pydantic_field(
-        self, field_name: str, field_schema: Schema, field_type: Type
+        self,
+        field_name: str,
+        field_schema: Schema,
+        field_type: Type,
+        is_required: bool = False,
+        is_nullable: bool = False,
     ) -> str:
         if hasattr(field_schema, 'ref'):
             field_schema, _ = self._resolve_reference(field_schema)
@@ -428,6 +650,14 @@ class TypeGenerator(OpenAPIProcessor):
 
         sanitized_field_name = sanitize_parameter_field_name(field_name)
 
+        # Determine the annotation - wrap in Union with None if nullable
+        annotation_ast = field_type.annotation_ast
+        if is_nullable and not self._type_already_nullable(field_type):
+            annotation_ast = _union_expr(
+                [field_type.annotation_ast, ast.Constant(value=None)]
+            )
+            field_type.add_annotation_import('typing', 'Union')
+
         value = None
         if field_schema.default is not None and isinstance(
             field_schema.default, (str, int, float, bool)
@@ -435,7 +665,9 @@ class TypeGenerator(OpenAPIProcessor):
             field_keywords.append(
                 ast.keyword(arg='default', value=ast.Constant(field_schema.default))
             )
-        elif field_schema.default is None and not field_schema.required:
+        elif field_schema.default is None and not is_required:
+            # Only add default=None for optional (not required) fields
+            # Nullable but required fields should NOT have a default
             field_keywords.append(ast.keyword(arg='default', value=ast.Constant(None)))
 
         if sanitized_field_name != field_name:
@@ -459,10 +691,22 @@ class TypeGenerator(OpenAPIProcessor):
 
         return ast.AnnAssign(
             target=_name(field_name),
-            annotation=field_type.annotation_ast,
+            annotation=annotation_ast,
             value=value,
             simple=1,
         )
+
+    def _type_already_nullable(self, type_: Type) -> bool:
+        """Check if a type annotation already includes None."""
+        if isinstance(type_.annotation_ast, ast.Subscript):
+            # Check if it's Union[..., None]
+            if isinstance(type_.annotation_ast.value, ast.Name):
+                if type_.annotation_ast.value.id == 'Union':
+                    if isinstance(type_.annotation_ast.slice, ast.Tuple):
+                        for elt in type_.annotation_ast.slice.elts:
+                            if isinstance(elt, ast.Constant) and elt.value is None:
+                                return True
+        return False
 
     def _create_pydantic_root_model(
         self,
@@ -515,8 +759,9 @@ class TypeGenerator(OpenAPIProcessor):
                 base_bases.append(base)
 
         if schema.anyOf or schema.oneOf:
+            # Use schema_to_type for each variant to properly handle primitives, objects, etc.
             types_ = [
-                self._create_object_type(schema=t, base_name=base_name)
+                self.schema_to_type(t, base_name=base_name)
                 for t in (schema.anyOf or schema.oneOf)
             ]
 
@@ -540,12 +785,38 @@ class TypeGenerator(OpenAPIProcessor):
 
         body = []
         field_types = []
-        for property_name, property_schema in schema.properties.items():
-            type_ = self.schema_to_type(property_schema, base_name=base_name)
-            field = self._create_pydantic_field(property_name, property_schema, type_)
+        # Fix: Get the required fields from the parent schema's required array
+        required_fields = set(schema.required or [])
+        for property_name, property_schema in (schema.properties or {}).items():
+            # Resolve reference to check for nullable
+            resolved_schema = property_schema
+            if hasattr(property_schema, 'ref') and property_schema.ref:
+                resolved_schema, _ = self._resolve_reference(property_schema)
+
+            # Check if field is nullable (type array with null)
+            is_nullable = (
+                self._is_nullable(resolved_schema) if resolved_schema else False
+            )
+
+            type_ = self.schema_to_type(
+                property_schema, base_name=base_name, field_name=property_name
+            )
+            is_required = property_name in required_fields
+            field = self._create_pydantic_field(
+                property_name, property_schema, type_, is_required, is_nullable
+            )
 
             body.append(field)
             field_types.append(type_)
+
+        # Add deprecation docstring if schema is deprecated
+        if schema.deprecated:
+            deprecation_doc = ast.Expr(
+                value=ast.Constant(
+                    value=f'{name} is deprecated.\n\n.. deprecated::\n    This model is deprecated.'
+                )
+            )
+            body = [deprecation_doc] + body if body else [deprecation_doc]
 
         model = ast.ClassDef(
             name=name,
@@ -635,12 +906,33 @@ class TypeGenerator(OpenAPIProcessor):
         base_name: str | None = None,
     ) -> Type:
         schema, schema_name = self._resolve_reference(schema)
+
+        # Handle additionalProperties for dict-like types
         if (
             not schema.properties
             and not schema.allOf
             and not schema.anyOf
             and not schema.oneOf
         ):
+            # Check for additionalProperties to determine value type
+            value_type_ast = ast.Name(id=Any.__name__, ctx=ast.Load())
+            value_type_imports: dict[str, set[str]] = {Any.__module__: {Any.__name__}}
+
+            if (
+                schema.additionalProperties is not None
+                and schema.additionalProperties is not True
+            ):
+                if schema.additionalProperties is False:
+                    # No additional properties allowed - still generate dict[str, Any]
+                    pass
+                elif isinstance(schema.additionalProperties, (Schema, Reference)):
+                    # additionalProperties has a schema - use it for value type
+                    additional_type = self.schema_to_type(
+                        schema.additionalProperties, base_name=base_name
+                    )
+                    value_type_ast = additional_type.annotation_ast
+                    value_type_imports = additional_type.annotation_imports.copy()
+
             type_ = Type(
                 None,
                 None,
@@ -649,7 +941,7 @@ class TypeGenerator(OpenAPIProcessor):
                     ast.Tuple(
                         elts=[
                             ast.Name(id=str.__name__, ctx=ast.Load()),
-                            ast.Name(id=Any.__name__, ctx=ast.Load()),
+                            value_type_ast,
                         ]
                     ),
                 ),
@@ -658,7 +950,9 @@ class TypeGenerator(OpenAPIProcessor):
             )
 
             type_.add_annotation_import(dict.__module__, dict.__name__)
-            type_.add_annotation_import(Any.__module__, Any.__name__)
+            for module, names in value_type_imports.items():
+                for name_import in names:
+                    type_.add_annotation_import(module, name_import)
 
             return type_
 
@@ -667,7 +961,10 @@ class TypeGenerator(OpenAPIProcessor):
         )
 
     def schema_to_type(
-        self, schema: Schema | Reference, base_name: str | None = None
+        self,
+        schema: Schema | Reference,
+        base_name: str | None = None,
+        field_name: str | None = None,
     ) -> Type:
         if isinstance(schema, Reference):
             ref_name = schema.ref.split('/')[-1]
@@ -677,17 +974,23 @@ class TypeGenerator(OpenAPIProcessor):
 
         schema, schema_name = self._resolve_reference(schema)
 
+        # Use schema_name (from $ref) as base_name for nested types if available
+        # This ensures enums inside Pet get names like "PetStatus" not "addPetRequestBodyStatus"
+        effective_base_name = schema_name or base_name
+
         # TODO: schema.type can be array?
         if schema.type == DataType.array:
             type_ = self._create_array_type(
-                schema=schema, name=schema_name, base_name=base_name
+                schema=schema, name=schema_name, base_name=effective_base_name
             )
         elif schema.type == DataType.object or schema.type is None:
             type_ = self._create_object_type(
-                schema, name=schema_name, base_name=base_name
+                schema, name=schema_name, base_name=effective_base_name
             )
         else:
-            type_ = self._get_primitive_type_ast(schema)
+            type_ = self._get_primitive_type_ast(
+                schema, base_name=effective_base_name, field_name=field_name
+            )
 
         return type_
 

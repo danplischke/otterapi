@@ -35,7 +35,9 @@ def _name(name: str) -> ast.Name:
 
 def _attr(value: str | ast.expr, attr: str) -> ast.Attribute:
     return ast.Attribute(
-        value=_name(value) if isinstance(value, str) else value, attr=attr
+        value=_name(value) if isinstance(value, str) else value,
+        attr=attr,
+        ctx=ast.Load(),
     )
 
 
@@ -45,7 +47,7 @@ def _subscript(generic: str, inner: ast.expr) -> ast.Subscript:
 
 def _union_expr(types: list[ast.expr]) -> ast.Subscript:
     # Union[A, B, C]
-    return _subscript('Union', ast.Tuple(elts=types))
+    return _subscript('Union', ast.Tuple(elts=types, ctx=ast.Load()))
 
 
 def _optional_expr(inner: ast.expr) -> ast.Subscript:

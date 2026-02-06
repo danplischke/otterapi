@@ -47,6 +47,7 @@ __all__ = [
     # Enums and dataclasses
     'EndpointMode',
     'DataFrameLibrary',
+    'PaginationStyle',
     'EndpointFunctionConfig',
     'FunctionSignature',
     # Factory class
@@ -74,6 +75,9 @@ __all__ = [
     'build_delegating_endpoint_fn',
     'build_standalone_dataframe_fn',
     'build_delegating_dataframe_fn',
+    'build_standalone_paginated_fn',
+    'build_standalone_paginated_iter_fn',
+    'build_standalone_paginated_dataframe_fn',
 ]
 
 
@@ -97,6 +101,14 @@ class DataFrameLibrary(Enum):
 
     PANDAS = 'pandas'
     POLARS = 'polars'
+
+
+class PaginationStyle(Enum):
+    """Pagination style for paginated endpoint functions."""
+
+    OFFSET = 'offset'
+    CURSOR = 'cursor'
+    PAGE = 'page'
 
 
 def clean_docstring(docstring: str) -> str:
@@ -585,6 +597,14 @@ class EndpointFunctionConfig:
     client_method_name: str | None = None
     dataframe_library: DataFrameLibrary | None = None
     dataframe_path: str | None = None
+    # Pagination config
+    pagination_style: PaginationStyle | None = None
+    pagination_config: dict | None = None  # Contains offset_param, limit_param, etc.
+    is_iterator: bool = False  # If True, generates _iter function
+    is_paginated_dataframe: bool = (
+        False  # If True, generates DataFrame from paginated results
+    )
+    item_type_ast: ast.expr | None = None  # The type of items in the list
 
 
 # =============================================================================
@@ -642,7 +662,14 @@ class EndpointFunctionFactory:
 
         signature = self._build_signature()
 
-        if self.config.dataframe_library:
+        if self.config.pagination_style:
+            if self.config.is_iterator:
+                body = self._build_paginated_iter_body()
+            elif self.config.is_paginated_dataframe:
+                body = self._build_paginated_dataframe_body()
+            else:
+                body = self._build_paginated_body()
+        elif self.config.dataframe_library:
             body = self._build_dataframe_body()
         elif self.config.mode == EndpointMode.STANDALONE:
             body = self._build_standalone_body()
@@ -671,16 +698,89 @@ class EndpointFunctionFactory:
         """Build the function signature using FunctionSignatureBuilder."""
         builder = FunctionSignatureBuilder()
 
-        builder.add_parameters(self.config.parameters)
+        # For pagination, we need to filter out the pagination parameters
+        # since we'll add our own pagination-specific parameters
+        if self.config.pagination_style and self.config.pagination_config:
+            pag_config = self.config.pagination_config
+            skip_params = set()
+            if self.config.pagination_style == PaginationStyle.OFFSET:
+                skip_params = {
+                    pag_config.get('offset_param'),
+                    pag_config.get('limit_param'),
+                }
+            elif self.config.pagination_style == PaginationStyle.CURSOR:
+                skip_params = {
+                    pag_config.get('cursor_param'),
+                    pag_config.get('limit_param'),
+                }
+            elif self.config.pagination_style == PaginationStyle.PAGE:
+                skip_params = {
+                    pag_config.get('page_param'),
+                    pag_config.get('per_page_param'),
+                }
+
+            filtered_params = [
+                p for p in (self.config.parameters or []) if p.name not in skip_params
+            ]
+            builder.add_parameters(filtered_params)
+
+            # Add pagination-specific parameters
+            self._add_pagination_parameters(builder)
+        else:
+            builder.add_parameters(self.config.parameters)
+
         builder.add_request_body(self.config.request_body_info)
 
-        if self.config.dataframe_library:
+        if self.config.dataframe_library and not self.config.is_paginated_dataframe:
+            # Only add path parameter for non-paginated DataFrame functions
+            # Paginated DataFrame functions don't need it - data is already extracted
             builder.add_path_parameter(default=self.config.dataframe_path)
 
         if self.config.mode == EndpointMode.STANDALONE:
             builder.add_client_parameter()
 
         return builder.build()
+
+    def _add_pagination_parameters(self, builder: FunctionSignatureBuilder) -> None:
+        """Add pagination-specific parameters to the signature builder."""
+        pag_config = self.config.pagination_config or {}
+        default_page_size = pag_config.get('default_page_size', 100)
+
+        if self.config.pagination_style == PaginationStyle.OFFSET:
+            # offset: int | None = None
+            builder.add_custom_kwarg(
+                name='offset',
+                annotation=_union_expr([_name('int'), ast.Constant(value=None)]),
+                default=ast.Constant(value=None),
+            )
+        elif self.config.pagination_style == PaginationStyle.CURSOR:
+            # cursor: str | None = None
+            builder.add_custom_kwarg(
+                name='cursor',
+                annotation=_union_expr([_name('str'), ast.Constant(value=None)]),
+                default=ast.Constant(value=None),
+            )
+        elif self.config.pagination_style == PaginationStyle.PAGE:
+            # page: int | None = None
+            builder.add_custom_kwarg(
+                name='page',
+                annotation=_union_expr([_name('int'), ast.Constant(value=None)]),
+                default=ast.Constant(value=None),
+            )
+
+        # page_size: int = default_page_size
+        builder.add_custom_kwarg(
+            name='page_size',
+            annotation=_name('int'),
+            default=ast.Constant(value=default_page_size),
+        )
+
+        # max_items: int | None = None
+        builder.add_custom_kwarg(
+            name='max_items',
+            annotation=_union_expr([_name('int'), ast.Constant(value=None)]),
+            default=ast.Constant(value=None),
+        )
 
     def _build_return_type(self) -> ast.expr:
         """Build the return type annotation."""
@@ -690,12 +790,35 @@ class EndpointFunctionFactory:
             else:
                 return ast.Constant(value='pl.DataFrame')
 
+        # Pagination return types
+        if self.config.pagination_style:
+            if self.config.item_type_ast:
+                if self.config.is_iterator:
+                    # Iterator[ItemType] or AsyncIterator[ItemType]
+                    self._add_import('collections.abc', 'Iterator')
+                    self._add_import('collections.abc', 'AsyncIterator')
+                    iter_type = 'AsyncIterator' if self.config.is_async else 'Iterator'
+                    return _subscript(iter_type, self.config.item_type_ast)
+                else:
+                    # list[ItemType]
+                    return _subscript('list', self.config.item_type_ast)
+            else:
+                # Fallback to list[Any]
+                self._add_import('typing', 'Any')
+                if self.config.is_iterator:
+                    self._add_import('collections.abc', 'Iterator')
+                    self._add_import('collections.abc', 'AsyncIterator')
+                    iter_type = 'AsyncIterator' if self.config.is_async else 'Iterator'
+                    return _subscript(iter_type, _name('Any'))
+                else:
+                    return _subscript('list', _name('Any'))
+
         if self.config.response_type:
             self._merge_imports(self.config.response_type.annotation_imports)
             return self.config.response_type.annotation_ast
 
-        self._add_import('typing', 'Any')
-        return _name('Any')
+        self._add_import('httpx', 'Response')
+        return _name('Response')
 
     def _build_standalone_body(self) -> list[ast.stmt]:
         """Build the body for a standalone endpoint function."""
@@ -706,13 +829,13 @@ class EndpointFunctionFactory:
                 ast.Expr(value=ast.Constant(value=clean_docstring(self.config.docs)))
             )
 
-        # c = client or _get_client()
+        # c = client or Client()
         body.append(
             _assign(
                 _name('c'),
                 ast.BoolOp(
                     op=ast.Or(),
-                    values=[_name('client'), _call(_name('_get_client'))],
+                    values=[_name('client'), _call(_name('Client'))],
                 ),
             )
         )
@@ -731,22 +854,61 @@ class EndpointFunctionFactory:
         if self.config.response_type:
             self._merge_imports(self.config.response_type.annotation_imports)
 
-            body.append(_assign(_name('response'), request_call))
+            # Check if response type is a raw type (Response, bytes, str) that doesn't need parsing
+            is_raw_response = self._is_raw_response_type(self.config.response_type)
 
-            parse_method = (
-                '_parse_response_async' if self.config.is_async else '_parse_response'
-            )
-            parse_call = _call(
-                func=_attr('c', parse_method),
-                args=[_name('response'), self.config.response_type.annotation_ast],
-            )
-            if self.config.is_async:
-                parse_call = ast.Await(value=parse_call)
-            body.append(ast.Return(value=parse_call))
+            if is_raw_response:
+                # For non-JSON responses, just return the response directly
+                body.append(ast.Return(value=request_call))
+            else:
+                # For JSON responses, parse and validate with Pydantic
+                body.append(_assign(_name('response'), request_call))
+
+                parse_method = (
+                    '_parse_response_async'
+                    if self.config.is_async
+                    else '_parse_response'
+                )
+                parse_call = _call(
+                    func=_attr('c', parse_method),
+                    args=[_name('response'), self.config.response_type.annotation_ast],
+                )
+                if self.config.is_async:
+                    parse_call = ast.Await(value=parse_call)
+                body.append(ast.Return(value=parse_call))
         else:
             body.append(ast.Return(value=request_call))
 
         return body
+
+    def _is_raw_response_type(self, response_type: 'Type') -> bool:
+        """Check if the response type is a raw type that doesn't need JSON parsing.
+
+        Raw types include: Response, bytes, str (for non-JSON content types).
+        """
+        if response_type is None:
+            return True
+
+        ann = response_type.annotation_ast
+        if isinstance(ann, ast.Name):
+            # Simple type like Response, bytes, str
+            return ann.id in ('Response', 'bytes', 'str')
+
+        # For Union types, check if ALL types are raw types
+        if isinstance(ann, ast.Subscript):
+            if isinstance(ann.value, ast.Name) and ann.value.id == 'Union':
+                if isinstance(ann.slice, ast.Tuple):
+                    for elt in ann.slice.elts:
+                        if isinstance(elt, ast.Name):
+                            if elt.id not in ('Response', 'bytes', 'str', 'None'):
+                                return False
+                        elif isinstance(elt, ast.Constant) and elt.value is None:
+                            continue  # None is OK
+                        else:
+                            return False  # Complex type, not raw
+                    return True
+
+        return False
 
     def _build_delegating_body(self) -> list[ast.stmt]:
         """Build the body for a delegating endpoint function."""
@@ -761,7 +923,7 @@ class EndpointFunctionFactory:
 
         method_name = self.config.client_method_name or self.config.fn_name
         client_call = _call(
-            func=_attr(_call(_name('_get_client')), method_name),
+            func=_attr(_call(_name('Client')), method_name),
             args=call_args,
             keywords=call_keywords,
         )
@@ -770,6 +932,168 @@ class EndpointFunctionFactory:
             client_call = ast.Await(value=client_call)
 
         body.append(ast.Return(value=client_call))
+
+        return body
+
+    def _build_paginated_dataframe_body(self) -> list[ast.stmt]:
+        """Build the body for a paginated DataFrame endpoint function.
+
+        This combines pagination (to fetch all items) with DataFrame conversion.
+        """
+        body: list[ast.stmt] = []
+        pag_config = self.config.pagination_config or {}
+
+        library = self.config.dataframe_library
+        return_type_str = (
+            'pd.DataFrame' if library == DataFrameLibrary.PANDAS else 'pl.DataFrame'
+        )
+
+        # Add docstring
+        doc_content = self.config.docs or ''
+        doc_suffix = f'\n\nReturns:\n    {return_type_str}'
+        body.append(
+            ast.Expr(
+                value=ast.Constant(value=clean_docstring(doc_content + doc_suffix))
+            )
+        )
+
+        # c = client or Client()
+        body.append(
+            _assign(
+                _name('c'),
+                ast.BoolOp(
+                    op=ast.Or(),
+                    values=[_name('client'), _call(_name('Client'))],
+                ),
+            )
+        )
+
+        # Build the fetch_page inner function
+        fetch_page_fn = self._build_fetch_page_function()
+        body.append(fetch_page_fn)
+
+        # Build extract_items lambda
+        data_path = pag_config.get('data_path')
+        extract_items = self._build_extract_lambda(data_path)
+
+        # Build pagination call to get all items
+        if self.config.pagination_style == PaginationStyle.OFFSET:
+            paginate_fn = (
+                'paginate_offset_async' if self.config.is_async else 'paginate_offset'
+            )
+
+            total_path = pag_config.get('total_path')
+            get_total = self._build_extract_lambda(total_path) if total_path else None
+
+            paginate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+            ]
+            if get_total:
+                paginate_keywords.append(ast.keyword(arg='get_total', value=get_total))
+            paginate_keywords.extend(
+                [
+                    ast.keyword(
+                        arg='start_offset',
+                        value=ast.BoolOp(
+                            op=ast.Or(), values=[_name('offset'), ast.Constant(value=0)]
+                        ),
+                    ),
+                    ast.keyword(arg='page_size', value=_name('page_size')),
+                    ast.keyword(arg='max_items', value=_name('max_items')),
+                ]
+            )
+
+        elif self.config.pagination_style == PaginationStyle.CURSOR:
+            paginate_fn = (
+                'paginate_cursor_async' if self.config.is_async else 'paginate_cursor'
+            )
+
+            next_cursor_path = pag_config.get('next_cursor_path')
+            get_next_cursor = (
+                self._build_extract_lambda(next_cursor_path)
+                if next_cursor_path
+                else ast.Lambda(
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg='page')],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        defaults=[],
+                    ),
+                    body=ast.Constant(value=None),
+                )
+            )
+
+            paginate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+                ast.keyword(arg='get_next_cursor', value=get_next_cursor),
+                ast.keyword(arg='start_cursor', value=_name('cursor')),
+                ast.keyword(arg='page_size', value=_name('page_size')),
+                ast.keyword(arg='max_items', value=_name('max_items')),
+            ]
+
+        elif self.config.pagination_style == PaginationStyle.PAGE:
+            paginate_fn = (
+                'paginate_page_async' if self.config.is_async else 'paginate_page'
+            )
+
+            total_pages_path = pag_config.get('total_pages_path')
+            get_total_pages = (
+                self._build_extract_lambda(total_pages_path)
+                if total_pages_path
+                else None
+            )
+
+            paginate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+            ]
+            if get_total_pages:
+                paginate_keywords.append(
+                    ast.keyword(arg='get_total_pages', value=get_total_pages)
+                )
+            paginate_keywords.extend(
+                [
+                    ast.keyword(
+                        arg='start_page',
+                        value=ast.BoolOp(
+                            op=ast.Or(), values=[_name('page'), ast.Constant(value=1)]
+                        ),
+                    ),
+                    ast.keyword(arg='page_size', value=_name('page_size')),
+                    ast.keyword(arg='max_items', value=_name('max_items')),
+                ]
+            )
+        else:
+            raise ValueError(
+                f'Unsupported pagination style: {self.config.pagination_style}'
+            )
+
+        paginate_call = _call(
+            func=_name(paginate_fn),
+            keywords=paginate_keywords,
+        )
+
+        if self.config.is_async:
+            paginate_call = ast.Await(value=paginate_call)
+
+        # items = paginate_offset(...)
+        body.append(_assign(_name('items'), paginate_call))
+
+        # Convert to DataFrame
+        helper_fn = 'to_pandas' if library == DataFrameLibrary.PANDAS else 'to_polars'
+
+        # return to_pandas(items) or to_polars(items)
+        body.append(
+            ast.Return(
+                value=_call(
+                    func=_name(helper_fn),
+                    args=[_name('items')],
+                )
+            )
+        )
 
         return body
 
@@ -796,7 +1120,7 @@ class EndpointFunctionFactory:
                     _name('c'),
                     ast.BoolOp(
                         op=ast.Or(),
-                        values=[_name('client'), _call(_name('_get_client'))],
+                        values=[_name('client'), _call(_name('Client'))],
                     ),
                 )
             )
@@ -819,7 +1143,7 @@ class EndpointFunctionFactory:
             call_args, call_keywords = self._build_delegating_call_args()
             method_name = self.config.client_method_name or self.config.fn_name
             client_call = _call(
-                func=_attr(_call(_name('_get_client')), method_name),
+                func=_attr(_call(_name('Client')), method_name),
                 args=call_args,
                 keywords=call_keywords,
             )
@@ -843,6 +1167,473 @@ class EndpointFunctionFactory:
         )
 
         return body
+
+    def _build_paginated_body(self) -> list[ast.stmt]:
+        """Build the body for a paginated endpoint function."""
+        body: list[ast.stmt] = []
+        pag_config = self.config.pagination_config or {}
+
+        # Add docstring
+        if self.config.docs:
+            body.append(
+                ast.Expr(value=ast.Constant(value=clean_docstring(self.config.docs)))
+            )
+
+        # c = client or Client()
+        body.append(
+            _assign(
+                _name('c'),
+                ast.BoolOp(
+                    op=ast.Or(),
+                    values=[_name('client'), _call(_name('Client'))],
+                ),
+            )
+        )
+
+        # Build the fetch_page inner function
+        fetch_page_fn = self._build_fetch_page_function()
+        body.append(fetch_page_fn)
+
+        # Build extract_items lambda
+        data_path = pag_config.get('data_path')
+        extract_items = self._build_extract_lambda(data_path)
+
+        # Build pagination call
+        if self.config.pagination_style == PaginationStyle.OFFSET:
+            paginate_fn = (
+                'paginate_offset_async' if self.config.is_async else 'paginate_offset'
+            )
+
+            # Build get_total lambda if total_path is specified
+            total_path = pag_config.get('total_path')
+            get_total = self._build_extract_lambda(total_path) if total_path else None
+
+            paginate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+            ]
+            if get_total:
+                paginate_keywords.append(ast.keyword(arg='get_total', value=get_total))
+            paginate_keywords.extend(
+                [
+                    ast.keyword(
+                        arg='start_offset',
+                        value=ast.BoolOp(
+                            op=ast.Or(), values=[_name('offset'), ast.Constant(value=0)]
+                        ),
+                    ),
+                    ast.keyword(arg='page_size', value=_name('page_size')),
+                    ast.keyword(arg='max_items', value=_name('max_items')),
+                ]
+            )
+
+        elif self.config.pagination_style == PaginationStyle.CURSOR:
+            paginate_fn = (
+                'paginate_cursor_async' if self.config.is_async else 'paginate_cursor'
+            )
+
+            next_cursor_path = pag_config.get('next_cursor_path')
+            get_next_cursor = (
+                self._build_extract_lambda(next_cursor_path)
+                if next_cursor_path
+                else ast.Lambda(
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg='page')],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        defaults=[],
+                    ),
+                    body=ast.Constant(value=None),
+                )
+            )
+
+            paginate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+                ast.keyword(arg='get_next_cursor', value=get_next_cursor),
+                ast.keyword(arg='start_cursor', value=_name('cursor')),
+                ast.keyword(arg='page_size', value=_name('page_size')),
+                ast.keyword(arg='max_items', value=_name('max_items')),
+            ]
+
+        elif self.config.pagination_style == PaginationStyle.PAGE:
+            paginate_fn = (
+                'paginate_page_async' if self.config.is_async else 'paginate_page'
+            )
+
+            total_pages_path = pag_config.get('total_pages_path')
+            get_total_pages = (
+                self._build_extract_lambda(total_pages_path)
+                if total_pages_path
+                else None
+            )
+
+            paginate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+            ]
+            if get_total_pages:
+                paginate_keywords.append(
+                    ast.keyword(arg='get_total_pages', value=get_total_pages)
+                )
+            paginate_keywords.extend(
+                [
+                    ast.keyword(
+                        arg='start_page',
+                        value=ast.BoolOp(
+                            op=ast.Or(), values=[_name('page'), ast.Constant(value=1)]
+                        ),
+                    ),
+                    ast.keyword(arg='page_size', value=_name('page_size')),
+                    ast.keyword(arg='max_items', value=_name('max_items')),
+                ]
+            )
+        else:
+            raise ValueError(
+                f'Unsupported pagination style: {self.config.pagination_style}'
+            )
+
+        paginate_call = _call(
+            func=_name(paginate_fn),
+            keywords=paginate_keywords,
+        )
+
+        if self.config.is_async:
+            paginate_call = ast.Await(value=paginate_call)
+
+        body.append(ast.Return(value=paginate_call))
+
+        return body
+
+    def _build_paginated_iter_body(self) -> list[ast.stmt]:
+        """Build the body for a paginated iterator endpoint function."""
+        body: list[ast.stmt] = []
+        pag_config = self.config.pagination_config or {}
+
+        # Add docstring
+        if self.config.docs:
+            body.append(
+                ast.Expr(value=ast.Constant(value=clean_docstring(self.config.docs)))
+            )
+
+        # c = client or Client()
+        body.append(
+            _assign(
+                _name('c'),
+                ast.BoolOp(
+                    op=ast.Or(),
+                    values=[_name('client'), _call(_name('Client'))],
+                ),
+            )
+        )
+
+        # Build the fetch_page inner function
+        fetch_page_fn = self._build_fetch_page_function()
+        body.append(fetch_page_fn)
+
+        # Build extract_items lambda
+        data_path = pag_config.get('data_path')
+        extract_items = self._build_extract_lambda(data_path)
+
+        # Build iterate call
+        if self.config.pagination_style == PaginationStyle.OFFSET:
+            iterate_fn = (
+                'iterate_offset_async' if self.config.is_async else 'iterate_offset'
+            )
+
+            total_path = pag_config.get('total_path')
+            get_total = self._build_extract_lambda(total_path) if total_path else None
+
+            iterate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+            ]
+            if get_total:
+                iterate_keywords.append(ast.keyword(arg='get_total', value=get_total))
+            iterate_keywords.extend(
+                [
+                    ast.keyword(
+                        arg='start_offset',
+                        value=ast.BoolOp(
+                            op=ast.Or(), values=[_name('offset'), ast.Constant(value=0)]
+                        ),
+                    ),
+                    ast.keyword(arg='page_size', value=_name('page_size')),
+                    ast.keyword(arg='max_items', value=_name('max_items')),
+                ]
+            )
+
+        elif self.config.pagination_style == PaginationStyle.CURSOR:
+            iterate_fn = (
+                'iterate_cursor_async' if self.config.is_async else 'iterate_cursor'
+            )
+
+            next_cursor_path = pag_config.get('next_cursor_path')
+            get_next_cursor = (
+                self._build_extract_lambda(next_cursor_path)
+                if next_cursor_path
+                else ast.Lambda(
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg='page')],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        defaults=[],
+                    ),
+                    body=ast.Constant(value=None),
+                )
+            )
+
+            iterate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+                ast.keyword(arg='get_next_cursor', value=get_next_cursor),
+                ast.keyword(arg='start_cursor', value=_name('cursor')),
+                ast.keyword(arg='page_size', value=_name('page_size')),
+                ast.keyword(arg='max_items', value=_name('max_items')),
+            ]
+
+        elif self.config.pagination_style == PaginationStyle.PAGE:
+            # Page-based doesn't have a separate iterator in the module content
+            # We'll use yield from with paginate_page
+            iterate_fn = (
+                'paginate_page_async' if self.config.is_async else 'paginate_page'
+            )
+
+            total_pages_path = pag_config.get('total_pages_path')
+            get_total_pages = (
+                self._build_extract_lambda(total_pages_path)
+                if total_pages_path
+                else None
+            )
+
+            iterate_keywords = [
+                ast.keyword(arg='fetch_page', value=_name('fetch_page')),
+                ast.keyword(arg='extract_items', value=extract_items),
+            ]
+            if get_total_pages:
+                iterate_keywords.append(
+                    ast.keyword(arg='get_total_pages', value=get_total_pages)
+                )
+            iterate_keywords.extend(
+                [
+                    ast.keyword(
+                        arg='start_page',
+                        value=ast.BoolOp(
+                            op=ast.Or(), values=[_name('page'), ast.Constant(value=1)]
+                        ),
+                    ),
+                    ast.keyword(arg='page_size', value=_name('page_size')),
+                    ast.keyword(arg='max_items', value=_name('max_items')),
+                ]
+            )
+        else:
+            raise ValueError(
+                f'Unsupported pagination style: {self.config.pagination_style}'
+            )
+
+        iterate_call = _call(
+            func=_name(iterate_fn),
+            keywords=iterate_keywords,
+        )
+
+        if self.config.is_async:
+            # async for item in iterate_..._async(...): yield item
+            body.append(
+                ast.AsyncFor(
+                    target=ast.Name(id='item', ctx=ast.Store()),
+                    iter=iterate_call,
+                    body=[ast.Expr(value=ast.Yield(value=_name('item')))],
+                    orelse=[],
+                )
+            )
+        else:
+            # yield from iterate_...()
+            body.append(ast.Expr(value=ast.YieldFrom(value=iterate_call)))
+
+        return body
+
+    def _build_fetch_page_function(self) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        """Build the inner fetch_page function for pagination."""
+        pag_config = self.config.pagination_config or {}
+
+        # Determine parameter names based on pagination style
+        if self.config.pagination_style == PaginationStyle.OFFSET:
+            param1_name = 'off'
+            param2_name = 'limit'
+            param1_api_name = pag_config.get('offset_param', 'offset')
+            param2_api_name = pag_config.get('limit_param', 'limit')
+        elif self.config.pagination_style == PaginationStyle.CURSOR:
+            param1_name = 'cur'
+            param2_name = 'limit'
+            param1_api_name = pag_config.get('cursor_param', 'cursor')
+            param2_api_name = pag_config.get('limit_param', 'limit')
+        elif self.config.pagination_style == PaginationStyle.PAGE:
+            param1_name = 'pg'
+            param2_name = 'per_page'
+            param1_api_name = pag_config.get('page_param', 'page')
+            param2_api_name = pag_config.get('per_page_param', 'per_page')
+        else:
+            param1_name = 'param1'
+            param2_name = 'param2'
+            param1_api_name = 'param1'
+            param2_api_name = 'param2'
+
+        # Build the params dict for the request
+        # Start with static params from original endpoint parameters
+        param_keys = []
+        param_values = []
+
+        # Add pagination params
+        param_keys.append(ast.Constant(value=param1_api_name))
+        param_values.append(_name(param1_name))
+        param_keys.append(ast.Constant(value=param2_api_name))
+        param_values.append(_name(param2_name))
+
+        # Add any other query parameters from the original endpoint
+        if self.config.parameters:
+            for param in self.config.parameters:
+                if param.location == 'query':
+                    # Skip pagination params we're handling
+                    skip_params = {
+                        pag_config.get('offset_param'),
+                        pag_config.get('limit_param'),
+                        pag_config.get('cursor_param'),
+                        pag_config.get('page_param'),
+                        pag_config.get('per_page_param'),
+                    }
+                    if param.name not in skip_params:
+                        param_keys.append(ast.Constant(value=param.name))
+                        param_values.append(_name(param.name_sanitized))
+
+        params_dict = ast.Dict(keys=param_keys, values=param_values)
+
+        # Build request call
+        request_method = '_request_async' if self.config.is_async else '_request'
+
+        # Build path expression (handle path parameters)
+        path_expr = ParameterASTBuilder.build_path_expr(
+            self.config.path, self.config.parameters or []
+        )
+
+        request_keywords = [
+            ast.keyword(
+                arg='method', value=ast.Constant(value=self.config.method.lower())
+            ),
+            ast.keyword(arg='path', value=path_expr),
+            ast.keyword(arg='params', value=params_dict),
+            ast.keyword(arg=None, value=_name('kwargs')),
+        ]
+
+        request_call = _call(
+            func=_attr('c', request_method),
+            keywords=request_keywords,
+        )
+
+        if self.config.is_async:
+            request_call = ast.Await(value=request_call)
+
+        # Build parse response call
+        if self.config.response_type:
+            parse_method = (
+                '_parse_response_async' if self.config.is_async else '_parse_response'
+            )
+            parse_call = _call(
+                func=_attr('c', parse_method),
+                args=[_name('response'), self.config.response_type.annotation_ast],
+            )
+            if self.config.is_async:
+                parse_call = ast.Await(value=parse_call)
+
+            fetch_body = [
+                _assign(_name('response'), request_call),
+                ast.Return(value=parse_call),
+            ]
+        else:
+            fetch_body = [
+                ast.Return(value=request_call),
+            ]
+
+        # Determine param1 annotation
+        if self.config.pagination_style == PaginationStyle.CURSOR:
+            param1_annotation = _union_expr([_name('str'), ast.Constant(value=None)])
+        else:
+            param1_annotation = _name('int')
+
+        fetch_args = [
+            _argument(param1_name, param1_annotation),
+            _argument(param2_name, _name('int')),
+        ]
+
+        if self.config.is_async:
+            return ast.AsyncFunctionDef(
+                name='fetch_page',
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=fetch_args,
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    kwarg=None,
+                    defaults=[],
+                ),
+                body=fetch_body,
+                decorator_list=[],
+                returns=None,
+            )
+        else:
+            return ast.FunctionDef(
+                name='fetch_page',
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=fetch_args,
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    kwarg=None,
+                    defaults=[],
+                ),
+                body=fetch_body,
+                decorator_list=[],
+                returns=None,
+            )
+
+    def _build_extract_lambda(self, path: str | None) -> ast.expr:
+        """Build a lambda to extract data from a response using a path."""
+        page_arg = ast.arg(arg='page', annotation=None)
+
+        if path:
+            # Check if path looks like a simple attribute access (no dots)
+            if '.' not in path:
+                # lambda page: page.attr
+                body = ast.Attribute(
+                    value=ast.Name(id='page', ctx=ast.Load()),
+                    attr=path,
+                    ctx=ast.Load(),
+                )
+            else:
+                # lambda page: extract_path(page, "path")
+                body = ast.Call(
+                    func=_name('extract_path'),
+                    args=[
+                        ast.Name(id='page', ctx=ast.Load()),
+                        ast.Constant(value=path),
+                    ],
+                    keywords=[],
+                )
+        else:
+            # lambda page: page
+            body = ast.Name(id='page', ctx=ast.Load())
+
+        return ast.Lambda(
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[page_arg],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+            ),
+            body=body,
+        )
 
     def _build_request_keywords(self) -> list[ast.keyword]:
         """Build the keywords for a request call."""
@@ -1506,8 +2297,8 @@ def _build_endpoint_fn(
     if response_model:
         returns = response_model.annotation_ast
     else:
-        returns = _name('Any')
-        imports.setdefault('typing', set()).add('Any')
+        returns = _name('Response')
+        imports.setdefault('httpx', set()).add('Response')
 
     func_ast = func_builder(
         name=name,
@@ -1604,59 +2395,20 @@ def async_request_fn(
 
 
 def build_default_client_code() -> tuple[list[ast.stmt], ImportDict]:
-    """Build the default client variable and _get_client() function.
+    """Build any module-level client code needed.
 
-    Generates:
-        _default_client: Client | None = None
-
-        def _get_client() -> Client:
-            '''Get or lazily initialize the default client.'''
-            global _default_client
-            if _default_client is None:
-                _default_client = Client()
-            return _default_client
+    Previously this created a global singleton pattern. Now it returns
+    an empty list since each endpoint creates its own Client instance
+    when none is provided.
 
     Returns:
-        A tuple of (statements, imports).
+        A tuple of (statements, imports) - currently empty.
     """
     imports: ImportDict = {}
-
-    default_client_var = ast.AnnAssign(
-        target=ast.Name(id='_default_client', ctx=ast.Store()),
-        annotation=_union_expr([_name('Client'), ast.Constant(value=None)]),
-        value=ast.Constant(value=None),
-        simple=1,
-    )
-
-    get_client_body: list[ast.stmt] = [
-        ast.Expr(
-            value=ast.Constant(value='Get or lazily initialize the default client.')
-        ),
-        ast.Global(names=['_default_client']),
-        ast.If(
-            test=ast.Compare(
-                left=_name('_default_client'),
-                ops=[ast.Is()],
-                comparators=[ast.Constant(value=None)],
-            ),
-            body=[
-                _assign(_name('_default_client'), _call(_name('Client'))),
-            ],
-            orelse=[],
-        ),
-        ast.Return(value=_name('_default_client')),
-    ]
-
-    get_client_fn = _func(
-        name='_get_client',
-        args=[],
-        body=get_client_body,
-        returns=_name('Client'),
-    )
-
     imports.setdefault('typing', set()).add('Union')
 
-    return [default_client_var, get_client_fn], imports
+    # No global state needed - endpoints use `client or Client()`
+    return [], imports
 
 
 # =============================================================================
@@ -1796,6 +2548,64 @@ def build_standalone_dataframe_fn(
     return EndpointFunctionFactory(config).build()
 
 
+def build_standalone_paginated_dataframe_fn(
+    fn_name: str,
+    method: str,
+    path: str,
+    parameters: list['Parameter'] | None,
+    request_body_info: 'RequestBodyInfo | None',
+    response_type: 'Type | None',
+    pagination_style: str,
+    pagination_config: dict,
+    library: Literal['pandas', 'polars'],
+    item_type_ast: ast.expr | None = None,
+    docs: str | None = None,
+    is_async: bool = False,
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
+    """Build a standalone paginated DataFrame endpoint function.
+
+    This function fetches all paginated items and returns them as a DataFrame.
+
+    Args:
+        fn_name: The function name to generate.
+        method: HTTP method (GET, POST, etc.).
+        path: The API path with optional placeholders.
+        parameters: List of Parameter objects for the endpoint.
+        request_body_info: RequestBodyInfo object for the request body, or None.
+        response_type: The response Type for parsing.
+        pagination_style: The pagination style ('offset', 'cursor', 'page').
+        pagination_config: Dict with pagination parameter names and paths.
+        library: The DataFrame library ('pandas' or 'polars').
+        item_type_ast: AST for the item type in the list.
+        docs: Optional docstring for the generated function.
+        is_async: Whether to generate an async function.
+
+    Returns:
+        A tuple of (function_ast, imports).
+    """
+    pag_style = PaginationStyle(pagination_style)
+    df_library = (
+        DataFrameLibrary.PANDAS if library == 'pandas' else DataFrameLibrary.POLARS
+    )
+    config = EndpointFunctionConfig(
+        fn_name=fn_name,
+        method=method,
+        path=path,
+        parameters=parameters,
+        request_body_info=request_body_info,
+        response_type=response_type,
+        docs=docs,
+        is_async=is_async,
+        mode=EndpointMode.STANDALONE,
+        pagination_style=pag_style,
+        pagination_config=pagination_config,
+        is_paginated_dataframe=True,
+        dataframe_library=df_library,
+        item_type_ast=item_type_ast,
+    )
+    return EndpointFunctionFactory(config).build()
+
+
 def build_delegating_dataframe_fn(
     fn_name: str,
     client_method_name: str,
@@ -1839,5 +2649,108 @@ def build_delegating_dataframe_fn(
         client_method_name=client_method_name,
         dataframe_library=df_library,
         dataframe_path=default_path,
+    )
+    return EndpointFunctionFactory(config).build()
+
+
+def build_standalone_paginated_fn(
+    fn_name: str,
+    method: str,
+    path: str,
+    parameters: list['Parameter'] | None,
+    request_body_info: 'RequestBodyInfo | None',
+    response_type: 'Type | None',
+    pagination_style: str,
+    pagination_config: dict,
+    item_type_ast: ast.expr | None = None,
+    docs: str | None = None,
+    is_async: bool = False,
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
+    """Build a standalone paginated endpoint function.
+
+    This function returns all items by automatically handling pagination.
+
+    Args:
+        fn_name: The function name to generate.
+        method: HTTP method (GET, POST, etc.).
+        path: The API path with optional placeholders.
+        parameters: List of Parameter objects for the endpoint.
+        request_body_info: RequestBodyInfo object for the request body, or None.
+        response_type: The response Type for parsing.
+        pagination_style: The pagination style ('offset', 'cursor', 'page').
+        pagination_config: Dict with pagination parameter names and paths.
+        item_type_ast: AST for the item type in the list.
+        docs: Optional docstring for the generated function.
+        is_async: Whether to generate an async function.
+
+    Returns:
+        A tuple of (function_ast, imports).
+    """
+    pag_style = PaginationStyle(pagination_style)
+    config = EndpointFunctionConfig(
+        fn_name=fn_name,
+        method=method,
+        path=path,
+        parameters=parameters,
+        request_body_info=request_body_info,
+        response_type=response_type,
+        docs=docs,
+        is_async=is_async,
+        mode=EndpointMode.STANDALONE,
+        pagination_style=pag_style,
+        pagination_config=pagination_config,
+        item_type_ast=item_type_ast,
+    )
+    return EndpointFunctionFactory(config).build()
+
+
+def build_standalone_paginated_iter_fn(
+    fn_name: str,
+    method: str,
+    path: str,
+    parameters: list['Parameter'] | None,
+    request_body_info: 'RequestBodyInfo | None',
+    response_type: 'Type | None',
+    pagination_style: str,
+    pagination_config: dict,
+    item_type_ast: ast.expr | None = None,
+    docs: str | None = None,
+    is_async: bool = False,
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
+    """Build a standalone paginated iterator endpoint function.
+
+    This function yields items one at a time for memory-efficient streaming.
+
+    Args:
+        fn_name: The function name to generate.
+        method: HTTP method (GET, POST, etc.).
+        path: The API path with optional placeholders.
+        parameters: List of Parameter objects for the endpoint.
+        request_body_info: RequestBodyInfo object for the request body, or None.
+        response_type: The response Type for parsing.
+        pagination_style: The pagination style ('offset', 'cursor', 'page').
+        pagination_config: Dict with pagination parameter names and paths.
+        item_type_ast: AST for the item type in the list.
+        docs: Optional docstring for the generated function.
+        is_async: Whether to generate an async function.
+
+    Returns:
+        A tuple of (function_ast, imports).
+    """
+    pag_style = PaginationStyle(pagination_style)
+    config = EndpointFunctionConfig(
+        fn_name=fn_name,
+        method=method,
+        path=path,
+        parameters=parameters,
+        request_body_info=request_body_info,
+        response_type=response_type,
+        docs=docs,
+        is_async=is_async,
+        mode=EndpointMode.STANDALONE,
+        pagination_style=pag_style,
+        pagination_config=pagination_config,
+        is_iterator=True,
+        item_type_ast=item_type_ast,
     )
     return EndpointFunctionFactory(config).build()

@@ -21,6 +21,7 @@ from otterapi.codegen.ast_utils import (
 )
 from otterapi.codegen.client import (
     EndpointInfo,
+    generate_api_error_class,
     generate_base_client_class,
     generate_client_stub,
 )
@@ -31,6 +32,11 @@ from otterapi.codegen.dataframes import (
     get_dataframe_config_for_endpoint,
 )
 from otterapi.codegen.endpoints import async_request_fn, request_fn
+from otterapi.codegen.pagination import (
+    PaginationMethodConfig,
+    generate_pagination_module,
+    get_pagination_config_for_endpoint,
+)
 from otterapi.codegen.schema import SchemaLoader
 from otterapi.codegen.types import (
     Endpoint,
@@ -130,6 +136,9 @@ class Codegen(OpenAPIProcessor):
         When multiple content types are available for a response, it prefers JSON
         content types for better type safety.
 
+        For non-JSON content types (XML, binary, text, etc.), no response type is
+        generated and the endpoint will return the raw httpx.Response object.
+
         Args:
             operation: The OpenAPI operation to extract responses from.
 
@@ -155,8 +164,15 @@ class Codegen(OpenAPIProcessor):
                 response.content
             )
 
+            # Only generate typed response for JSON content types
+            # For other content types (XML, binary, etc.), return raw httpx.Response
             response_type = None
-            if selected_media_type.schema_:
+            is_json_content = (
+                selected_content_type in JSON_CONTENT_TYPES
+                or selected_content_type.endswith('+json')
+            )
+
+            if is_json_content and selected_media_type.schema_:
                 response_type = self.typegen.schema_to_type(
                     selected_media_type.schema_,
                     base_name=f'{sanitize_identifier(operation.operationId)}Response',
@@ -208,43 +224,26 @@ class Codegen(OpenAPIProcessor):
         return union_type
 
     def _collect_non_json_types(self, response_list: list[ResponseInfo]) -> list[Type]:
-        """Collect non-JSON response types (bytes, str, Response)."""
-        non_json_types = []
-        has_binary = False
-        has_text = False
-        has_raw = False
+        """Collect non-JSON response types.
 
-        for r in response_list:
-            if r.is_binary and not has_binary:
-                bytes_type = Type(
-                    reference=None,
-                    name=None,
-                    type='primitive',
-                    annotation_ast=_name('bytes'),
-                )
-                non_json_types.append(bytes_type)
-                has_binary = True
-            elif r.is_text and not has_text:
-                str_type = Type(
-                    reference=None,
-                    name=None,
-                    type='primitive',
-                    annotation_ast=_name('str'),
-                )
-                non_json_types.append(str_type)
-                has_text = True
-            elif r.is_raw and not has_raw:
-                response_type = Type(
-                    reference=None,
-                    name=None,
-                    type='primitive',
-                    annotation_ast=_name('Response'),
-                )
-                response_type.add_annotation_import('httpx', 'Response')
-                non_json_types.append(response_type)
-                has_raw = True
+        For all non-JSON content types (binary, text, XML, etc.), we return
+        the raw httpx.Response object. This gives users full control over
+        how to handle the response (.content, .text, .json(), etc.).
+        """
+        # Check if there are any non-JSON responses
+        has_non_json = any(not r.is_json for r in response_list)
 
-        return non_json_types
+        if has_non_json:
+            response_type = Type(
+                reference=None,
+                name=None,
+                type='primitive',
+                annotation_ast=_name('Response'),
+            )
+            response_type.add_annotation_import('httpx', 'Response')
+            return [response_type]
+
+        return []
 
     def _get_response_models(
         self, operation: Operation
@@ -278,22 +277,33 @@ class Codegen(OpenAPIProcessor):
         else:
             return response_list, self._create_response_union(all_types)
 
-    def _extract_operation_parameters(self, operation: Operation) -> list[Parameter]:
+    def _extract_operation_parameters(
+        self, operation: Operation, path_item_parameters: list | None = None
+    ) -> list[Parameter]:
         """Extract path, query, header, and cookie parameters from an operation.
+
+        Merges path-level parameters with operation-level parameters.
+        Operation parameters override path-level parameters with the same name and location.
 
         Args:
             operation: The OpenAPI operation to extract parameters from.
+            path_item_parameters: Optional path-level parameters to inherit.
 
         Returns:
             List of Parameter objects for path/query/header/cookie parameters.
         """
-        params = []
+        # Merge path-level and operation-level parameters
+        # Operation parameters override path-level parameters with same name+location
+        all_params = []
+        param_keys_seen = set()  # Track (name, location) to handle overrides
+
+        # First, add operation-level parameters (they take precedence)
         for param in operation.parameters or []:
             param_type = None
             if param.schema_:
                 param_type = self.typegen.schema_to_type(param.schema_)
 
-            params.append(
+            all_params.append(
                 Parameter(
                     name=param.name,
                     name_sanitized=sanitize_parameter_field_name(param.name),
@@ -303,7 +313,27 @@ class Codegen(OpenAPIProcessor):
                     description=param.description,
                 )
             )
-        return params
+            param_keys_seen.add((param.name, param.in_))
+
+        # Then, add path-level parameters that weren't overridden
+        for param in path_item_parameters or []:
+            if (param.name, param.in_) not in param_keys_seen:
+                param_type = None
+                if param.schema_:
+                    param_type = self.typegen.schema_to_type(param.schema_)
+
+                all_params.append(
+                    Parameter(
+                        name=param.name,
+                        name_sanitized=sanitize_parameter_field_name(param.name),
+                        location=param.in_,
+                        required=param.required or False,
+                        type=param_type,
+                        description=param.description,
+                    )
+                )
+
+        return all_params
 
     def _extract_request_body(self, operation: Operation) -> RequestBodyInfo | None:
         """Extract request body information from an operation.
@@ -340,25 +370,30 @@ class Codegen(OpenAPIProcessor):
         )
 
     def _get_param_model(
-        self, operation: Operation
+        self, operation: Operation, path_item_parameters: list | None = None
     ) -> tuple[list[Parameter], RequestBodyInfo | None]:
         """Get all parameters and request body info for an operation.
 
         Args:
             operation: The OpenAPI operation to extract parameters from.
+            path_item_parameters: Optional path-level parameters to inherit.
 
         Returns:
             A tuple of (parameters, request_body_info) where:
             - parameters: List of Parameter objects (path, query, header)
             - request_body_info: RequestBodyInfo object or None
         """
-        params = self._extract_operation_parameters(operation)
+        params = self._extract_operation_parameters(operation, path_item_parameters)
         body_info = self._extract_request_body(operation)
 
         return params, body_info
 
     def _generate_endpoint(
-        self, path: str, method: str, operation: Operation
+        self,
+        path: str,
+        method: str,
+        operation: Operation,
+        path_item_parameters: list | None = None,
     ) -> Endpoint:
         """Generate an endpoint with sync and async functions.
 
@@ -366,6 +401,7 @@ class Codegen(OpenAPIProcessor):
             path: The API path for the endpoint.
             method: The HTTP method (get, post, etc.).
             operation: The OpenAPI operation definition.
+            path_item_parameters: Optional list of path-level parameters to inherit.
 
         Returns:
             An Endpoint object containing the generated functions and imports.
@@ -378,15 +414,26 @@ class Codegen(OpenAPIProcessor):
         fn_name = to_snake_case(raw_name)
         async_fn_name = f'a{fn_name}'
 
-        parameters, request_body_info = self._get_param_model(operation)
+        parameters, request_body_info = self._get_param_model(
+            operation, path_item_parameters
+        )
         response_infos, response_model = self._get_response_models(operation)
+
+        # Build docstring with deprecation warning if needed
+        docs = operation.description or ''
+        if operation.deprecated:
+            deprecation_notice = '.. deprecated::\n    This endpoint is deprecated.'
+            if docs:
+                docs = f'{docs}\n\n{deprecation_notice}'
+            else:
+                docs = deprecation_notice
 
         async_fn, async_imports = async_request_fn(
             name=async_fn_name,
             method=method,
             path=path,
             response_model=response_model,
-            docs=operation.description,
+            docs=docs if docs else None,
             parameters=parameters,
             response_infos=response_infos,
             request_body_info=request_body_info,
@@ -397,7 +444,7 @@ class Codegen(OpenAPIProcessor):
             method=method,
             path=path,
             response_model=response_model,
-            docs=operation.description,
+            docs=docs if docs else None,
             parameters=parameters,
             response_infos=response_infos,
             request_body_info=request_body_info,
@@ -453,12 +500,51 @@ class Codegen(OpenAPIProcessor):
             else self.openapi.paths
         )
         for path, path_item in paths_dict.items():
+            # Apply path filtering
+            if not self._should_include_path(path):
+                continue
+
+            # Get path-level parameters to pass to each operation
+            path_item_parameters = (
+                path_item.parameters if hasattr(path_item, 'parameters') else None
+            )
             for method in HTTP_METHODS:
                 operation = getattr(path_item, method, None)
                 if operation:
-                    ep = self._generate_endpoint(path, method, operation)
+                    ep = self._generate_endpoint(
+                        path, method, operation, path_item_parameters
+                    )
                     endpoints.append(ep)
         return endpoints
+
+    def _should_include_path(self, path: str) -> bool:
+        """Check if a path should be included based on include_paths and exclude_paths.
+
+        Args:
+            path: The API path to check.
+
+        Returns:
+            True if the path should be included, False otherwise.
+        """
+        import fnmatch
+
+        # Check include_paths first (if specified, path must match at least one)
+        if self.config.include_paths:
+            included = any(
+                fnmatch.fnmatch(path, pattern) for pattern in self.config.include_paths
+            )
+            if not included:
+                return False
+
+        # Check exclude_paths (if path matches any, exclude it)
+        if self.config.exclude_paths:
+            excluded = any(
+                fnmatch.fnmatch(path, pattern) for pattern in self.config.exclude_paths
+            )
+            if excluded:
+                return False
+
+        return True
 
     def _resolve_base_url(self) -> str:
         """Resolve the base URL from config or OpenAPI spec.
@@ -548,6 +634,9 @@ class Codegen(OpenAPIProcessor):
             build_default_client_code,
             build_standalone_dataframe_fn,
             build_standalone_endpoint_fn,
+            build_standalone_paginated_dataframe_fn,
+            build_standalone_paginated_fn,
+            build_standalone_paginated_iter_fn,
         )
 
         body: list[ast.stmt] = []
@@ -561,40 +650,250 @@ class Codegen(OpenAPIProcessor):
         # Track if we need DataFrame type hints
         has_dataframe_methods = False
 
+        # Track if we need pagination imports
+        has_pagination_methods = False
+
         # Add standalone endpoint functions
         endpoint_names = set()
         for endpoint in endpoints:
-            # Build sync standalone function
-            sync_fn, sync_imports = build_standalone_endpoint_fn(
-                fn_name=endpoint.sync_fn_name,
-                method=endpoint.method,
-                path=endpoint.path,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                response_type=endpoint.response_type,
-                response_infos=endpoint.response_infos,
-                docs=endpoint.description,
-                is_async=False,
-            )
-            endpoint_names.add(endpoint.sync_fn_name)
-            body.append(sync_fn)
-            import_collector.add_imports(sync_imports)
+            # Check if this endpoint has pagination configured
+            pag_config = None
+            if self.config.pagination.enabled:
+                pag_config = self._get_pagination_config(endpoint)
 
-            # Build async standalone function
-            async_fn, async_imports = build_standalone_endpoint_fn(
-                fn_name=endpoint.async_fn_name,
-                method=endpoint.method,
-                path=endpoint.path,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                response_type=endpoint.response_type,
-                response_infos=endpoint.response_infos,
-                docs=endpoint.description,
-                is_async=True,
-            )
-            endpoint_names.add(endpoint.async_fn_name)
-            body.append(async_fn)
-            import_collector.add_imports(async_imports)
+            # Generate pagination methods if configured, otherwise regular functions
+            if pag_config:
+                has_pagination_methods = True
+
+                # Get item type from response type if it's a list
+                item_type_ast = self._get_item_type_ast(endpoint)
+
+                # Build pagination config dict
+                pag_dict = {
+                    'offset_param': pag_config.offset_param,
+                    'limit_param': pag_config.limit_param,
+                    'cursor_param': pag_config.cursor_param,
+                    'page_param': pag_config.page_param,
+                    'per_page_param': pag_config.per_page_param,
+                    'data_path': pag_config.data_path,
+                    'total_path': pag_config.total_path,
+                    'next_cursor_path': pag_config.next_cursor_path,
+                    'total_pages_path': pag_config.total_pages_path,
+                    'default_page_size': pag_config.default_page_size,
+                }
+
+                # Sync paginated function (replaces regular sync function)
+                pag_fn, pag_imports = build_standalone_paginated_fn(
+                    fn_name=endpoint.sync_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=False,
+                )
+                endpoint_names.add(endpoint.sync_fn_name)
+                body.append(pag_fn)
+                import_collector.add_imports(pag_imports)
+
+                # Async paginated function (replaces regular async function)
+                async_pag_fn, async_pag_imports = build_standalone_paginated_fn(
+                    fn_name=endpoint.async_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=True,
+                )
+                endpoint_names.add(endpoint.async_fn_name)
+                body.append(async_pag_fn)
+                import_collector.add_imports(async_pag_imports)
+
+                # Sync iterator function
+                iter_fn_name = f'{endpoint.sync_fn_name}_iter'
+                iter_fn, iter_imports = build_standalone_paginated_iter_fn(
+                    fn_name=iter_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=False,
+                )
+                endpoint_names.add(iter_fn_name)
+                body.append(iter_fn)
+                import_collector.add_imports(iter_imports)
+
+                # Async iterator function
+                async_iter_fn_name = f'{endpoint.async_fn_name}_iter'
+                async_iter_fn, async_iter_imports = build_standalone_paginated_iter_fn(
+                    fn_name=async_iter_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    item_type_ast=item_type_ast,
+                    docs=endpoint.description,
+                    is_async=True,
+                )
+                endpoint_names.add(async_iter_fn_name)
+                body.append(async_iter_fn)
+                import_collector.add_imports(async_iter_imports)
+
+                # Generate paginated DataFrame methods if dataframe is enabled
+                # For paginated endpoints, we know they return lists, so check config directly
+                if self.config.dataframe.enabled:
+                    # Check if endpoint is explicitly disabled
+                    endpoint_df_config = self.config.dataframe.endpoints.get(
+                        endpoint.sync_fn_name
+                    )
+                    if endpoint_df_config and endpoint_df_config.enabled is False:
+                        pass  # Skip DataFrame generation for this endpoint
+                    elif self.config.dataframe.pandas:
+                        has_dataframe_methods = True
+                        has_pagination_methods = True
+                        # Sync pandas paginated method
+                        pandas_fn_name = f'{endpoint.sync_fn_name}_df'
+                        pandas_fn, pandas_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=pandas_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='pandas',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=False,
+                            )
+                        )
+                        endpoint_names.add(pandas_fn_name)
+                        body.append(pandas_fn)
+                        import_collector.add_imports(pandas_imports)
+
+                        # Async pandas paginated method
+                        async_pandas_fn_name = f'{endpoint.async_fn_name}_df'
+                        async_pandas_fn, async_pandas_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=async_pandas_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='pandas',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=True,
+                            )
+                        )
+                        endpoint_names.add(async_pandas_fn_name)
+                        body.append(async_pandas_fn)
+                        import_collector.add_imports(async_pandas_imports)
+
+                    if self.config.dataframe.polars:
+                        has_dataframe_methods = True
+                        has_pagination_methods = True
+                        # Sync polars paginated method
+                        polars_fn_name = f'{endpoint.sync_fn_name}_pl'
+                        polars_fn, polars_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=polars_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='polars',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=False,
+                            )
+                        )
+                        endpoint_names.add(polars_fn_name)
+                        body.append(polars_fn)
+                        import_collector.add_imports(polars_imports)
+
+                        # Async polars paginated method
+                        async_polars_fn_name = f'{endpoint.async_fn_name}_pl'
+                        async_polars_fn, async_polars_imports = (
+                            build_standalone_paginated_dataframe_fn(
+                                fn_name=async_polars_fn_name,
+                                method=endpoint.method,
+                                path=endpoint.path,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                response_type=endpoint.response_type,
+                                pagination_style=pag_config.style,
+                                pagination_config=pag_dict,
+                                library='polars',
+                                item_type_ast=item_type_ast,
+                                docs=endpoint.description,
+                                is_async=True,
+                            )
+                        )
+                        endpoint_names.add(async_polars_fn_name)
+                        body.append(async_polars_fn)
+                        import_collector.add_imports(async_polars_imports)
+            else:
+                # Build regular sync standalone function
+                sync_fn, sync_imports = build_standalone_endpoint_fn(
+                    fn_name=endpoint.sync_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    response_infos=endpoint.response_infos,
+                    docs=endpoint.description,
+                    is_async=False,
+                )
+                endpoint_names.add(endpoint.sync_fn_name)
+                body.append(sync_fn)
+                import_collector.add_imports(sync_imports)
+
+                # Build regular async standalone function
+                async_fn, async_imports = build_standalone_endpoint_fn(
+                    fn_name=endpoint.async_fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    response_infos=endpoint.response_infos,
+                    docs=endpoint.description,
+                    is_async=True,
+                )
+                endpoint_names.add(endpoint.async_fn_name)
+                body.append(async_fn)
+                import_collector.add_imports(async_imports)
+
+                # Note: Pagination methods already handled above if pag_config exists
+                # Skip to next endpoint since pagination methods already generated
+                pass
 
             # Generate DataFrame methods if configured
             if self.config.dataframe.enabled:
@@ -700,6 +999,30 @@ class Codegen(OpenAPIProcessor):
             )
             body.insert(0, dataframe_import)
 
+        # Add pagination imports if needed
+        if has_pagination_methods:
+            import_collector.add_imports(
+                {'collections.abc': {'Iterator', 'AsyncIterator'}}
+            )
+            pagination_import = ast.ImportFrom(
+                module='_pagination',
+                names=[
+                    ast.alias(name='paginate_offset', asname=None),
+                    ast.alias(name='paginate_offset_async', asname=None),
+                    ast.alias(name='paginate_cursor', asname=None),
+                    ast.alias(name='paginate_cursor_async', asname=None),
+                    ast.alias(name='paginate_page', asname=None),
+                    ast.alias(name='paginate_page_async', asname=None),
+                    ast.alias(name='iterate_offset', asname=None),
+                    ast.alias(name='iterate_offset_async', asname=None),
+                    ast.alias(name='iterate_cursor', asname=None),
+                    ast.alias(name='iterate_cursor_async', asname=None),
+                    ast.alias(name='extract_path', asname=None),
+                ],
+                level=1,
+            )
+            body.insert(0, pagination_import)
+
         return body, import_collector, endpoint_names
 
     def _generate_endpoint_file(
@@ -787,31 +1110,48 @@ class Codegen(OpenAPIProcessor):
         if not os.access(str(directory), os.W_OK):
             raise RuntimeError(f'Directory {directory} is not writable')
 
+        generated_files: list[str] = []
+        output_name = self.config.output
+
         endpoints = self._generate_endpoints()
 
         models_file = directory / self.config.models_file
         self._generate_models_file(models_file)
+        generated_files.append(f'{output_name}/{self.config.models_file}')
 
         base_url = self._resolve_base_url()
+
+        # Generate pagination module if enabled
+        if self.config.pagination.enabled:
+            generate_pagination_module(directory)
+            generated_files.append(f'{output_name}/_pagination.py')
 
         # Generate client class
         client_name = self._get_client_class_name()
 
         # Check if module splitting is enabled
         if self.config.module_split.enabled:
-            self._generate_split_endpoints(
+            split_files = self._generate_split_endpoints(
                 directory, models_file, endpoints, base_url, client_name
             )
+            generated_files.extend(split_files)
         else:
             # Original single-file generation
             endpoints_file = directory / self.config.endpoints_file
             self._generate_endpoint_file(endpoints_file, models_file, endpoints)
+            generated_files.append(f'{output_name}/{self.config.endpoints_file}')
 
-        self._generate_client_file(directory, endpoints, base_url, client_name)
+        client_files = self._generate_client_file(
+            directory, endpoints, base_url, client_name
+        )
+        generated_files.extend(client_files)
 
         # Write __init__.py only if not using module splitting (splitting handles its own __init__.py)
         if not self.config.module_split.enabled:
             self._generate_init_file(directory, endpoints, client_name)
+            generated_files.append(f'{output_name}/__init__.py')
+
+        return generated_files
 
     def _generate_init_file(
         self,
@@ -834,6 +1174,13 @@ class Codegen(OpenAPIProcessor):
         for endpoint in endpoints:
             endpoint_names.append(endpoint.sync_fn_name)
             endpoint_names.append(endpoint.async_fn_name)
+
+            # Add pagination method names if configured
+            if self.config.pagination.enabled:
+                pag_config = self._get_pagination_config(endpoint)
+                if pag_config:
+                    endpoint_names.append(f'{endpoint.sync_fn_name}_iter')
+                    endpoint_names.append(f'{endpoint.async_fn_name}_iter')
 
             # Add DataFrame method names if configured
             if self.config.dataframe.enabled:
@@ -912,7 +1259,7 @@ class Codegen(OpenAPIProcessor):
         endpoints: list[Endpoint],
         base_url: str,
         client_class_name: str,
-    ) -> None:
+    ) -> list[str]:
         """Generate split endpoint modules based on configuration.
 
         Args:
@@ -921,6 +1268,9 @@ class Codegen(OpenAPIProcessor):
             endpoints: List of Endpoint objects.
             base_url: The base URL for API requests.
             client_class_name: Name of the client class (e.g., 'SwaggerPetstoreOpenAPI30Client').
+
+        Returns:
+            List of relative paths to generated files.
         """
         from otterapi.codegen.splitting import (
             ModuleTreeBuilder,
@@ -939,13 +1289,26 @@ class Codegen(OpenAPIProcessor):
             models_import_path=self.config.models_import_path,
             client_class_name=client_class_name,
             dataframe_config=self.config.dataframe,
+            pagination_config=self.config.pagination,
         )
 
-        emitter.emit(
+        emitted = emitter.emit(
             tree=tree,
             base_url=base_url,
             typegen_types=self.typegen.types,
         )
+
+        # Collect generated file paths
+        output_name = self.config.output
+        generated_files = []
+        for module in emitted:
+            rel_path = str(module.path.relative_to(directory))
+            generated_files.append(f'{output_name}/{rel_path}')
+
+        # Add __init__.py files
+        generated_files.append(f'{output_name}/__init__.py')
+
+        return generated_files
 
     def _get_client_class_name(self) -> str:
         """Get the client class name from config or derive from API title."""
@@ -969,7 +1332,7 @@ class Codegen(OpenAPIProcessor):
         endpoints: list[Endpoint],
         base_url: str,
         client_name: str,
-    ) -> None:
+    ) -> list[str]:
         """Generate the client class files.
 
         Generates:
@@ -982,6 +1345,9 @@ class Codegen(OpenAPIProcessor):
             endpoints: List of Endpoint objects.
             base_url: Default base URL from spec.
             client_name: Name for the client class.
+
+        Returns:
+            List of relative paths to generated files.
         """
         base_client_name = f'Base{client_name}'
 
@@ -994,9 +1360,33 @@ class Codegen(OpenAPIProcessor):
             for ep in endpoint_infos
         )
 
+        # Also check if pagination + dataframe is enabled
+        # Paginated endpoints always get dataframe methods if dataframe is enabled,
+        # regardless of whether the original endpoint returns a list
+        if (
+            not has_dataframe_methods
+            and self.config.pagination.enabled
+            and self.config.dataframe.enabled
+            and (self.config.dataframe.pandas or self.config.dataframe.polars)
+        ):
+            for endpoint in endpoints:
+                pag_config = self._get_pagination_config(endpoint)
+                if pag_config:
+                    # Check if endpoint is not explicitly disabled for dataframe
+                    endpoint_df_config = self.config.dataframe.endpoints.get(
+                        endpoint.sync_fn_name
+                    )
+                    if not (endpoint_df_config and endpoint_df_config.enabled is False):
+                        has_dataframe_methods = True
+                        break
+
+        output_name = self.config.output
+        generated_files = []
+
         # Generate _dataframe.py if needed
         if has_dataframe_methods:
             generate_dataframe_module(directory)
+            generated_files.append(f'{output_name}/_dataframe.py')
 
         # Generate base client class (infrastructure only, no endpoint methods)
         class_ast, client_imports = generate_base_client_class(
@@ -1026,15 +1416,20 @@ class Codegen(OpenAPIProcessor):
         )
         body.append(typevar_def)
 
-        # Add __all__ export
-        body.append(_all([base_client_name]))
+        # Add __all__ export (include APIError)
+        body.append(_all([base_client_name, 'APIError']))
 
-        # Add the class
+        # Add APIError class
+        api_error_class = generate_api_error_class()
+        body.append(api_error_class)
+
+        # Add the client class
         body.append(class_ast)
 
         # Write _client.py (always regenerated)
         client_file = directory / '_client.py'
         write_mod(body, client_file)
+        generated_files.append(f'{output_name}/_client.py')
 
         # Generate client.py stub (only if it doesn't exist)
         user_client_file = directory / 'client.py'
@@ -1045,6 +1440,9 @@ class Codegen(OpenAPIProcessor):
                 module_name='_client',
             )
             user_client_file.write_text(stub_content)
+            generated_files.append(f'{output_name}/client.py')
+
+        return generated_files
 
     def _endpoints_to_info(self, endpoints: list[Endpoint]) -> list[EndpointInfo]:
         """Convert Endpoint objects to EndpointInfo for client generation."""
@@ -1095,3 +1493,41 @@ class Codegen(OpenAPIProcessor):
             This method delegates to endpoint_returns_list() from dataframe_utils.
         """
         return endpoint_returns_list(endpoint)
+
+    def _get_pagination_config(
+        self, endpoint: Endpoint
+    ) -> PaginationMethodConfig | None:
+        """Get the pagination method configuration for an endpoint.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            PaginationMethodConfig if pagination is configured, None otherwise.
+        """
+        return get_pagination_config_for_endpoint(
+            endpoint.sync_fn_name,
+            self.config.pagination,
+            endpoint.parameters,
+        )
+
+    def _get_item_type_ast(self, endpoint: Endpoint) -> ast.expr | None:
+        """Extract the item type AST from a list response type.
+
+        For example, if response_type is list[User], returns the AST for User.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            The AST expression for the item type, or None if not a list type.
+        """
+        if not endpoint.response_type or not endpoint.response_type.annotation_ast:
+            return None
+
+        ann = endpoint.response_type.annotation_ast
+        if isinstance(ann, ast.Subscript):
+            if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
+                return ann.slice
+
+        return None

@@ -170,19 +170,15 @@ def generate(
                         if codegen.openapi.paths:
                             console.print(f'  Paths: {len(codegen.openapi.paths.root)}')
                 else:
-                    codegen.generate()
+                    generated_files = codegen.generate()
                     progress.update(
                         task,
                         description=f'Code generation completed for {document_config.source}!',
                     )
 
                     console.print('[dim]Generated files:[/dim]')
-                    console.print(
-                        f'  - {document_config.output}/{document_config.models_file}'
-                    )
-                    console.print(
-                        f'  - {document_config.output}/{document_config.endpoints_file}'
-                    )
+                    for file_path in generated_files:
+                        console.print(f'  - {file_path}')
 
         if not dry_run:
             console.print('\n[green]✓[/green] Code generation completed!')

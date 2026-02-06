@@ -106,6 +106,345 @@ class EndpointDataFrameConfig(BaseModel):
     model_config = {'extra': 'forbid'}
 
 
+class PaginationStyle(str, Enum):
+    """Style of pagination used by an API endpoint."""
+
+    OFFSET = 'offset'  # Offset/limit based pagination
+    CURSOR = 'cursor'  # Cursor-based pagination
+    PAGE = 'page'  # Page number based pagination
+    LINK = 'link'  # Link header pagination (RFC 5988)
+
+
+class EndpointPaginationConfig(BaseModel):
+    """Per-endpoint pagination configuration.
+
+    Allows configuring pagination behavior for specific endpoints.
+
+    Attributes:
+        enabled: Override whether to generate pagination methods for this endpoint.
+        style: Pagination style for this endpoint.
+        offset_param: Name of offset parameter (for offset style).
+        limit_param: Name of limit parameter.
+        cursor_param: Name of cursor parameter (for cursor style).
+        page_param: Name of page parameter (for page style).
+        per_page_param: Name of per_page parameter (for page style).
+        data_path: JSON path to items array in response.
+        total_path: JSON path to total count in response.
+        next_cursor_path: JSON path to next cursor in response (for cursor style).
+        total_pages_path: JSON path to total pages in response (for page style).
+        default_page_size: Default page size for this endpoint.
+        max_page_size: Maximum page size for this endpoint.
+    """
+
+    enabled: bool | None = Field(
+        default=None,
+        description='Override whether to generate pagination methods.',
+    )
+
+    style: PaginationStyle | Literal['offset', 'cursor', 'page', 'link'] | None = Field(
+        default=None,
+        description='Pagination style for this endpoint.',
+    )
+
+    # Parameter mappings
+    offset_param: str | None = Field(
+        default=None,
+        description='Name of offset parameter.',
+    )
+
+    limit_param: str | None = Field(
+        default=None,
+        description='Name of limit parameter.',
+    )
+
+    cursor_param: str | None = Field(
+        default=None,
+        description='Name of cursor parameter.',
+    )
+
+    page_param: str | None = Field(
+        default=None,
+        description='Name of page parameter.',
+    )
+
+    per_page_param: str | None = Field(
+        default=None,
+        description='Name of per_page parameter.',
+    )
+
+    # Response mappings
+    data_path: str | None = Field(
+        default=None,
+        description='JSON path to items array in response.',
+    )
+
+    total_path: str | None = Field(
+        default=None,
+        description='JSON path to total count in response.',
+    )
+
+    next_cursor_path: str | None = Field(
+        default=None,
+        description='JSON path to next cursor in response.',
+    )
+
+    total_pages_path: str | None = Field(
+        default=None,
+        description='JSON path to total pages in response.',
+    )
+
+    # Limits
+    default_page_size: int | None = Field(
+        default=None,
+        description='Default page size for this endpoint.',
+    )
+
+    max_page_size: int | None = Field(
+        default=None,
+        description='Maximum page size for this endpoint.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('style', mode='before')
+    @classmethod
+    def normalize_style(cls, v: Any) -> PaginationStyle | None:
+        """Convert string style to enum."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return PaginationStyle(v.lower())
+        return v
+
+
+class PaginationConfig(BaseModel):
+    """Global pagination configuration.
+
+    When enabled, generates pagination methods for configured endpoints.
+
+    Attributes:
+        enabled: Enable pagination method generation.
+        auto_detect: Automatically detect and enable pagination for endpoints
+            that have pagination parameters (offset/limit, cursor, page/per_page).
+        default_style: Default pagination style when not explicitly configured.
+        default_page_size: Default page size for iteration.
+        default_data_path: Default JSON path to items array.
+        endpoints: Per-endpoint pagination configuration.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description='Enable pagination method generation.',
+    )
+
+    auto_detect: bool = Field(
+        default=True,
+        description=(
+            'Automatically detect and enable pagination for endpoints '
+            'that have pagination parameters (offset/limit, cursor, page/per_page). '
+            'When enabled, endpoints with matching parameters will automatically '
+            'get pagination methods generated without explicit configuration.'
+        ),
+    )
+
+    default_style: PaginationStyle | Literal['offset', 'cursor', 'page', 'link'] = (
+        Field(
+            default=PaginationStyle.OFFSET,
+            description='Default pagination style.',
+        )
+    )
+
+    default_page_size: int = Field(
+        default=100,
+        description='Default page size for iteration.',
+    )
+
+    default_data_path: str | None = Field(
+        default=None,
+        description='Default JSON path to items array.',
+    )
+
+    default_total_path: str | None = Field(
+        default=None,
+        description='Default JSON path to total count in response.',
+    )
+
+    # Default parameter names
+    default_offset_param: str = Field(
+        default='offset',
+        description='Default name of offset parameter.',
+    )
+
+    default_limit_param: str = Field(
+        default='limit',
+        description='Default name of limit parameter.',
+    )
+
+    default_cursor_param: str = Field(
+        default='cursor',
+        description='Default name of cursor parameter.',
+    )
+
+    default_page_param: str = Field(
+        default='page',
+        description='Default name of page parameter.',
+    )
+
+    default_per_page_param: str = Field(
+        default='per_page',
+        description='Default name of per_page parameter.',
+    )
+
+    # Per-endpoint configuration
+    endpoints: dict[str, EndpointPaginationConfig] = Field(
+        default_factory=dict,
+        description='Per-endpoint pagination configuration.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('default_style', mode='before')
+    @classmethod
+    def normalize_default_style(cls, v: Any) -> PaginationStyle:
+        """Convert string style to enum."""
+        if isinstance(v, str):
+            return PaginationStyle(v.lower())
+        return v
+
+    def should_generate_for_endpoint(
+        self,
+        endpoint_name: str,
+        endpoint_parameters: list | None = None,
+    ) -> tuple[bool, ResolvedPaginationConfig | None]:
+        """Determine if pagination methods should be generated for an endpoint.
+
+        Args:
+            endpoint_name: The name of the endpoint function.
+            endpoint_parameters: Optional list of endpoint parameters for auto-detection.
+
+        Returns:
+            A tuple of (should_generate, resolved_config) indicating
+            whether to generate and the resolved configuration.
+        """
+        if not self.enabled:
+            return False, None
+
+        # Check for endpoint-specific configuration
+        endpoint_config = self.endpoints.get(endpoint_name)
+
+        if endpoint_config is None:
+            # No explicit config - check if auto_detect is enabled
+            if not self.auto_detect or endpoint_parameters is None:
+                return False, None
+
+            # Auto-detect pagination based on parameters
+            detected_style = self._detect_pagination_style(endpoint_parameters)
+            if detected_style is None:
+                return False, None
+
+            # Use defaults for auto-detected endpoints
+            resolved = ResolvedPaginationConfig(
+                style=detected_style,
+                offset_param=self.default_offset_param,
+                limit_param=self.default_limit_param,
+                cursor_param=self.default_cursor_param,
+                page_param=self.default_page_param,
+                per_page_param=self.default_per_page_param,
+                data_path=self.default_data_path,
+                total_path=self.default_total_path,
+                next_cursor_path=None,
+                total_pages_path=None,
+                default_page_size=self.default_page_size,
+                max_page_size=None,
+            )
+            return True, resolved
+
+        # Check if explicitly disabled
+        if endpoint_config.enabled is False:
+            return False, None
+
+        # Resolve the configuration with defaults
+        style = endpoint_config.style or self.default_style
+        if isinstance(style, str):
+            style = PaginationStyle(style.lower())
+
+        resolved = ResolvedPaginationConfig(
+            style=style,
+            offset_param=endpoint_config.offset_param or self.default_offset_param,
+            limit_param=endpoint_config.limit_param or self.default_limit_param,
+            cursor_param=endpoint_config.cursor_param or self.default_cursor_param,
+            page_param=endpoint_config.page_param or self.default_page_param,
+            per_page_param=endpoint_config.per_page_param
+            or self.default_per_page_param,
+            data_path=endpoint_config.data_path or self.default_data_path,
+            total_path=endpoint_config.total_path or self.default_total_path,
+            next_cursor_path=endpoint_config.next_cursor_path,
+            total_pages_path=endpoint_config.total_pages_path,
+            default_page_size=endpoint_config.default_page_size
+            or self.default_page_size,
+            max_page_size=endpoint_config.max_page_size,
+        )
+
+        return True, resolved
+
+    def _detect_pagination_style(self, parameters: list) -> PaginationStyle | None:
+        """Detect pagination style based on endpoint parameters.
+
+        Args:
+            parameters: List of endpoint parameter objects.
+
+        Returns:
+            Detected PaginationStyle or None if no pagination detected.
+        """
+        param_names = {p.name for p in parameters if hasattr(p, 'name')}
+
+        # Check for offset-based pagination (offset + limit)
+        if (
+            self.default_offset_param in param_names
+            and self.default_limit_param in param_names
+        ):
+            return PaginationStyle.OFFSET
+
+        # Check for cursor-based pagination (cursor + limit)
+        if (
+            self.default_cursor_param in param_names
+            and self.default_limit_param in param_names
+        ):
+            return PaginationStyle.CURSOR
+
+        # Check for page-based pagination (page + per_page)
+        if (
+            self.default_page_param in param_names
+            and self.default_per_page_param in param_names
+        ):
+            return PaginationStyle.PAGE
+
+        return None
+
+
+class ResolvedPaginationConfig(BaseModel):
+    """Resolved pagination configuration with all defaults applied.
+
+    This is the configuration used during code generation after
+    merging endpoint-specific config with global defaults.
+    """
+
+    style: PaginationStyle
+    offset_param: str
+    limit_param: str
+    cursor_param: str
+    page_param: str
+    per_page_param: str
+    data_path: str | None
+    total_path: str | None
+    next_cursor_path: str | None
+    total_pages_path: str | None
+    default_page_size: int
+    max_page_size: int | None
+
+    model_config = {'extra': 'forbid'}
+
+
 class DataFrameConfig(BaseModel):
     """Configuration for DataFrame conversion methods.
 
@@ -395,6 +734,24 @@ class DocumentConfig(BaseModel):
 
     output: str = Field(..., description='Output directory for the generated code.')
 
+    include_paths: list[str] | None = Field(
+        default=None,
+        description=(
+            'List of path patterns to include. Only endpoints matching these patterns '
+            'will be generated. Supports glob patterns (e.g., "/api/v1/users/*"). '
+            'If None, all paths are included.'
+        ),
+    )
+
+    exclude_paths: list[str] | None = Field(
+        default=None,
+        description=(
+            'List of path patterns to exclude. Endpoints matching these patterns '
+            'will be skipped. Supports glob patterns (e.g., "/internal/*"). '
+            'Applied after include_paths filtering.'
+        ),
+    )
+
     models_file: str = Field('models.py', description='File name for generated models.')
 
     models_import_path: str | None = Field(
@@ -425,6 +782,11 @@ class DocumentConfig(BaseModel):
     dataframe: DataFrameConfig = Field(
         default_factory=DataFrameConfig,
         description='Configuration for DataFrame conversion methods.',
+    )
+
+    pagination: PaginationConfig = Field(
+        default_factory=PaginationConfig,
+        description='Configuration for automatic pagination.',
     )
 
     @field_validator('source')

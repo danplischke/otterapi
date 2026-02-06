@@ -48,6 +48,444 @@ class EndpointInfo:
     )
 
 
+def generate_api_error_class() -> ast.ClassDef:
+    """Generate the APIError exception class for detailed error handling.
+
+    Returns:
+        AST ClassDef for the APIError class.
+    """
+    # Build __init__ method
+    init_body = [
+        # self.status_code = status_code
+        _assign(_attr('self', 'status_code'), _name('status_code')),
+        # self.response = response
+        _assign(_attr('self', 'response'), _name('response')),
+        # self.detail = detail
+        _assign(_attr('self', 'detail'), _name('detail')),
+        # self.body = body
+        _assign(_attr('self', 'body'), _name('body')),
+        # super().__init__(message)
+        ast.Expr(
+            value=_call(
+                _attr(_call(_name('super')), '__init__'),
+                args=[_name('message')],
+            )
+        ),
+    ]
+
+    init_method = ast.FunctionDef(
+        name='__init__',
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[
+                _argument('self'),
+                _argument('message', _name('str')),
+            ],
+            kwonlyargs=[
+                _argument('status_code', _name('int')),
+                _argument('response', _name('Response')),
+                _argument(
+                    'detail', _union_expr([_name('Any'), ast.Constant(value=None)])
+                ),
+                _argument('body', _name('str')),
+            ],
+            kw_defaults=[
+                None,  # status_code - required, no default
+                None,  # response - required, no default
+                ast.Constant(value=None),  # detail - default None
+                ast.Constant(value=''),  # body - default ''
+            ],
+            kwarg=None,
+            defaults=[],
+        ),
+        body=init_body,
+        decorator_list=[],
+        returns=ast.Constant(value=None),
+    )
+
+    # Build from_response classmethod
+    from_response_body = [
+        # status_code = response.status_code
+        _assign(_name('status_code'), _attr('response', 'status_code')),
+        # body = response.text
+        _assign(_name('body'), _attr('response', 'text')),
+        # detail = None
+        _assign(_name('detail'), ast.Constant(value=None)),
+        # try: ... except: ...
+        ast.Try(
+            body=[
+                # json_body = response.json()
+                _assign(_name('json_body'), _call(_attr('response', 'json'))),
+                # if isinstance(json_body, dict):
+                ast.If(
+                    test=_call(
+                        _name('isinstance'), args=[_name('json_body'), _name('dict')]
+                    ),
+                    body=[
+                        # detail = json_body.get('detail', json_body)
+                        _assign(
+                            _name('detail'),
+                            _call(
+                                _attr('json_body', 'get'),
+                                args=[ast.Constant(value='detail'), _name('json_body')],
+                            ),
+                        ),
+                    ],
+                    orelse=[
+                        # detail = json_body
+                        _assign(_name('detail'), _name('json_body')),
+                    ],
+                ),
+            ],
+            handlers=[
+                ast.ExceptHandler(
+                    type=_name('Exception'),
+                    name=None,
+                    body=[
+                        # detail = body if body else None
+                        _assign(
+                            _name('detail'),
+                            ast.IfExp(
+                                test=_name('body'),
+                                body=_name('body'),
+                                orelse=ast.Constant(value=None),
+                            ),
+                        ),
+                    ],
+                ),
+            ],
+            orelse=[],
+            finalbody=[],
+        ),
+        # message = f'HTTP {status_code} Error'
+        _assign(
+            _name('message'),
+            ast.JoinedStr(
+                values=[
+                    ast.Constant(value='HTTP '),
+                    ast.FormattedValue(value=_name('status_code'), conversion=-1),
+                    ast.Constant(value=' Error'),
+                ]
+            ),
+        ),
+        # if detail:
+        ast.If(
+            test=_name('detail'),
+            body=[
+                # if isinstance(detail, list):
+                ast.If(
+                    test=_call(
+                        _name('isinstance'), args=[_name('detail'), _name('list')]
+                    ),
+                    body=[
+                        # error_msgs = []
+                        _assign(_name('error_msgs'), ast.List(elts=[], ctx=ast.Load())),
+                        # for err in detail:
+                        ast.For(
+                            target=ast.Name(id='err', ctx=ast.Store()),
+                            iter=_name('detail'),
+                            body=[
+                                ast.If(
+                                    test=_call(
+                                        _name('isinstance'),
+                                        args=[_name('err'), _name('dict')],
+                                    ),
+                                    body=[
+                                        _assign(
+                                            _name('loc'),
+                                            _call(
+                                                _attr('err', 'get'),
+                                                args=[
+                                                    ast.Constant(value='loc'),
+                                                    ast.List(elts=[], ctx=ast.Load()),
+                                                ],
+                                            ),
+                                        ),
+                                        _assign(
+                                            _name('msg'),
+                                            _call(
+                                                _attr('err', 'get'),
+                                                args=[
+                                                    ast.Constant(value='msg'),
+                                                    _call(
+                                                        _name('str'),
+                                                        args=[_name('err')],
+                                                    ),
+                                                ],
+                                            ),
+                                        ),
+                                        _assign(
+                                            _name('loc_str'),
+                                            ast.IfExp(
+                                                test=_name('loc'),
+                                                body=_call(
+                                                    _attr(
+                                                        ast.Constant(value=' -> '),
+                                                        'join',
+                                                    ),
+                                                    args=[
+                                                        ast.GeneratorExp(
+                                                            elt=_call(
+                                                                _name('str'),
+                                                                args=[_name('x')],
+                                                            ),
+                                                            generators=[
+                                                                ast.comprehension(
+                                                                    target=ast.Name(
+                                                                        id='x',
+                                                                        ctx=ast.Store(),
+                                                                    ),
+                                                                    iter=_name('loc'),
+                                                                    ifs=[],
+                                                                    is_async=0,
+                                                                )
+                                                            ],
+                                                        )
+                                                    ],
+                                                ),
+                                                orelse=ast.Constant(value='unknown'),
+                                            ),
+                                        ),
+                                        ast.Expr(
+                                            value=_call(
+                                                _attr('error_msgs', 'append'),
+                                                args=[
+                                                    ast.JoinedStr(
+                                                        values=[
+                                                            ast.Constant(value='  - '),
+                                                            ast.FormattedValue(
+                                                                value=_name('loc_str'),
+                                                                conversion=-1,
+                                                            ),
+                                                            ast.Constant(value=': '),
+                                                            ast.FormattedValue(
+                                                                value=_name('msg'),
+                                                                conversion=-1,
+                                                            ),
+                                                        ]
+                                                    )
+                                                ],
+                                            )
+                                        ),
+                                    ],
+                                    orelse=[
+                                        ast.Expr(
+                                            value=_call(
+                                                _attr('error_msgs', 'append'),
+                                                args=[
+                                                    ast.JoinedStr(
+                                                        values=[
+                                                            ast.Constant(value='  - '),
+                                                            ast.FormattedValue(
+                                                                value=_name('err'),
+                                                                conversion=-1,
+                                                            ),
+                                                        ]
+                                                    )
+                                                ],
+                                            )
+                                        ),
+                                    ],
+                                ),
+                            ],
+                            orelse=[],
+                        ),
+                        # if error_msgs:
+                        ast.If(
+                            test=_name('error_msgs'),
+                            body=[
+                                _assign(
+                                    _name('message'),
+                                    ast.BinOp(
+                                        left=ast.JoinedStr(
+                                            values=[
+                                                ast.Constant(value='HTTP '),
+                                                ast.FormattedValue(
+                                                    value=_name('status_code'),
+                                                    conversion=-1,
+                                                ),
+                                                ast.Constant(
+                                                    value=' Validation Error:\n'
+                                                ),
+                                            ]
+                                        ),
+                                        op=ast.Add(),
+                                        right=_call(
+                                            _attr(ast.Constant(value='\n'), 'join'),
+                                            args=[_name('error_msgs')],
+                                        ),
+                                    ),
+                                ),
+                            ],
+                            orelse=[],
+                        ),
+                    ],
+                    orelse=[
+                        # elif isinstance(detail, str):
+                        ast.If(
+                            test=_call(
+                                _name('isinstance'),
+                                args=[_name('detail'), _name('str')],
+                            ),
+                            body=[
+                                _assign(
+                                    _name('message'),
+                                    ast.JoinedStr(
+                                        values=[
+                                            ast.Constant(value='HTTP '),
+                                            ast.FormattedValue(
+                                                value=_name('status_code'),
+                                                conversion=-1,
+                                            ),
+                                            ast.Constant(value=' Error: '),
+                                            ast.FormattedValue(
+                                                value=_name('detail'), conversion=-1
+                                            ),
+                                        ]
+                                    ),
+                                ),
+                            ],
+                            orelse=[
+                                _assign(
+                                    _name('message'),
+                                    ast.JoinedStr(
+                                        values=[
+                                            ast.Constant(value='HTTP '),
+                                            ast.FormattedValue(
+                                                value=_name('status_code'),
+                                                conversion=-1,
+                                            ),
+                                            ast.Constant(value=' Error: '),
+                                            ast.FormattedValue(
+                                                value=_name('detail'), conversion=-1
+                                            ),
+                                        ]
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            orelse=[],
+        ),
+        # return cls(message, status_code=status_code, response=response, detail=detail, body=body)
+        ast.Return(
+            value=_call(
+                _name('cls'),
+                args=[_name('message')],
+                keywords=[
+                    ast.keyword(arg='status_code', value=_name('status_code')),
+                    ast.keyword(arg='response', value=_name('response')),
+                    ast.keyword(arg='detail', value=_name('detail')),
+                    ast.keyword(arg='body', value=_name('body')),
+                ],
+            )
+        ),
+    ]
+
+    from_response_method = ast.FunctionDef(
+        name='from_response',
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[
+                _argument('cls'),
+                _argument('response', _name('Response')),
+            ],
+            kwonlyargs=[],
+            kw_defaults=[],
+            kwarg=None,
+            defaults=[],
+        ),
+        body=from_response_body,
+        decorator_list=[_name('classmethod')],
+        returns=ast.Constant(value='APIError'),
+    )
+
+    # Build __str__ method
+    str_method = ast.FunctionDef(
+        name='__str__',
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[_argument('self')],
+            kwonlyargs=[],
+            kw_defaults=[],
+            kwarg=None,
+            defaults=[],
+        ),
+        body=[
+            ast.Return(
+                value=ast.Subscript(
+                    value=_attr('self', 'args'),
+                    slice=ast.Constant(value=0),
+                    ctx=ast.Load(),
+                )
+            ),
+        ],
+        decorator_list=[],
+        returns=_name('str'),
+    )
+
+    # Build __repr__ method
+    repr_method = ast.FunctionDef(
+        name='__repr__',
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[_argument('self')],
+            kwonlyargs=[],
+            kw_defaults=[],
+            kwarg=None,
+            defaults=[],
+        ),
+        body=[
+            ast.Return(
+                value=ast.JoinedStr(
+                    values=[
+                        ast.Constant(value='APIError(status_code='),
+                        ast.FormattedValue(
+                            value=_attr('self', 'status_code'), conversion=-1
+                        ),
+                        ast.Constant(value=', detail='),
+                        ast.FormattedValue(
+                            value=_attr('self', 'detail'), conversion=114
+                        ),  # 114 = 'r' for repr
+                        ast.Constant(value=')'),
+                    ]
+                )
+            ),
+        ],
+        decorator_list=[],
+        returns=_name('str'),
+    )
+
+    # Build class docstring
+    docstring = ast.Expr(
+        value=ast.Constant(
+            value="""Exception raised when an API request fails with an error response.
+
+This exception provides detailed error information from the API response,
+including the HTTP status code, error message, and full response body.
+
+Attributes:
+    status_code: The HTTP status code of the response.
+    response: The httpx Response object.
+    detail: Parsed error detail from the response body (if available).
+    body: Raw response body text.
+"""
+        )
+    )
+
+    class_def = ast.ClassDef(
+        name='APIError',
+        bases=[_name('Exception')],
+        keywords=[],
+        body=[docstring, init_method, from_response_method, str_method, repr_method],
+        decorator_list=[],
+    )
+
+    return class_def
+
+
 def generate_base_client_class(
     class_name: str,
     default_base_url: str,
@@ -469,15 +907,60 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
         )
 
 
+def _build_filtered_params_expr() -> ast.expr:
+    """Build expression to filter None values from params dict.
+
+    Generates: {k: v for k, v in params.items() if v is not None} if params else None
+    """
+    # Build the dict comprehension: {k: v for k, v in params.items() if v is not None}
+    dict_comp = ast.DictComp(
+        key=_name('k'),
+        value=_name('v'),
+        generators=[
+            ast.comprehension(
+                target=ast.Tuple(
+                    elts=[
+                        ast.Name(id='k', ctx=ast.Store()),
+                        ast.Name(id='v', ctx=ast.Store()),
+                    ],
+                    ctx=ast.Store(),
+                ),
+                iter=_call(_attr('params', 'items')),
+                ifs=[
+                    ast.Compare(
+                        left=_name('v'),
+                        ops=[ast.IsNot()],
+                        comparators=[ast.Constant(value=None)],
+                    )
+                ],
+                is_async=0,
+            )
+        ],
+    )
+
+    # Build the conditional: dict_comp if params else None
+    return ast.IfExp(
+        test=_name('params'),
+        body=dict_comp,
+        orelse=ast.Constant(value=None),
+    )
+
+
 def _build_sync_request_body(
     url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
 ) -> list[ast.stmt]:
     """Build the body for sync _request method."""
+    # Build filtered_params assignment
+    filtered_params_stmt = _assign(
+        _name('filtered_params'),
+        _build_filtered_params_expr(),
+    )
+
     request_call = _call(
         _attr('client', 'request'),
         args=[_name('method'), url_expr],
         keywords=[
-            ast.keyword(arg='params', value=_name('params')),
+            ast.keyword(arg='params', value=_name('filtered_params')),
             ast.keyword(arg='headers', value=merged_headers),
             ast.keyword(arg='json', value=_name('json')),
             ast.keyword(arg='data', value=_name('data')),
@@ -488,6 +971,7 @@ def _build_sync_request_body(
     )
 
     return [
+        filtered_params_stmt,
         ast.If(
             test=_attr('self', '_client'),
             body=[
@@ -497,7 +981,7 @@ def _build_sync_request_body(
                         _attr(_attr('self', '_client'), 'request'),
                         args=[_name('method'), url_expr],
                         keywords=[
-                            ast.keyword(arg='params', value=_name('params')),
+                            ast.keyword(arg='params', value=_name('filtered_params')),
                             ast.keyword(arg='headers', value=merged_headers),
                             ast.keyword(arg='json', value=_name('json')),
                             ast.keyword(arg='data', value=_name('data')),
@@ -522,7 +1006,19 @@ def _build_sync_request_body(
                 ),
             ],
         ),
-        ast.Expr(value=_call(_attr('response', 'raise_for_status'))),
+        # if response.is_error: raise APIError.from_response(response)
+        ast.If(
+            test=_attr('response', 'is_error'),
+            body=[
+                ast.Raise(
+                    exc=_call(
+                        _attr(_name('APIError'), 'from_response'),
+                        args=[_name('response')],
+                    )
+                ),
+            ],
+            orelse=[],
+        ),
         ast.Return(value=_name('response')),
     ]
 
@@ -531,12 +1027,18 @@ def _build_async_request_body(
     url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
 ) -> list[ast.stmt]:
     """Build the body for async _request_async method."""
+    # Build filtered_params assignment
+    filtered_params_stmt = _assign(
+        _name('filtered_params'),
+        _build_filtered_params_expr(),
+    )
+
     request_call = ast.Await(
         value=_call(
             _attr('client', 'request'),
             args=[_name('method'), url_expr],
             keywords=[
-                ast.keyword(arg='params', value=_name('params')),
+                ast.keyword(arg='params', value=_name('filtered_params')),
                 ast.keyword(arg='headers', value=merged_headers),
                 ast.keyword(arg='json', value=_name('json')),
                 ast.keyword(arg='data', value=_name('data')),
@@ -548,6 +1050,7 @@ def _build_async_request_body(
     )
 
     return [
+        filtered_params_stmt,
         ast.If(
             test=_attr('self', '_async_client'),
             body=[
@@ -558,7 +1061,9 @@ def _build_async_request_body(
                             _attr(_attr('self', '_async_client'), 'request'),
                             args=[_name('method'), url_expr],
                             keywords=[
-                                ast.keyword(arg='params', value=_name('params')),
+                                ast.keyword(
+                                    arg='params', value=_name('filtered_params')
+                                ),
                                 ast.keyword(arg='headers', value=merged_headers),
                                 ast.keyword(arg='json', value=_name('json')),
                                 ast.keyword(arg='data', value=_name('data')),
@@ -584,7 +1089,19 @@ def _build_async_request_body(
                 ),
             ],
         ),
-        ast.Expr(value=_call(_attr('response', 'raise_for_status'))),
+        # if response.is_error: raise APIError.from_response(response)
+        ast.If(
+            test=_attr('response', 'is_error'),
+            body=[
+                ast.Raise(
+                    exc=_call(
+                        _attr(_name('APIError'), 'from_response'),
+                        args=[_name('response')],
+                    )
+                ),
+            ],
+            orelse=[],
+        ),
         ast.Return(value=_name('response')),
     ]
 

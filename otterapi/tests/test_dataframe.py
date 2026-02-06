@@ -274,6 +274,8 @@ class TestDataFrameModuleGenerator:
         assert 'def to_polars' in content
         assert 'import pandas as pd' in content
         assert 'import polars as pl' in content
+        assert 'def _normalize_data' in content
+        assert 'def _to_dict' in content
 
     def test_dataframe_module_is_valid_python(self, tmp_path):
         """Test that generated module is valid Python."""
@@ -776,3 +778,261 @@ class TestDataFrameIntegration:
                 ast.parse(content)
             except SyntaxError as e:
                 pytest.fail(f'Invalid Python in {py_file.name}: {e}')
+
+
+class TestDataFrameNormalization:
+    """Tests for DataFrame normalization handling Pydantic models."""
+
+    def test_normalize_data_with_pydantic_models(self, tmp_path):
+        """Test that _normalize_data correctly converts Pydantic models to dicts."""
+        from pydantic import BaseModel
+
+        from otterapi.codegen.dataframes import generate_dataframe_module
+
+        # Generate the module
+        output_path = generate_dataframe_module(tmp_path)
+
+        # Import the generated module
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location('_dataframe', output_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        # Define a test Pydantic model
+        class TestModel(BaseModel):
+            id: int
+            name: str
+
+        # Test with list of Pydantic models
+        models = [TestModel(id=1, name='Alice'), TestModel(id=2, name='Bob')]
+        normalized = module._normalize_data(models)
+
+        assert isinstance(normalized, list)
+        assert len(normalized) == 2
+        assert normalized[0] == {'id': 1, 'name': 'Alice'}
+        assert normalized[1] == {'id': 2, 'name': 'Bob'}
+
+    def test_normalize_data_with_dicts(self, tmp_path):
+        """Test that _normalize_data passes through dicts unchanged."""
+        from otterapi.codegen.dataframes import generate_dataframe_module
+
+        output_path = generate_dataframe_module(tmp_path)
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location('_dataframe', output_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        # Test with list of dicts
+        dicts = [{'id': 1, 'name': 'Alice'}, {'id': 2, 'name': 'Bob'}]
+        normalized = module._normalize_data(dicts)
+
+        assert normalized == dicts
+
+    def test_normalize_data_with_single_dict(self, tmp_path):
+        """Test that _normalize_data wraps single dict in a list."""
+        from otterapi.codegen.dataframes import generate_dataframe_module
+
+        output_path = generate_dataframe_module(tmp_path)
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location('_dataframe', output_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        single_dict = {'id': 1, 'name': 'Alice'}
+        normalized = module._normalize_data(single_dict)
+
+        assert normalized == [single_dict]
+
+    def test_normalize_data_with_empty_list(self, tmp_path):
+        """Test that _normalize_data handles empty list."""
+        from otterapi.codegen.dataframes import generate_dataframe_module
+
+        output_path = generate_dataframe_module(tmp_path)
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location('_dataframe', output_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        normalized = module._normalize_data([])
+        assert normalized == []
+
+    def test_to_pandas_with_pydantic_models(self, tmp_path):
+        """Test that to_pandas correctly handles Pydantic models."""
+        pytest.importorskip('pandas')
+        from pydantic import BaseModel
+
+        from otterapi.codegen.dataframes import generate_dataframe_module
+
+        output_path = generate_dataframe_module(tmp_path)
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location('_dataframe', output_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class TestModel(BaseModel):
+            id: int
+            name: str
+
+        models = [TestModel(id=1, name='Alice'), TestModel(id=2, name='Bob')]
+        df = module.to_pandas(models)
+
+        assert len(df) == 2
+        assert list(df.columns) == ['id', 'name']
+        assert df['id'].tolist() == [1, 2]
+        assert df['name'].tolist() == ['Alice', 'Bob']
+
+    def test_to_polars_with_pydantic_models(self, tmp_path):
+        """Test that to_polars correctly handles Pydantic models."""
+        pytest.importorskip('polars')
+        from pydantic import BaseModel
+
+        from otterapi.codegen.dataframes import generate_dataframe_module
+
+        output_path = generate_dataframe_module(tmp_path)
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location('_dataframe', output_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class TestModel(BaseModel):
+            id: int
+            name: str
+
+        models = [TestModel(id=1, name='Alice'), TestModel(id=2, name='Bob')]
+        df = module.to_polars(models)
+
+        assert len(df) == 2
+        assert df.columns == ['id', 'name']
+        assert df['id'].to_list() == [1, 2]
+        assert df['name'].to_list() == ['Alice', 'Bob']
+
+    def test_paginated_endpoint_generates_dataframe_module(self, tmp_path):
+        """Test that _dataframe.py is generated when pagination + dataframe is enabled.
+
+        This tests the case where an endpoint doesn't return a list by itself,
+        but pagination is configured which makes it return lists, and thus
+        dataframe methods should be generated.
+        """
+        import json
+
+        from otterapi.codegen.codegen import Codegen
+        from otterapi.config import (
+            DataFrameConfig,
+            DocumentConfig,
+            EndpointPaginationConfig,
+            PaginationConfig,
+        )
+
+        # OpenAPI spec with an endpoint that returns an object (not a list)
+        # but will be paginated
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'Test API', 'version': '1.0.0'},
+            'servers': [{'url': 'https://api.example.com'}],
+            'paths': {
+                '/items': {
+                    'get': {
+                        'operationId': 'getItems',
+                        'summary': 'Get paginated items',
+                        'parameters': [
+                            {
+                                'name': 'offset',
+                                'in': 'query',
+                                'schema': {'type': 'integer'},
+                            },
+                            {
+                                'name': 'limit',
+                                'in': 'query',
+                                'schema': {'type': 'integer'},
+                            },
+                        ],
+                        'responses': {
+                            '200': {
+                                'description': 'Success',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {
+                                            # Returns an object, not a list
+                                            '$ref': '#/components/schemas/PaginatedResponse'
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                },
+            },
+            'components': {
+                'schemas': {
+                    'PaginatedResponse': {
+                        'type': 'object',
+                        'properties': {
+                            'data': {
+                                'type': 'array',
+                                'items': {'$ref': '#/components/schemas/Item'},
+                            },
+                            'total': {'type': 'integer'},
+                        },
+                    },
+                    'Item': {
+                        'type': 'object',
+                        'properties': {
+                            'id': {'type': 'integer'},
+                            'name': {'type': 'string'},
+                        },
+                    },
+                }
+            },
+        }
+
+        spec_file = tmp_path / 'openapi.json'
+        spec_file.write_text(json.dumps(spec))
+
+        output_dir = tmp_path / 'client'
+
+        config = DocumentConfig(
+            source=str(spec_file),
+            output=str(output_dir),
+            dataframe=DataFrameConfig(
+                enabled=True,
+                pandas=True,
+            ),
+            pagination=PaginationConfig(
+                enabled=True,
+                endpoints={
+                    'get_items': EndpointPaginationConfig(
+                        style='offset',
+                        offset_param='offset',
+                        limit_param='limit',
+                        data_path='data',
+                        total_path='total',
+                    ),
+                },
+            ),
+        )
+
+        codegen = Codegen(config)
+        codegen.generate()
+
+        # The key assertion: _dataframe.py should be generated
+        # even though the endpoint doesn't return a list by itself
+        dataframe_file = output_dir / '_dataframe.py'
+        assert dataframe_file.exists(), (
+            '_dataframe.py should be generated when pagination + dataframe is enabled'
+        )
+
+        # Verify the content is correct
+        content = dataframe_file.read_text()
+        assert 'def to_pandas' in content
+        assert 'def to_polars' in content
