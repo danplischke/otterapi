@@ -1350,22 +1350,45 @@ class Codegen(OpenAPIProcessor):
             endpoint_names.append(endpoint.sync_fn_name)
             endpoint_names.append(endpoint.async_fn_name)
 
-            # Add pagination method names if configured
+            # Check pagination config for this endpoint
+            pag_config = None
             if self.config.pagination.enabled:
                 pag_config = self._get_pagination_config(endpoint)
-                if pag_config:
-                    endpoint_names.append(f'{endpoint.sync_fn_name}_iter')
-                    endpoint_names.append(f'{endpoint.async_fn_name}_iter')
+
+            # Add pagination method names if configured
+            if pag_config:
+                endpoint_names.append(f'{endpoint.sync_fn_name}_iter')
+                endpoint_names.append(f'{endpoint.async_fn_name}_iter')
 
             # Add DataFrame method names if configured
             if self.config.dataframe.enabled:
-                df_config = self._get_dataframe_config(endpoint)
-                if df_config.generate_pandas:
-                    endpoint_names.append(f'{endpoint.sync_fn_name}_df')
-                    endpoint_names.append(f'{endpoint.async_fn_name}_df')
-                if df_config.generate_polars:
-                    endpoint_names.append(f'{endpoint.sync_fn_name}_pl')
-                    endpoint_names.append(f'{endpoint.async_fn_name}_pl')
+                # For paginated endpoints, DataFrame methods are generated regardless
+                # of whether the original response type is a list
+                is_paginated = pag_config is not None
+
+                if is_paginated:
+                    # Check if endpoint is explicitly disabled
+                    endpoint_df_config = self.config.dataframe.endpoints.get(
+                        endpoint.sync_fn_name
+                    )
+                    if endpoint_df_config and endpoint_df_config.enabled is False:
+                        pass  # Skip DataFrame exports for this endpoint
+                    else:
+                        if self.config.dataframe.pandas:
+                            endpoint_names.append(f'{endpoint.sync_fn_name}_df')
+                            endpoint_names.append(f'{endpoint.async_fn_name}_df')
+                        if self.config.dataframe.polars:
+                            endpoint_names.append(f'{endpoint.sync_fn_name}_pl')
+                            endpoint_names.append(f'{endpoint.async_fn_name}_pl')
+                else:
+                    # For non-paginated endpoints, use the standard config check
+                    df_config = self._get_dataframe_config(endpoint)
+                    if df_config.generate_pandas:
+                        endpoint_names.append(f'{endpoint.sync_fn_name}_df')
+                        endpoint_names.append(f'{endpoint.async_fn_name}_df')
+                    if df_config.generate_polars:
+                        endpoint_names.append(f'{endpoint.sync_fn_name}_pl')
+                        endpoint_names.append(f'{endpoint.async_fn_name}_pl')
 
         # Import endpoints from endpoints.py
         endpoints_file_stem = self.config.endpoints_file.replace('.py', '')
