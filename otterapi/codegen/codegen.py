@@ -983,7 +983,10 @@ class Codegen(OpenAPIProcessor):
                         body.append(async_pandas_fn)
                         import_collector.add_imports(async_pandas_imports)
 
-                    if self.config.dataframe.polars:
+                    # Check for polars - use elif to skip if endpoint is disabled
+                    if endpoint_df_config and endpoint_df_config.enabled is False:
+                        pass  # Skip polars DataFrame generation for this endpoint
+                    elif self.config.dataframe.polars:
                         generated_paginated_df = True
                         has_dataframe_methods = True
                         has_pagination_methods = True
