@@ -60,7 +60,9 @@ test = [
     "httpx>=0.25.0",
     "responses>=0.24.0",
     "pytest-mock>=3.12.0",
-    "fastapi>=0.104.0"
+    "fastapi>=0.104.0",
+    "pandas>=2.3.3",
+    "polars>=1.38.0",
 ]
 
 [tool.hatch.build.targets.wheel]

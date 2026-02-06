@@ -115,32 +115,42 @@ class TestSubscriptFunction:
 class TestUnionExprFunction:
     """Tests for _union_expr() function."""
 
-    def test_creates_union_subscript(self):
-        """Test that _union_expr creates a Union subscript."""
+    def test_creates_union_binop(self):
+        """Test that _union_expr creates a BinOp with BitOr (pipe operator)."""
         types = [_name('int'), _name('str')]
         result = _union_expr(types)
-        assert isinstance(result, ast.Subscript)
-        assert result.value.id == 'Union'
+        assert isinstance(result, ast.BinOp)
+        assert isinstance(result.op, ast.BitOr)
 
-    def test_union_contains_tuple_of_types(self):
-        """Test that Union contains a tuple of the provided types."""
+    def test_union_contains_types(self):
+        """Test that union contains the provided types via BinOp chain."""
         types = [_name('int'), _name('str'), _name('bool')]
         result = _union_expr(types)
-        assert isinstance(result.slice, ast.Tuple)
-        assert len(result.slice.elts) == 3
+        # Result is: (int | str) | bool
+        assert isinstance(result, ast.BinOp)
+        assert isinstance(result.right, ast.Name)
+        assert result.right.id == 'bool'
 
     def test_union_with_two_types(self):
         """Test Union with two types."""
         types = [_name('int'), _name('None')]
         result = _union_expr(types)
-        assert result.value.id == 'Union'
-        assert len(result.slice.elts) == 2
+        assert isinstance(result, ast.BinOp)
+        assert isinstance(result.op, ast.BitOr)
+        assert result.left.id == 'int'
+        assert result.right.id == 'None'
 
     def test_union_with_many_types(self):
-        """Test Union with many types."""
+        """Test Union with many types builds a chain of BinOps."""
         types = [_name(t) for t in ['int', 'str', 'float', 'bool', 'None']]
         result = _union_expr(types)
-        assert len(result.slice.elts) == 5
+        # Count the depth of BinOps - should be 4 for 5 types
+        count = 0
+        node = result
+        while isinstance(node, ast.BinOp):
+            count += 1
+            node = node.left
+        assert count == 4
 
 
 class TestOptionalExprFunction:
@@ -643,9 +653,11 @@ class TestEdgeCases:
         assert isinstance(func.body[0], ast.Pass)
 
     def test_union_with_single_type(self):
-        """Test Union with a single type (unusual but valid)."""
+        """Test Union with a single type returns the type directly."""
         result = _union_expr([_name('str')])
-        assert len(result.slice.elts) == 1
+        # With a single type, _union_expr returns the type itself, not a BinOp
+        assert isinstance(result, ast.Name)
+        assert result.id == 'str'
 
     def test_call_with_none_defaults(self):
         """Test _call when explicitly passing None for defaults."""

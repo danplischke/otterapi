@@ -814,7 +814,7 @@ class TestPaginationCodegenIntegration:
             ast.parse(content)  # Should not raise
 
             # Verify cursor-based pagination is used
-            assert 'cursor: Union[str, None]' in content
+            assert 'cursor: str | None' in content
             assert 'paginate_cursor' in content
 
     def test_codegen_without_pagination(self):
