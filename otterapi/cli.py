@@ -69,12 +69,6 @@ def generate(
         str | None,
         typer.Option('--output', '-o', help='Output directory for generated code'),
     ] = None,
-    dry_run: Annotated[
-        bool,
-        typer.Option(
-            '--dry-run', '-n', help='Preview generation without writing files'
-        ),
-    ] = False,
     verbose: Annotated[
         bool, typer.Option('--verbose', '-v', help='Enable verbose output')
     ] = False,
@@ -90,7 +84,7 @@ def generate(
         otterapi generate --config my-config.yaml
         otterapi generate -c config.json
         otterapi generate --source https://api.example.com/openapi.json --output ./client
-        otterapi generate -s ./api.yaml -o ./generated --dry-run
+        otterapi generate -s ./api.yaml -o ./generated
     """
     setup_logging(verbose, debug)
 
@@ -118,11 +112,6 @@ def generate(
                 )
                 raise typer.Exit(1)
 
-        if dry_run:
-            console.print(
-                Panel('[yellow]DRY RUN MODE[/yellow] - No files will be written')
-            )
-
         for document_config in codegen_config.documents:
             with Progress(
                 SpinnerColumn(),
@@ -136,52 +125,17 @@ def generate(
 
                 codegen = Codegen(document_config)
 
-                if dry_run:
-                    # Load and validate schema without writing
-                    codegen._load_schema()
-                    progress.update(
-                        task,
-                        description=f'[yellow]Would generate[/yellow] code for {document_config.source}',
-                    )
+                generated_files = codegen.generate()
+                progress.update(
+                    task,
+                    description=f'Code generation completed for {document_config.source}!',
+                )
 
-                    # Show what would be generated
-                    console.print('\n[dim]Would generate files:[/dim]')
-                    console.print(
-                        f'  - {document_config.output}/{document_config.models_file}'
-                    )
-                    console.print(
-                        f'  - {document_config.output}/{document_config.endpoints_file}'
-                    )
-                    console.print(f'  - {document_config.output}/__init__.py')
+                console.print('[dim]Generated files:[/dim]')
+                for file_path in generated_files:
+                    console.print(f'  - {file_path}')
 
-                    # Show schema info
-                    if codegen.openapi:
-                        console.print('\n[dim]Schema info:[/dim]')
-                        if codegen.openapi.info:
-                            console.print(f'  Title: {codegen.openapi.info.title}')
-                            console.print(f'  Version: {codegen.openapi.info.version}')
-                        if (
-                            codegen.openapi.components
-                            and codegen.openapi.components.schemas
-                        ):
-                            console.print(
-                                f'  Schemas: {len(codegen.openapi.components.schemas)}'
-                            )
-                        if codegen.openapi.paths:
-                            console.print(f'  Paths: {len(codegen.openapi.paths.root)}')
-                else:
-                    generated_files = codegen.generate()
-                    progress.update(
-                        task,
-                        description=f'Code generation completed for {document_config.source}!',
-                    )
-
-                    console.print('[dim]Generated files:[/dim]')
-                    for file_path in generated_files:
-                        console.print(f'  - {file_path}')
-
-        if not dry_run:
-            console.print('\n[green]✓[/green] Code generation completed!')
+        console.print('\n[green]✓[/green] Code generation completed!')
 
     except OtterAPIError as e:
         error_console.print(f'[red]Error:[/red] {e.message}')

@@ -127,8 +127,14 @@ class Type:
             return False
 
         # Compare AST nodes by dumping them to strings
-        if ast.dump(self.annotation_ast) != ast.dump(other.annotation_ast):
-            return False
+        # Compare annotation AST (can be None)
+        if self.annotation_ast is None and other.annotation_ast is None:
+            pass  # Both None, equal
+        elif self.annotation_ast is None or other.annotation_ast is None:
+            return False  # One is None, other isn't
+        else:
+            if ast.dump(self.annotation_ast) != ast.dump(other.annotation_ast):
+                return False
 
         # Compare implementation AST (can be None)
         if self.implementation_ast is None and other.implementation_ast is None:
