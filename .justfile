@@ -31,7 +31,7 @@ build:
 
 [group('test')]
 test:
-    uv run pytest -n auto otter/tests -vv
+    uv run pytest
 
 [group('publish')]
 publish:
