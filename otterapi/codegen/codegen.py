@@ -8,6 +8,7 @@ import ast
 import http
 import logging
 import os
+from urllib.parse import urljoin, urlparse
 
 from upath import UPath
 
@@ -60,6 +61,7 @@ from otterapi.openapi.v3_2.v3_2 import (
     Operation,
     Parameter as OpenAPIParameter,
     Reference,
+    RequestBody as OpenAPIRequestBody,
     Response as OpenAPIResponse,
 )
 
@@ -427,6 +429,43 @@ class Codegen(OpenAPIProcessor):
 
         return response_or_ref
 
+    def _resolve_request_body_reference(
+        self, body_or_ref: OpenAPIRequestBody | Reference
+    ) -> OpenAPIRequestBody | None:
+        """Resolve a request body reference to the actual RequestBody object.
+
+        Args:
+            body_or_ref: Either a RequestBody object or a Reference to one.
+
+        Returns:
+            The resolved RequestBody object, or None if reference cannot be resolved.
+        """
+        if isinstance(body_or_ref, Reference):
+            if not body_or_ref.ref.startswith('#/components/requestBodies/'):
+                logging.warning(
+                    f'Unsupported request body reference format: {body_or_ref.ref}'
+                )
+                return None
+
+            body_name = body_or_ref.ref.split('/')[-1]
+            if (
+                not self.openapi.components
+                or not self.openapi.components.requestBodies
+                or body_name not in self.openapi.components.requestBodies
+            ):
+                logging.warning(
+                    f"Referenced request body '{body_name}' not found in components.requestBodies"
+                )
+                return None
+
+            resolved = self.openapi.components.requestBodies[body_name]
+            # Handle nested references
+            if isinstance(resolved, Reference):
+                return self._resolve_request_body_reference(resolved)
+            return resolved
+
+        return body_or_ref
+
     def _extract_request_body(self, operation: Operation) -> RequestBodyInfo | None:
         """Extract request body information from an operation.
 
@@ -439,8 +478,8 @@ class Codegen(OpenAPIProcessor):
         if not operation.requestBody:
             return None
 
-        body, _ = self._resolve_reference(operation.requestBody)
-        if not body.content:
+        body = self._resolve_request_body_reference(operation.requestBody)
+        if body is None or not body.content:
             return None
 
         selected_content_type, selected_media_type = self._select_content_type(
@@ -638,14 +677,30 @@ class Codegen(OpenAPIProcessor):
 
         return True
 
+    def _is_absolute_url(self, url: str) -> bool:
+        """Check if a URL is absolute (has scheme and netloc).
+
+        Args:
+            url: The URL to check.
+
+        Returns:
+            True if the URL is absolute, False otherwise.
+        """
+        parsed = urlparse(url)
+        return bool(parsed.scheme and parsed.netloc)
+
     def _resolve_base_url(self) -> str:
         """Resolve the base URL from config or OpenAPI spec.
+
+        If the server URL in the spec is relative, attempts to resolve it
+        against the source URL (if the spec was loaded from a URL).
 
         Returns:
             The base URL to use for API requests.
 
         Raises:
-            ValueError: If no base URL can be determined or multiple servers are defined.
+            ValueError: If no base URL can be determined, multiple servers are defined,
+                       or a relative server URL cannot be resolved.
         """
         # Config base_url takes precedence
         if self.config.base_url:
@@ -670,6 +725,26 @@ class Codegen(OpenAPIProcessor):
             raise ValueError(
                 'No base url provided. Make sure you specify the base_url in the otterapi config or the OpenAPI document contains a valid servers section'
             )
+
+        # Check if the server URL is relative
+        if not self._is_absolute_url(baseurl):
+            # Try to resolve against the source URL if it's a URL
+            source = self.config.source
+            if self._is_absolute_url(source):
+                # Resolve relative server URL against the source URL
+                resolved_url = urljoin(source, baseurl)
+                logging.info(
+                    f"Resolved relative server URL '{baseurl}' to '{resolved_url}' "
+                    f"using source URL '{source}'"
+                )
+                return resolved_url
+            else:
+                # Source is a file path, can't resolve relative URL
+                raise ValueError(
+                    f"Server URL '{baseurl}' is relative and cannot be resolved. "
+                    f'The OpenAPI spec was loaded from a file, not a URL. '
+                    f'Please specify an absolute base_url in the otterapi config.'
+                )
 
         return baseurl
 
