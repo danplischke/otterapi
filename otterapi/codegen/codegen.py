@@ -55,7 +55,13 @@ from otterapi.codegen.utils import (
     write_mod,
 )
 from otterapi.config import DocumentConfig
-from otterapi.openapi.v3_2.v3_2 import OpenAPI as OpenAPIv3_2, Operation
+from otterapi.openapi.v3_2.v3_2 import (
+    OpenAPI as OpenAPIv3_2,
+    Operation,
+    Parameter as OpenAPIParameter,
+    Reference,
+    Response as OpenAPIResponse,
+)
 
 # Content types that should be treated as JSON
 JSON_CONTENT_TYPES = {'application/json', 'text/json'}
@@ -150,14 +156,16 @@ class Codegen(OpenAPIProcessor):
         if not operation.responses:
             return responses
 
-        for status_code_str, response in operation.responses.root.items():
+        for status_code_str, response_or_ref in operation.responses.root.items():
             try:
                 status_code = int(status_code_str)
             except ValueError:
                 logging.debug(f'Skipping non-numeric status code: {status_code_str}')
                 continue
 
-            if not response.content:
+            # Resolve reference if needed
+            response = self._resolve_response_reference(response_or_ref)
+            if response is None or not response.content:
                 continue
 
             selected_content_type, selected_media_type = self._select_content_type(
@@ -283,6 +291,7 @@ class Codegen(OpenAPIProcessor):
 
         Merges path-level parameters with operation-level parameters.
         Operation parameters override path-level parameters with the same name and location.
+        Handles $ref references to #/components/parameters/.
 
         Args:
             operation: The OpenAPI operation to extract parameters from.
@@ -297,7 +306,12 @@ class Codegen(OpenAPIProcessor):
         param_keys_seen = set()  # Track (name, location) to handle overrides
 
         # First, add operation-level parameters (they take precedence)
-        for param in operation.parameters or []:
+        for param_or_ref in operation.parameters or []:
+            # Resolve reference if needed
+            param = self._resolve_parameter_reference(param_or_ref)
+            if param is None:
+                continue
+
             param_type = None
             if param.schema_:
                 param_type = self.typegen.schema_to_type(param.schema_)
@@ -315,7 +329,12 @@ class Codegen(OpenAPIProcessor):
             param_keys_seen.add((param.name, param.in_))
 
         # Then, add path-level parameters that weren't overridden
-        for param in path_item_parameters or []:
+        for param_or_ref in path_item_parameters or []:
+            # Resolve reference if needed
+            param = self._resolve_parameter_reference(param_or_ref)
+            if param is None:
+                continue
+
             if (param.name, param.in_) not in param_keys_seen:
                 param_type = None
                 if param.schema_:
@@ -333,6 +352,80 @@ class Codegen(OpenAPIProcessor):
                 )
 
         return all_params
+
+    def _resolve_parameter_reference(
+        self, param_or_ref: OpenAPIParameter | Reference
+    ) -> OpenAPIParameter | None:
+        """Resolve a parameter reference to the actual Parameter object.
+
+        Args:
+            param_or_ref: Either a Parameter object or a Reference to one.
+
+        Returns:
+            The resolved Parameter object, or None if reference cannot be resolved.
+        """
+        if isinstance(param_or_ref, Reference):
+            if not param_or_ref.ref.startswith('#/components/parameters/'):
+                logging.warning(
+                    f'Unsupported parameter reference format: {param_or_ref.ref}'
+                )
+                return None
+
+            param_name = param_or_ref.ref.split('/')[-1]
+            if (
+                not self.openapi.components
+                or not self.openapi.components.parameters
+                or param_name not in self.openapi.components.parameters
+            ):
+                logging.warning(
+                    f"Referenced parameter '{param_name}' not found in components.parameters"
+                )
+                return None
+
+            resolved = self.openapi.components.parameters[param_name]
+            # Handle nested references
+            if isinstance(resolved, Reference):
+                return self._resolve_parameter_reference(resolved)
+            return resolved
+
+        return param_or_ref
+
+    def _resolve_response_reference(
+        self, response_or_ref: OpenAPIResponse | Reference
+    ) -> OpenAPIResponse | None:
+        """Resolve a response reference to the actual Response object.
+
+        Args:
+            response_or_ref: Either a Response object or a Reference to one.
+
+        Returns:
+            The resolved Response object, or None if reference cannot be resolved.
+        """
+        if isinstance(response_or_ref, Reference):
+            if not response_or_ref.ref.startswith('#/components/responses/'):
+                logging.warning(
+                    f'Unsupported response reference format: {response_or_ref.ref}'
+                )
+                return None
+
+            response_name = response_or_ref.ref.split('/')[-1]
+            if (
+                not self.openapi.components
+                or not self.openapi.components.responses
+                or response_name not in self.openapi.components.responses
+            ):
+                logging.warning(
+                    f"Referenced response '{response_name}' not found in components.responses"
+                )
+                return None
+
+            resolved = self.openapi.components.responses[response_name]
+            # Handle nested references
+            if isinstance(resolved, Reference):
+                return self._resolve_response_reference(resolved)
+            return resolved
+
+        return response_or_ref
 
     def _extract_request_body(self, operation: Operation) -> RequestBodyInfo | None:
         """Extract request body information from an operation.
