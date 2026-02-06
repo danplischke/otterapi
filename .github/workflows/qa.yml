@@ -3,12 +3,14 @@ name: QA Check
 on:
   push:
     branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
     paths:
       - "otterapi/**/*"
       - "pyproject.toml"
       - ".github/workflows/qa.yml"
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 env:
