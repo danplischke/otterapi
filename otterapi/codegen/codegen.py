@@ -1392,16 +1392,18 @@ class Codegen(OpenAPIProcessor):
 
         # Import endpoints from endpoints.py
         endpoints_file_stem = self.config.endpoints_file.replace('.py', '')
-        body.append(
-            ast.ImportFrom(
-                module=endpoints_file_stem,
-                names=[
-                    ast.alias(name=name, asname=None) for name in sorted(endpoint_names)
-                ],
-                level=1,
+        if endpoint_names:
+            body.append(
+                ast.ImportFrom(
+                    module=endpoints_file_stem,
+                    names=[
+                        ast.alias(name=name, asname=None)
+                        for name in sorted(endpoint_names)
+                    ],
+                    level=1,
+                )
             )
-        )
-        all_names.extend(endpoint_names)
+            all_names.extend(endpoint_names)
 
         # Import Client from client.py
         body.append(
