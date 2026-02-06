@@ -15,6 +15,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PositiveFloat,
     RootModel,
 )
 
@@ -405,7 +406,7 @@ class Schema(BaseModel):
 
     # Core JSON Schema keywords
     title: str | None = None
-    multipleOf: Annotated[float, Field(gt=0)] | None = None
+    multipleOf: PositiveFloat | None = None
     maximum: float | None = None
     exclusiveMaximum: float | None = None  # Changed from boolean in 3.0
     minimum: float | None = None

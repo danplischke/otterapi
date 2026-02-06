@@ -18,6 +18,57 @@ from pydantic import (
 from otterapi.openapi.v3_1 import v3_1 as openapi_v3_1
 
 
+class WarningCollector:
+    """Helper class to collect and deduplicate warnings during upgrade.
+
+    Instead of generating per-occurrence warnings that can flood output for large APIs,
+    this class tracks warning counts and generates summary messages.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+        self._unique_warnings: list[str] = []
+
+    def add(self, warning_key: str, count: int = 1) -> None:
+        """Add a warning that should be counted and summarized."""
+        self._counts[warning_key] = self._counts.get(warning_key, 0) + count
+
+    def add_unique(self, warning: str) -> None:
+        """Add a warning that should appear as-is (not deduplicated)."""
+        self._unique_warnings.append(warning)
+
+    def get_warnings(self) -> list[str]:
+        """Get the final list of deduplicated/summarized warnings."""
+        result: list[str] = []
+
+        # Add unique warnings first
+        result.extend(self._unique_warnings)
+
+        # Add summarized warnings
+        warning_templates = {
+            'nullable_to_type_array': 'Converting nullable field to type array for schema',
+            'nullable_without_type': 'Schema has nullable=true without type, converting to type: [null]',
+            'exclusive_maximum': 'Converting exclusiveMaximum from boolean to numeric',
+            'exclusive_minimum': 'Converting exclusiveMinimum from boolean to numeric',
+        }
+
+        for key, count in self._counts.items():
+            if key in warning_templates:
+                msg = warning_templates[key]
+                if count == 1:
+                    result.append(msg)
+                else:
+                    result.append(f'{msg} ({count} occurrences)')
+            else:
+                # Generic key not in templates
+                if count == 1:
+                    result.append(key)
+                else:
+                    result.append(f'{key} ({count} occurrences)')
+
+        return result
+
+
 class Reference(
     RootModel[dict[Annotated[str, StringConstraints(pattern=r'^\$ref$')], str]]
 ):
@@ -407,19 +458,24 @@ class OpenAPI(BaseModel):
         - exclusiveMaximum/exclusiveMinimum changed from boolean to numeric
         - New jsonSchemaDialect field
         - Version updated to 3.1.x
+
+        Warnings are deduplicated and summarized to avoid overwhelming output
+        for large APIs.
         """
-        warnings: list[str] = []
+        warning_collector = WarningCollector()
 
         # Convert basic metadata
         info = self._convert_info_to_3_1()
 
         # Convert components
         components = (
-            self._convert_components_to_3_1(warnings) if self.components else None
+            self._convert_components_to_3_1(warning_collector)
+            if self.components
+            else None
         )
 
         # Convert paths
-        paths = self._convert_paths_to_3_1(warnings) if self.paths else None
+        paths = self._convert_paths_to_3_1(warning_collector) if self.paths else None
 
         # Convert servers
         servers = (
@@ -472,7 +528,7 @@ class OpenAPI(BaseModel):
             externalDocs=external_docs,
         )
 
-        return openapi_3_1, warnings
+        return openapi_3_1, warning_collector.get_warnings()
 
     def _convert_info_to_3_1(self) -> openapi_v3_1.Info:
         """Convert Info object from OpenAPI 3.0 to 3.1."""
@@ -524,8 +580,8 @@ class OpenAPI(BaseModel):
         )
 
     def _convert_components_to_3_1(
-        self, warnings: list[str]
-    ) -> openapi_v3_1.Components | None:
+        self, warnings: WarningCollector
+    ) -> openapi_v3_1.Components:
         """Convert Components object from OpenAPI 3.0 to 3.1."""
         if not self.components:
             return None
@@ -617,12 +673,12 @@ class OpenAPI(BaseModel):
         )
 
     def _convert_schema_or_ref_to_3_1(
-        self, schema: Schema | Reference, warnings: list[str]
+        self, schema_or_ref: Schema | Reference, warnings: WarningCollector
     ) -> openapi_v3_1.Schema | openapi_v3_1.Reference:
         """Convert a Schema or Reference from OpenAPI 3.0 to 3.1."""
-        if isinstance(schema, Reference):
-            return self._convert_reference_to_3_1(schema)
-        return self._convert_schema_to_3_1(schema, warnings)
+        if isinstance(schema_or_ref, Reference):
+            return self._convert_reference_to_3_1(schema_or_ref)
+        return self._convert_schema_to_3_1(schema_or_ref, warnings)
 
     def _convert_reference_to_3_1(self, ref: Reference) -> openapi_v3_1.Reference:
         """Convert a Reference from OpenAPI 3.0 to 3.1."""
@@ -633,7 +689,7 @@ class OpenAPI(BaseModel):
         )
 
     def _convert_schema_to_3_1(
-        self, schema: Schema, warnings: list[str]
+        self, schema: Schema, warnings: WarningCollector
     ) -> openapi_v3_1.Schema:
         """Convert a Schema from OpenAPI 3.0 to 3.1."""
         # Handle nullable conversion
@@ -643,23 +699,27 @@ class OpenAPI(BaseModel):
             type_3_1 = openapi_v3_1.Type(schema.type.value)
             if schema.nullable:
                 # Convert nullable: true to type array
-                warnings.append('Converting nullable field to type array for schema')
+                warnings.add('nullable_to_type_array')
                 type_value = [type_3_1, openapi_v3_1.Type.null]
             else:
                 type_value = type_3_1
+        elif schema.nullable:
+            # nullable without type - preserve nullable semantics for composition schemas
+            type_value = [openapi_v3_1.Type.null]
+            warnings.add('nullable_without_type')
 
         # Handle exclusiveMaximum/exclusiveMinimum conversion
         exclusive_maximum = None
         if schema.exclusiveMaximum and schema.maximum is not None:
             # In 3.0, exclusiveMaximum is boolean, in 3.1 it's numeric
-            warnings.append('Converting exclusiveMaximum from boolean to numeric')
+            warnings.add('exclusive_maximum')
             exclusive_maximum = schema.maximum
         elif not schema.exclusiveMaximum and schema.maximum is not None:
             exclusive_maximum = None
 
         exclusive_minimum = None
         if schema.exclusiveMinimum and schema.minimum is not None:
-            warnings.append('Converting exclusiveMinimum from boolean to numeric')
+            warnings.add('exclusive_minimum')
             exclusive_minimum = schema.minimum
         elif not schema.exclusiveMinimum and schema.minimum is not None:
             exclusive_minimum = None
@@ -784,15 +844,15 @@ class OpenAPI(BaseModel):
         return openapi_v3_1.Schema.model_validate(schema_dict)
 
     def _convert_response_or_ref_to_3_1(
-        self, response: Response | Reference, warnings: list[str]
+        self, response_or_ref: Response | Reference, warnings: WarningCollector
     ) -> openapi_v3_1.Response | openapi_v3_1.Reference:
         """Convert a Response or Reference from OpenAPI 3.0 to 3.1."""
-        if isinstance(response, Reference):
-            return self._convert_reference_to_3_1(response)
-        return self._convert_response_to_3_1(response, warnings)
+        if isinstance(response_or_ref, Reference):
+            return self._convert_reference_to_3_1(response_or_ref)
+        return self._convert_response_to_3_1(response_or_ref, warnings)
 
     def _convert_response_to_3_1(
-        self, response: Response, warnings: list[str]
+        self, response: Response, warnings: WarningCollector
     ) -> openapi_v3_1.Response:
         """Convert a Response from OpenAPI 3.0 to 3.1."""
         headers = None
@@ -823,7 +883,7 @@ class OpenAPI(BaseModel):
         )
 
     def _convert_media_type_to_3_1(
-        self, media_type: MediaType, warnings: list[str]
+        self, media_type: MediaType, warnings: WarningCollector
     ) -> openapi_v3_1.MediaType:
         """Convert a MediaType from OpenAPI 3.0 to 3.1."""
         schema_ = None
@@ -855,7 +915,7 @@ class OpenAPI(BaseModel):
         return openapi_v3_1.MediaType.model_validate(media_type_dict)
 
     def _convert_encoding_to_3_1(
-        self, encoding: Encoding, warnings: list[str]
+        self, encoding: Encoding, warnings: WarningCollector
     ) -> openapi_v3_1.Encoding:
         """Convert an Encoding from OpenAPI 3.0 to 3.1."""
         headers = None
@@ -873,15 +933,15 @@ class OpenAPI(BaseModel):
         )
 
     def _convert_parameter_or_ref_to_3_1(
-        self, param: Parameter | Reference, warnings: list[str]
+        self, param_or_ref: Parameter | Reference, warnings: WarningCollector
     ) -> openapi_v3_1.Parameter | openapi_v3_1.Reference:
         """Convert a Parameter or Reference from OpenAPI 3.0 to 3.1."""
-        if isinstance(param, Reference):
-            return self._convert_reference_to_3_1(param)
-        return self._convert_parameter_to_3_1(param, warnings)
+        if isinstance(param_or_ref, Reference):
+            return self._convert_reference_to_3_1(param_or_ref)
+        return self._convert_parameter_to_3_1(param_or_ref, warnings)
 
     def _convert_parameter_to_3_1(
-        self, param: Parameter, warnings: list[str]
+        self, param: Parameter, warnings: WarningCollector
     ) -> openapi_v3_1.Parameter:
         """Convert a Parameter from OpenAPI 3.0 to 3.1."""
         schema_ = None
@@ -924,15 +984,15 @@ class OpenAPI(BaseModel):
         return openapi_v3_1.Parameter.model_validate(param_dict)
 
     def _convert_header_or_ref_to_3_1(
-        self, header: Header | Reference, warnings: list[str]
+        self, header_or_ref: Header | Reference, warnings: WarningCollector
     ) -> openapi_v3_1.Header | openapi_v3_1.Reference:
         """Convert a Header or Reference from OpenAPI 3.0 to 3.1."""
-        if isinstance(header, Reference):
-            return self._convert_reference_to_3_1(header)
-        return self._convert_header_to_3_1(header, warnings)
+        if isinstance(header_or_ref, Reference):
+            return self._convert_reference_to_3_1(header_or_ref)
+        return self._convert_header_to_3_1(header_or_ref, warnings)
 
     def _convert_header_to_3_1(
-        self, header: Header, warnings: list[str]
+        self, header: Header, warnings: WarningCollector
     ) -> openapi_v3_1.Header:
         """Convert a Header from OpenAPI 3.0 to 3.1."""
         schema_ = None
@@ -986,20 +1046,22 @@ class OpenAPI(BaseModel):
         )
 
     def _convert_request_body_or_ref_to_3_1(
-        self, body: RequestBody | Reference, warnings: list[str]
+        self, body_or_ref: RequestBody | Reference, warnings: WarningCollector
     ) -> openapi_v3_1.RequestBody | openapi_v3_1.Reference:
         """Convert a RequestBody or Reference from OpenAPI 3.0 to 3.1."""
-        if isinstance(body, Reference):
-            return self._convert_reference_to_3_1(body)
+        if isinstance(body_or_ref, Reference):
+            return self._convert_reference_to_3_1(body_or_ref)
 
         content = {}
-        for media_type, media_type_obj in body.content.items():
+        for media_type, media_type_obj in body_or_ref.content.items():
             content[media_type] = self._convert_media_type_to_3_1(
                 media_type_obj, warnings
             )
 
         return openapi_v3_1.RequestBody(
-            description=body.description, content=content, required=body.required
+            description=body_or_ref.description,
+            content=content,
+            required=body_or_ref.required,
         )
 
     def _convert_link_or_ref_to_3_1(
@@ -1109,16 +1171,16 @@ class OpenAPI(BaseModel):
         raise ValueError(f'Unknown security scheme type: {type(sec_scheme)}')
 
     def _convert_callback_or_ref_to_3_1(
-        self, callback: Callback | Reference, warnings: list[str]
+        self, callback_or_ref: Callback | Reference, warnings: WarningCollector
     ) -> openapi_v3_1.Callback | openapi_v3_1.Reference:
         """Convert a Callback or Reference from OpenAPI 3.0 to 3.1."""
-        if isinstance(callback, Reference):
-            return self._convert_reference_to_3_1(callback)
+        if isinstance(callback_or_ref, Reference):
+            return self._convert_reference_to_3_1(callback_or_ref)
 
         # Callback is a RootModel, just pass through the root
-        return openapi_v3_1.Callback(root=callback.root)
+        return openapi_v3_1.Callback(root=callback_or_ref.root)
 
-    def _convert_paths_to_3_1(self, warnings: list[str]) -> openapi_v3_1.Paths | None:
+    def _convert_paths_to_3_1(self, warnings: WarningCollector) -> openapi_v3_1.Paths:
         """Convert Paths from OpenAPI 3.0 to 3.1."""
         if not self.paths:
             return None
@@ -1140,7 +1202,7 @@ class OpenAPI(BaseModel):
         return openapi_v3_1.Paths(root=paths_dict)
 
     def _convert_path_item_to_3_1(
-        self, path_item: PathItem, warnings: list[str]
+        self, path_item: PathItem, warnings: WarningCollector
     ) -> openapi_v3_1.PathItem:
         """Convert a PathItem from OpenAPI 3.0 to 3.1."""
         parameters = None
@@ -1218,7 +1280,7 @@ class OpenAPI(BaseModel):
         return openapi_v3_1.PathItem.model_validate(path_item_dict)
 
     def _convert_operation_to_3_1(
-        self, operation: Operation, warnings: list[str]
+        self, operation: Operation, warnings: WarningCollector
     ) -> openapi_v3_1.Operation:
         """Convert an Operation from OpenAPI 3.0 to 3.1."""
         external_docs = (
@@ -1283,7 +1345,7 @@ class OpenAPI(BaseModel):
         )
 
     def _convert_responses_to_3_1(
-        self, responses: Responses, warnings: list[str]
+        self, responses: Responses, warnings: WarningCollector
     ) -> openapi_v3_1.Responses:
         """Convert Responses from OpenAPI 3.0 to 3.1."""
         converted_responses = {}

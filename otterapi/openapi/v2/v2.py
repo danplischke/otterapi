@@ -149,6 +149,94 @@ class ApiKeyLocation(str, Enum):
 
 
 # ============================================================================
+# Helper Classes
+# ============================================================================
+
+
+class WarningCollector:
+    """Helper class to collect and deduplicate warnings during upgrade.
+
+    Instead of generating per-occurrence warnings that can flood output for large APIs,
+    this class tracks warning counts and generates summary messages.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+        self._unique_warnings: list[str] = []
+
+    def add(self, warning_key: str, count: int = 1) -> None:
+        """Add a warning that should be counted and summarized."""
+        self._counts[warning_key] = self._counts.get(warning_key, 0) + count
+
+    def add_unique(self, warning: str) -> None:
+        """Add a warning that should appear as-is (not deduplicated)."""
+        self._unique_warnings.append(warning)
+
+    def get_warnings(self) -> list[str]:
+        """Get the final list of deduplicated/summarized warnings."""
+        result: list[str] = []
+
+        # Add unique warnings first
+        result.extend(self._unique_warnings)
+
+        # Add summarized warnings
+        warning_templates = {
+            'oauth2_implicit': (
+                'OAuth2 implicit flow restructured for OpenAPI 3.0',
+                'OAuth2 implicit flows',
+            ),
+            'oauth2_password': (
+                'OAuth2 password flow restructured for OpenAPI 3.0',
+                'OAuth2 password flows',
+            ),
+            'oauth2_client_credentials': (
+                'OAuth2 application flow converted to clientCredentials for OpenAPI 3.0',
+                'OAuth2 application flows',
+            ),
+            'oauth2_authorization_code': (
+                'OAuth2 accessCode flow converted to authorizationCode for OpenAPI 3.0',
+                'OAuth2 accessCode flows',
+            ),
+            'collection_format_multi': (
+                "collectionFormat 'multi' converted to style=form with explode=true",
+                'multi collectionFormat fields',
+            ),
+            'collection_format_tsv': (
+                "collectionFormat 'tsv' has no direct equivalent in OpenAPI 3.0, using pipeDelimited",
+                'tsv collectionFormat fields',
+            ),
+            'file_upload_consumes': (
+                'File upload parameter requires multipart/form-data content type',
+                'file upload warnings',
+            ),
+            'inferred_response': (
+                'Inferred 200 response schema from request body',
+                'inferred response schemas',
+            ),
+            'body_param_at_path': (
+                'Body parameter found at path level, converting to inline requestBody',
+                'body parameters at path level',
+            ),
+        }
+
+        for key, count in self._counts.items():
+            if key in warning_templates:
+                singular, plural = warning_templates[key]
+                if count == 1:
+                    result.append(singular)
+                else:
+                    result.append(f'{singular} ({count} occurrences)')
+            else:
+                # Generic key not in templates
+                if count == 1:
+                    result.append(key)
+                else:
+                    result.append(f'{key} ({count} occurrences)')
+
+        return result
+
+
+# ============================================================================
 # Base Models
 # ============================================================================
 
@@ -670,20 +758,23 @@ class Swagger(BaseModelWithVendorExtensions):
         - Missing data that requires defaults
         - OAuth2 flow restructuring
         - Collection format conversions
+
+        Warnings are deduplicated and summarized to avoid overwhelming output
+        for large APIs.
         """
-        warnings: list[str] = []
+        warning_collector = WarningCollector()
 
         # Convert basic metadata
         info = self._convert_info()
 
         # Convert servers from host/basePath/schemes
-        servers = self._convert_servers(warnings)
+        servers = self._convert_servers(warning_collector)
 
         # Convert components
-        components = self._convert_components(warnings)
+        components = self._convert_components(warning_collector)
 
         # Convert paths - returns dict for Paths RootModel
-        paths_dict = self._convert_paths(warnings)
+        paths_dict = self._convert_paths(warning_collector)
 
         # Build OpenAPI dict
         openapi_dict: dict[str, Any] = {
@@ -727,7 +818,7 @@ class Swagger(BaseModelWithVendorExtensions):
                 description=self.external_docs.description,
             ).model_dump(by_alias=True, exclude_none=True, mode='json')
 
-        return OpenAPI.model_validate(openapi_dict), warnings
+        return OpenAPI.model_validate(openapi_dict), warning_collector.get_warnings()
 
     def _convert_info(self) -> openapi_v3.Info:
         """Convert Info object from Swagger 2.0 to OpenAPI 3.0."""
@@ -755,10 +846,10 @@ class Swagger(BaseModelWithVendorExtensions):
             license=license_obj,
         )
 
-    def _convert_servers(self, warnings: list[str]) -> list[openapi_v3.Server]:
+    def _convert_servers(self, warnings: WarningCollector) -> list[openapi_v3.Server]:
         """Convert host, basePath, and schemes to servers array."""
         if not self.host and not self.base_path:
-            warnings.append(
+            warnings.add_unique(
                 "No host or basePath specified, defaulting to server URL '/'"
             )
             return [openapi_v3.Server(url='/')]
@@ -774,7 +865,9 @@ class Swagger(BaseModelWithVendorExtensions):
 
         return servers
 
-    def _convert_components(self, warnings: list[str]) -> openapi_v3.Components | None:
+    def _convert_components(
+        self, warnings: WarningCollector
+    ) -> openapi_v3.Components | None:
         """Convert definitions, parameters, responses, and security to components."""
         schemas = None
         if self.definitions:
@@ -822,7 +915,7 @@ class Swagger(BaseModelWithVendorExtensions):
 
         return openapi_v3.Components.model_validate(components_dict)
 
-    def _convert_paths(self, warnings: list[str]) -> dict[str, Any]:
+    def _convert_paths(self, warnings: WarningCollector) -> dict[str, Any]:
         """Convert paths object."""
         result = {}
 
@@ -838,7 +931,7 @@ class Swagger(BaseModelWithVendorExtensions):
         return result
 
     def _convert_path_item(
-        self, path_item: PathItem, warnings: list[str]
+        self, path_item: PathItem, warnings: WarningCollector
     ) -> dict[str, Any]:
         """Convert a single PathItem."""
         result: dict[str, Any] = {}
@@ -1023,10 +1116,7 @@ class Swagger(BaseModelWithVendorExtensions):
         # Check if consumes specifies something different
         if consumes and media_type not in consumes:
             if has_file and 'multipart/form-data' not in consumes:
-                warnings.append(
-                    f'File upload parameter requires multipart/form-data, '
-                    f'but consumes specifies: {consumes}'
-                )
+                warnings.add('file_upload_consumes')
 
         # Build schema with properties
         properties = {}
@@ -1055,7 +1145,7 @@ class Swagger(BaseModelWithVendorExtensions):
         return result
 
     def _convert_non_body_parameter_to_dict(
-        self, param: NonBodyParameter, warnings: list[str]
+        self, param: NonBodyParameter, warnings: WarningCollector
     ) -> dict[str, Any]:
         """Convert query/header/path parameter to OpenAPI 3.0 format."""
         result: dict[str, Any] = {
@@ -1092,7 +1182,7 @@ class Swagger(BaseModelWithVendorExtensions):
         return result
 
     def _convert_parameter_to_schema(
-        self, param: NonBodyParameter, warnings: list[str]
+        self, param: NonBodyParameter, warnings: WarningCollector
     ) -> dict[str, Any]:
         """Convert parameter properties to a schema object."""
         schema: dict[str, Any] = {}
@@ -1200,9 +1290,9 @@ class Swagger(BaseModelWithVendorExtensions):
 
     def _convert_collection_format(
         self,
-        collection_format: CollectionFormat | CollectionFormatWithMulti,
-        param_location: ParameterLocation,
-        warnings: list[str],
+        collection_format: CollectionFormat | CollectionFormatWithMulti | None,
+        in_: ParameterLocation,
+        warnings: WarningCollector,
     ) -> tuple[str | None, bool | None]:
         """
         Convert collectionFormat to style and explode.
@@ -1219,25 +1309,20 @@ class Swagger(BaseModelWithVendorExtensions):
         if isinstance(collection_format, CollectionFormatWithMulti):
             if collection_format == CollectionFormatWithMulti.MULTI:
                 # multi -> explode=true with form style
-                warnings.append(
-                    "collectionFormat 'multi' converted to style=form with explode=true"
-                )
+                warnings.add('collection_format_multi')
                 return 'form', True
             collection_format = CollectionFormat(collection_format.value)
 
         # Mapping for other formats
         format_map = {
-            CollectionFormat.CSV: (default_styles.get(param_location, 'simple'), False),
+            CollectionFormat.CSV: (default_styles.get(in_, 'simple'), False),
             CollectionFormat.SSV: ('spaceDelimited', False),
             CollectionFormat.TSV: ('pipeDelimited', False),
             CollectionFormat.PIPES: ('pipeDelimited', False),
         }
 
         if collection_format == CollectionFormat.TSV:
-            warnings.append(
-                "collectionFormat 'tsv' has no direct equivalent in OpenAPI 3.0, "
-                'using pipeDelimited'
-            )
+            warnings.add('collection_format_tsv')
 
         return format_map.get(collection_format, (None, None))
 
@@ -1245,9 +1330,9 @@ class Swagger(BaseModelWithVendorExtensions):
         self,
         responses: Responses,
         produces: list[str],
-        warnings: list[str],
-        method: str = None,
-        body_schema: dict[str, Any] = None,
+        warnings: WarningCollector,
+        body_schema: dict[str, Any] | None = None,
+        method: str = 'get',
     ) -> dict[str, Any]:
         """Convert Responses object.
 
@@ -1294,9 +1379,7 @@ class Swagger(BaseModelWithVendorExtensions):
 
             # Only infer if the body schema is a $ref (model reference)
             if not has_success_schema and body_schema.get('$ref'):
-                warnings.append(
-                    f'Inferred 200 response schema from request body for {method.upper()} operation'
-                )
+                warnings.add('inferred_response')
                 # Build the inferred response
                 content = {}
                 for media_type in produces:
@@ -1499,7 +1582,7 @@ class Swagger(BaseModelWithVendorExtensions):
         return result
 
     def _convert_component_parameter_to_dict(
-        self, param: Parameter, warnings: list[str]
+        self, param: Parameter, warnings: WarningCollector
     ) -> dict[str, Any]:
         """Convert a component-level parameter."""
         if isinstance(param, JsonReference):
@@ -1514,7 +1597,7 @@ class Swagger(BaseModelWithVendorExtensions):
         return {}
 
     def _convert_response_to_dict(
-        self, response: Response, produces: list[str], warnings: list[str]
+        self, response: Response, produces: list[str], warnings: WarningCollector
     ) -> dict[str, Any]:
         """Convert a single Response object to dict."""
         result: dict[str, Any] = {'description': response.description}
@@ -1550,7 +1633,7 @@ class Swagger(BaseModelWithVendorExtensions):
         return result
 
     def _convert_security_scheme_to_dict(
-        self, scheme: SecurityScheme, warnings: list[str]
+        self, scheme: SecurityScheme, warnings: WarningCollector
     ) -> dict[str, Any]:
         """Convert a single security scheme."""
         if isinstance(scheme, BasicAuthenticationSecurity):
@@ -1588,7 +1671,7 @@ class Swagger(BaseModelWithVendorExtensions):
             if scheme.description:
                 result['description'] = scheme.description
             result.update(self._extract_vendor_extensions(scheme))
-            warnings.append('OAuth2 implicit flow restructured for OpenAPI 3.0')
+            warnings.add('oauth2_implicit')
             return result
 
         elif isinstance(scheme, OAuth2PasswordSecurity):
@@ -1605,7 +1688,7 @@ class Swagger(BaseModelWithVendorExtensions):
             if scheme.description:
                 result['description'] = scheme.description
             result.update(self._extract_vendor_extensions(scheme))
-            warnings.append('OAuth2 password flow restructured for OpenAPI 3.0')
+            warnings.add('oauth2_password')
             return result
 
         elif isinstance(scheme, OAuth2ApplicationSecurity):
@@ -1622,9 +1705,7 @@ class Swagger(BaseModelWithVendorExtensions):
             if scheme.description:
                 result['description'] = scheme.description
             result.update(self._extract_vendor_extensions(scheme))
-            warnings.append(
-                'OAuth2 application flow converted to clientCredentials for OpenAPI 3.0'
-            )
+            warnings.add('oauth2_client_credentials')
             return result
 
         elif isinstance(scheme, OAuth2AccessCodeSecurity):
@@ -1642,9 +1723,7 @@ class Swagger(BaseModelWithVendorExtensions):
             if scheme.description:
                 result['description'] = scheme.description
             result.update(self._extract_vendor_extensions(scheme))
-            warnings.append(
-                'OAuth2 accessCode flow converted to authorizationCode for OpenAPI 3.0'
-            )
+            warnings.add('oauth2_authorization_code')
             return result
 
         return {}
@@ -1676,16 +1755,14 @@ class Swagger(BaseModelWithVendorExtensions):
         return {}
 
     def _convert_parameter_item_to_dict(
-        self, param: Parameter, warnings: list[str]
+        self, param: Parameter, warnings: WarningCollector
     ) -> dict[str, Any]:
         """Convert a single parameter (handles both body and non-body)."""
         if isinstance(param, JsonReference):
             return {'$ref': self._update_ref(param.ref)}
         elif isinstance(param, BodyParameter):
             # This shouldn't happen at path level in Swagger 2.0, but handle it
-            warnings.append(
-                'Body parameter found at path level, converting to inline requestBody'
-            )
+            warnings.add('body_param_at_path')
             return self._convert_body_parameter_to_dict(
                 param, ['application/json'], warnings
             )
