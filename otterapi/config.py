@@ -559,6 +559,88 @@ class DataFrameConfig(BaseModel):
         return self.pandas, self.polars, self.default_path
 
 
+class EndpointResponseUnwrapConfig(BaseModel):
+    """Per-endpoint response unwrap configuration.
+
+    Allows overriding the default response unwrap settings for specific endpoints.
+
+    Attributes:
+        enabled: Override whether to unwrap response for this endpoint.
+        data_path: JSON path to extract data from response.
+    """
+
+    enabled: bool | None = Field(
+        default=None,
+        description='Override whether to unwrap response for this endpoint.',
+    )
+
+    data_path: str | None = Field(
+        default=None,
+        description='JSON path to extract data from response.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+
+class ResponseUnwrapConfig(BaseModel):
+    """Configuration for response unwrapping.
+
+    When enabled, generates endpoint functions that extract and return
+    just the data portion of envelope-style responses, making non-paginated
+    endpoints consistent with paginated ones.
+
+    Attributes:
+        enabled: Enable response unwrapping.
+        data_path: Default JSON path to extract data from responses.
+        endpoints: Per-endpoint configuration overrides.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description='Enable response unwrapping.',
+    )
+
+    data_path: str = Field(
+        default='data',
+        description='Default JSON path to extract data from responses.',
+    )
+
+    endpoints: dict[str, EndpointResponseUnwrapConfig] = Field(
+        default_factory=dict,
+        description='Per-endpoint configuration overrides.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    def get_unwrap_config_for_endpoint(
+        self,
+        endpoint_name: str,
+    ) -> tuple[bool, str | None]:
+        """Determine if response should be unwrapped for an endpoint.
+
+        Args:
+            endpoint_name: The name of the endpoint function.
+
+        Returns:
+            A tuple of (should_unwrap, data_path).
+        """
+        if not self.enabled:
+            return False, None
+
+        # Check for endpoint-specific override
+        endpoint_config = self.endpoints.get(endpoint_name)
+
+        if endpoint_config is not None:
+            if endpoint_config.enabled is False:
+                return False, None
+
+            path = endpoint_config.data_path or self.data_path
+            return True, path
+
+        # Use defaults
+        return True, self.data_path
+
+
 class ModuleDefinition(BaseModel):
     """Definition for a single module or module group.
 
@@ -787,6 +869,11 @@ class DocumentConfig(BaseModel):
     pagination: PaginationConfig = Field(
         default_factory=PaginationConfig,
         description='Configuration for automatic pagination.',
+    )
+
+    response_unwrap: ResponseUnwrapConfig = Field(
+        default_factory=ResponseUnwrapConfig,
+        description='Configuration for response unwrapping.',
     )
 
     @field_validator('source')

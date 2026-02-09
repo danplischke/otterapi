@@ -605,6 +605,9 @@ class EndpointFunctionConfig:
         False  # If True, generates DataFrame from paginated results
     )
     item_type_ast: ast.expr | None = None  # The type of items in the list
+    # Response unwrap config
+    unwrap_data_path: str | None = None  # If set, extract response.{path}
+    unwrap_type_ast: ast.expr | None = None  # The type of the unwrapped data
 
 
 # =============================================================================
@@ -814,6 +817,14 @@ class EndpointFunctionFactory:
                     return _subscript('list', _name('Any'))
 
         if self.config.response_type:
+            # Handle response unwrapping - return the unwrapped type
+            if self.config.unwrap_data_path:
+                if self.config.unwrap_type_ast:
+                    return self.config.unwrap_type_ast
+                # Fallback to Any if we can't determine the type
+                self._add_import('typing', 'Any')
+                return _name('Any')
+
             self._merge_imports(self.config.response_type.annotation_imports)
             return self.config.response_type.annotation_ast
 
@@ -875,7 +886,18 @@ class EndpointFunctionFactory:
                 )
                 if self.config.is_async:
                     parse_call = ast.Await(value=parse_call)
-                body.append(ast.Return(value=parse_call))
+
+                # Handle response unwrapping
+                if self.config.unwrap_data_path:
+                    # result = c._parse_response(response, Type)
+                    body.append(_assign(_name('result'), parse_call))
+                    # return result.data (or result.nested.path)
+                    unwrap_expr = self._build_unwrap_expression(
+                        'result', self.config.unwrap_data_path
+                    )
+                    body.append(ast.Return(value=unwrap_expr))
+                else:
+                    body.append(ast.Return(value=parse_call))
         else:
             body.append(ast.Return(value=request_call))
 
@@ -909,6 +931,25 @@ class EndpointFunctionFactory:
                     return True
 
         return False
+
+    def _build_unwrap_expression(self, var_name: str, data_path: str) -> ast.expr:
+        """Build an expression to extract data from a response.
+
+        For data_path="data", generates: result.data
+        For data_path="data.items", generates: result.data.items
+
+        Args:
+            var_name: The variable name holding the response.
+            data_path: Dotted path to the data field.
+
+        Returns:
+            AST expression for accessing the data.
+        """
+        parts = data_path.split('.')
+        expr: ast.expr = _name(var_name)
+        for part in parts:
+            expr = _attr(expr, part)
+        return expr
 
     def _build_delegating_body(self) -> list[ast.stmt]:
         """Build the body for a delegating endpoint function."""
@@ -2425,6 +2466,8 @@ def build_standalone_endpoint_fn(
     response_infos: list['ResponseInfo'] | None = None,
     docs: str | None = None,
     is_async: bool = False,
+    unwrap_data_path: str | None = None,
+    unwrap_type_ast: ast.expr | None = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build a standalone endpoint function with full implementation.
 
@@ -2440,6 +2483,8 @@ def build_standalone_endpoint_fn(
         response_infos: List of ResponseInfo objects for status code handling.
         docs: Optional docstring for the generated function.
         is_async: Whether to generate an async function.
+        unwrap_data_path: If set, extract response.{path} and return it.
+        unwrap_type_ast: The AST for the unwrapped return type.
 
     Returns:
         A tuple of (function_ast, imports).
@@ -2455,6 +2500,8 @@ def build_standalone_endpoint_fn(
         docs=docs,
         is_async=is_async,
         mode=EndpointMode.STANDALONE,
+        unwrap_data_path=unwrap_data_path,
+        unwrap_type_ast=unwrap_type_ast,
     )
     return EndpointFunctionFactory(config).build()
 

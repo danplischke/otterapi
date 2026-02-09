@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         ModuleDefinition,
         ModuleSplitConfig,
         PaginationConfig,
+        ResponseUnwrapConfig,
     )
 
 __all__ = [
@@ -577,6 +578,7 @@ class SplitModuleEmitter:
         client_class_name: str = 'APIClient',
         dataframe_config: DataFrameConfig | None = None,
         pagination_config: PaginationConfig | None = None,
+        response_unwrap_config: ResponseUnwrapConfig | None = None,
     ):
         """Initialize the split module emitter.
 
@@ -588,6 +590,7 @@ class SplitModuleEmitter:
             client_class_name: Name of the client class.
             dataframe_config: Optional DataFrame configuration.
             pagination_config: Optional pagination configuration.
+            response_unwrap_config: Optional response unwrap configuration.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -596,6 +599,7 @@ class SplitModuleEmitter:
         self.client_class_name = client_class_name
         self.dataframe_config = dataframe_config
         self.pagination_config = pagination_config
+        self.response_unwrap_config = response_unwrap_config
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
         self._is_flat: bool = False  # Track if we're emitting flat structure
@@ -945,6 +949,14 @@ class SplitModuleEmitter:
                         body.append(async_polars_fn)
                         import_collector.add_imports(async_polars_imports)
             else:
+                # Check if response unwrapping is configured for this endpoint
+                should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+                unwrap_type_ast = None
+                if should_unwrap and unwrap_path:
+                    unwrap_type_ast = self._get_unwrapped_type_ast(
+                        endpoint, unwrap_path
+                    )
+
                 # Build sync standalone function
                 sync_fn, sync_imports = build_standalone_endpoint_fn(
                     fn_name=endpoint.sync_fn_name,
@@ -956,6 +968,8 @@ class SplitModuleEmitter:
                     response_infos=endpoint.response_infos,
                     docs=endpoint.description,
                     is_async=False,
+                    unwrap_data_path=unwrap_path if should_unwrap else None,
+                    unwrap_type_ast=unwrap_type_ast,
                 )
                 endpoint_names.append(endpoint.sync_fn_name)
                 body.append(sync_fn)
@@ -972,6 +986,8 @@ class SplitModuleEmitter:
                     response_infos=endpoint.response_infos,
                     docs=endpoint.description,
                     is_async=True,
+                    unwrap_data_path=unwrap_path if should_unwrap else None,
+                    unwrap_type_ast=unwrap_type_ast,
                 )
                 endpoint_names.append(endpoint.async_fn_name)
                 body.append(async_fn)
@@ -1151,6 +1167,82 @@ class SplitModuleEmitter:
         if isinstance(ann, ast.Subscript):
             if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
                 return ann.slice
+
+        return None
+
+    def _get_unwrap_config(self, endpoint: Endpoint) -> tuple[bool, str | None]:
+        """Get the response unwrap configuration for an endpoint.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            A tuple of (should_unwrap, data_path).
+        """
+        if not self.response_unwrap_config:
+            return False, None
+        return self.response_unwrap_config.get_unwrap_config_for_endpoint(
+            endpoint.sync_fn_name
+        )
+
+    def _get_unwrapped_type_ast(
+        self,
+        endpoint: Endpoint,
+        data_path: str,
+    ) -> ast.expr | None:
+        """Extract the type AST for the unwrapped data field.
+
+        Looks up the response type model in typegen and finds the field
+        matching the data_path to determine its type.
+
+        For union response types (e.g., SuccessResponse | ErrorResponse),
+        this method looks for the 2xx success response in response_infos
+        to find the correct type to unwrap.
+
+        Args:
+            endpoint: The endpoint to check.
+            data_path: The dotted path to the data field (e.g., "data").
+
+        Returns:
+            The AST expression for the unwrapped type, or None if not found.
+        """
+        if not endpoint.response_type:
+            return None
+
+        # Get the first part of the path (for nested paths like "data.items")
+        field_name = data_path.split('.')[0]
+
+        # Determine which type to look up.
+        # _typegen_types is keyed by name, not reference.
+        type_name = endpoint.response_type.name
+
+        # If response_type has no name (it's a union type),
+        # look for the success (2xx) response in response_infos.
+        if not type_name and endpoint.response_infos:
+            for response_info in endpoint.response_infos:
+                if 200 <= response_info.status_code < 300 and response_info.type:
+                    type_name = response_info.type.name
+                    break
+
+        if not type_name:
+            return None
+
+        # Find the type definition
+        type_def = self._typegen_types.get(type_name)
+        if not type_def or not type_def.implementation_ast:
+            return None
+
+        # Parse the implementation AST to find the field
+        impl = type_def.implementation_ast
+        if not isinstance(impl, ast.ClassDef):
+            return None
+
+        # Look for the field in the class body
+        for stmt in impl.body:
+            if isinstance(stmt, ast.AnnAssign):
+                if isinstance(stmt.target, ast.Name) and stmt.target.id == field_name:
+                    # Found the field, return its annotation
+                    return stmt.annotation
 
         return None
 
