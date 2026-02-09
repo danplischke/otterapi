@@ -608,6 +608,9 @@ class EndpointFunctionConfig:
     # Response unwrap config
     unwrap_data_path: str | None = None  # If set, extract response.{path}
     unwrap_type_ast: ast.expr | None = None  # The type of the unwrapped data
+    unwrap_type_imports: dict[str, set[str]] | None = None  # Imports for unwrapped type
+    # Response type imports (for model names in response_type.annotation_ast)
+    response_type_imports: dict[str, set[str]] | None = None
 
 
 # =============================================================================
@@ -820,6 +823,9 @@ class EndpointFunctionFactory:
             # Handle response unwrapping - return the unwrapped type
             if self.config.unwrap_data_path:
                 if self.config.unwrap_type_ast:
+                    # Merge imports for the unwrapped type
+                    if self.config.unwrap_type_imports:
+                        self._merge_imports(self.config.unwrap_type_imports)
                     return self.config.unwrap_type_ast
                 # Fallback to Any if we can't determine the type
                 self._add_import('typing', 'Any')
@@ -864,6 +870,9 @@ class EndpointFunctionFactory:
 
         if self.config.response_type:
             self._merge_imports(self.config.response_type.annotation_imports)
+            # Merge model imports for response type (for models used in _parse_response call)
+            if self.config.response_type_imports:
+                self._merge_imports(self.config.response_type_imports)
 
             # Check if response type is a raw type (Response, bytes, str) that doesn't need parsing
             is_raw_response = self._is_raw_response_type(self.config.response_type)
@@ -2468,6 +2477,8 @@ def build_standalone_endpoint_fn(
     is_async: bool = False,
     unwrap_data_path: str | None = None,
     unwrap_type_ast: ast.expr | None = None,
+    unwrap_type_imports: dict[str, set[str]] | None = None,
+    response_type_imports: dict[str, set[str]] | None = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build a standalone endpoint function with full implementation.
 
@@ -2485,6 +2496,8 @@ def build_standalone_endpoint_fn(
         is_async: Whether to generate an async function.
         unwrap_data_path: If set, extract response.{path} and return it.
         unwrap_type_ast: The AST for the unwrapped return type.
+        unwrap_type_imports: Imports needed for the unwrapped return type.
+        response_type_imports: Imports needed for model names in response type.
 
     Returns:
         A tuple of (function_ast, imports).
@@ -2502,6 +2515,8 @@ def build_standalone_endpoint_fn(
         mode=EndpointMode.STANDALONE,
         unwrap_data_path=unwrap_data_path,
         unwrap_type_ast=unwrap_type_ast,
+        unwrap_type_imports=unwrap_type_imports,
+        response_type_imports=response_type_imports,
     )
     return EndpointFunctionFactory(config).build()
 

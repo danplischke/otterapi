@@ -1037,9 +1037,17 @@ class Codegen(OpenAPIProcessor):
                 # Check if response unwrapping is configured for this endpoint
                 should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
                 unwrap_type_ast = None
+                unwrap_type_imports = None
                 if should_unwrap and unwrap_path:
-                    unwrap_type_ast = self._get_unwrapped_type_ast(
+                    unwrap_type_ast, unwrap_type_imports = self._get_unwrapped_type_ast(
                         endpoint, unwrap_path
+                    )
+
+                # Collect model imports from response type annotation
+                response_type_imports = None
+                if endpoint.response_type and endpoint.response_type.annotation_ast:
+                    response_type_imports = self._collect_model_imports_from_ast(
+                        endpoint.response_type.annotation_ast
                     )
 
                 # Build regular sync standalone function
@@ -1055,6 +1063,8 @@ class Codegen(OpenAPIProcessor):
                     is_async=False,
                     unwrap_data_path=unwrap_path if should_unwrap else None,
                     unwrap_type_ast=unwrap_type_ast,
+                    unwrap_type_imports=unwrap_type_imports,
+                    response_type_imports=response_type_imports,
                 )
                 endpoint_names.add(endpoint.sync_fn_name)
                 body.append(sync_fn)
@@ -1073,6 +1083,8 @@ class Codegen(OpenAPIProcessor):
                     is_async=True,
                     unwrap_data_path=unwrap_path if should_unwrap else None,
                     unwrap_type_ast=unwrap_type_ast,
+                    unwrap_type_imports=unwrap_type_imports,
+                    response_type_imports=response_type_imports,
                 )
                 endpoint_names.add(endpoint.async_fn_name)
                 body.append(async_fn)
@@ -1761,11 +1773,45 @@ class Codegen(OpenAPIProcessor):
             endpoint.sync_fn_name
         )
 
+    def _collect_model_imports_from_ast(
+        self, annotation_ast: ast.expr
+    ) -> dict[str, set[str]]:
+        """Collect model imports needed for an AST annotation.
+
+        Walks the AST and finds all Name nodes that correspond to
+        model types in typegen.types, then collects their annotation imports.
+
+        Args:
+            annotation_ast: The annotation AST to scan for model references.
+
+        Returns:
+            Dictionary mapping module names to sets of import names.
+        """
+        imports: dict[str, set[str]] = {}
+
+        # Get all available model names
+        available_models = {
+            name
+            for name, type_ in self.typegen.types.items()
+            if type_.implementation_ast is not None
+        }
+
+        # Walk the AST to find Name nodes
+        for node in ast.walk(annotation_ast):
+            if isinstance(node, ast.Name) and node.id in available_models:
+                # This is a model reference - add it to imports
+                # Models are imported from the models module
+                if '.models' not in imports:
+                    imports['.models'] = set()
+                imports['.models'].add(node.id)
+
+        return imports
+
     def _get_unwrapped_type_ast(
         self,
         endpoint: Endpoint,
         data_path: str,
-    ) -> ast.expr | None:
+    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
         """Extract the type AST for the unwrapped data field.
 
         Looks up the response type model in typegen and finds the field
@@ -1780,10 +1826,12 @@ class Codegen(OpenAPIProcessor):
             data_path: The dotted path to the data field (e.g., "data").
 
         Returns:
-            The AST expression for the unwrapped type, or None if not found.
+            A tuple of (ast_expression, imports) where:
+            - ast_expression: The AST for the unwrapped type, or None if not found.
+            - imports: Dictionary of imports needed for the unwrapped type.
         """
         if not endpoint.response_type:
-            return None
+            return None, {}
 
         # Get the first part of the path (for nested paths like "data.items")
         field_name = data_path.split('.')[0]
@@ -1801,23 +1849,25 @@ class Codegen(OpenAPIProcessor):
                     break
 
         if not type_name:
-            return None
+            return None, {}
 
         # Find the type definition
         type_def = self.typegen.types.get(type_name)
         if not type_def or not type_def.implementation_ast:
-            return None
+            return None, {}
 
         # Parse the implementation AST to find the field
         impl = type_def.implementation_ast
         if not isinstance(impl, ast.ClassDef):
-            return None
+            return None, {}
 
         # Look for the field in the class body
         for stmt in impl.body:
             if isinstance(stmt, ast.AnnAssign):
                 if isinstance(stmt.target, ast.Name) and stmt.target.id == field_name:
-                    # Found the field, return its annotation
-                    return stmt.annotation
+                    # Found the field, collect imports for models referenced in the type
+                    annotation = stmt.annotation
+                    imports = self._collect_model_imports_from_ast(annotation)
+                    return annotation, imports
 
-        return None
+        return None, {}
