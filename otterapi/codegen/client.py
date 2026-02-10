@@ -49,10 +49,13 @@ class EndpointInfo:
 
 
 def generate_api_error_class() -> ast.ClassDef:
-    """Generate the APIError exception class for detailed error handling.
+    """Generate the BaseAPIError exception class for detailed error handling.
+
+    This generates a base class that can be subclassed by users in client.py
+    to customize error handling behavior (e.g., different detail keys).
 
     Returns:
-        AST ClassDef for the APIError class.
+        AST ClassDef for the BaseAPIError class.
     """
     # Build __init__ method
     init_body = [
@@ -399,7 +402,7 @@ def generate_api_error_class() -> ast.ClassDef:
         ),
         body=from_response_body,
         decorator_list=[_name('classmethod')],
-        returns=ast.Constant(value='APIError'),
+        returns=ast.Constant(value='BaseAPIError'),
     )
 
     # Build __str__ method
@@ -441,7 +444,7 @@ def generate_api_error_class() -> ast.ClassDef:
             ast.Return(
                 value=ast.JoinedStr(
                     values=[
-                        ast.Constant(value='APIError(status_code='),
+                        ast.Constant(value='BaseAPIError(status_code='),
                         ast.FormattedValue(
                             value=_attr('self', 'status_code'), conversion=-1
                         ),
@@ -476,7 +479,7 @@ Attributes:
     )
 
     class_def = ast.ClassDef(
-        name='APIError',
+        name='BaseAPIError',
         bases=[_name('Exception')],
         keywords=[],
         body=[docstring, init_method, from_response_method, str_method, repr_method],
@@ -507,6 +510,7 @@ def generate_base_client_class(
     imports: ImportDict = {
         'httpx': {'Client', 'AsyncClient', 'Response'},
         'typing': {'Any', 'TypeVar'},
+        'types': {'UnionType'},
         'pydantic': {'TypeAdapter', 'RootModel'},
     }
 
@@ -524,6 +528,9 @@ def generate_base_client_class(
 
     # Build _request_json_async method (async) - request + json parsing
     async_request_json_method = _build_request_json_method(is_async=True)
+
+    # Build _validate_response hook method
+    validate_response_method = _build_validate_response_method()
 
     # Build _parse_response method (sync)
     parse_response_method = _build_parse_response_method(is_async=False)
@@ -556,6 +563,7 @@ Args:
         async_request_method,
         request_json_method,
         async_request_json_method,
+        validate_response_method,
         parse_response_method,
         async_parse_response_method,
     ]
@@ -653,6 +661,67 @@ def _build_init_method(
     return init_method
 
 
+def _build_validate_response_method() -> ast.FunctionDef:
+    """Build the _validate_response hook method.
+
+    This method is called after parsing but before returning the response.
+    Users can override this in their client.py to add custom validation,
+    such as checking for API-level errors in wrapper objects.
+    """
+    args = ast.arguments(
+        posonlyargs=[],
+        args=[
+            _argument('self'),
+            _argument('response', _name('Response')),
+            _argument('validated', _name('Any')),
+        ],
+        kwonlyargs=[],
+        kw_defaults=[],
+        kwarg=None,
+        defaults=[],
+    )
+
+    # Build docstring
+    docstring = """Validate the parsed response before returning.
+
+        Override this method to add custom validation logic, such as
+        checking for API-level errors in wrapper objects.
+
+        This hook is called after Pydantic validation but before unwrapping
+        RootModel responses.
+
+        Args:
+            response: The raw httpx Response object.
+            validated: The parsed and validated Pydantic model.
+
+        Raises:
+            APIError: If validation fails (or any other exception).
+
+        Example:
+            def _validate_response(self, response, validated):
+                # Check for API-level errors in wrapper objects
+                if hasattr(validated, 'error') and validated.error is not None:
+                    raise APIError(
+                        status_code=response.status_code,
+                        response=response,
+                        detail=validated.error,
+                    )
+        """
+
+    body: list[ast.stmt] = [
+        ast.Expr(value=ast.Constant(value=docstring)),
+        ast.Pass(),
+    ]
+
+    return ast.FunctionDef(
+        name='_validate_response',
+        args=args,
+        body=body,
+        decorator_list=[],
+        returns=ast.Constant(value=None),
+    )
+
+
 def _build_parse_response_method(
     is_async: bool,
 ) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -668,7 +737,10 @@ def _build_parse_response_method(
         args=[
             _argument('self'),
             _argument('response', _name('Response')),
-            _argument('response_type', _subscript('type', _name('T'))),
+            _argument(
+                'response_type',
+                _union_expr([_name('type'), _name('UnionType')]),
+            ),
         ],
         kwonlyargs=[],
         kw_defaults=[],
@@ -679,6 +751,7 @@ def _build_parse_response_method(
     # Build the method body:
     # data = response.json()
     # validated = TypeAdapter(response_type).validate_python(data)
+    # self._validate_response(response, validated)
     # if isinstance(validated, RootModel):
     #     return validated.root
     # return validated
@@ -701,6 +774,13 @@ def _build_parse_response_method(
                 ),
                 args=[_name('data')],
             ),
+        ),
+        # self._validate_response(response, validated)
+        ast.Expr(
+            value=_call(
+                func=_attr('self', '_validate_response'),
+                args=[_name('response'), _name('validated')],
+            )
         ),
         # if isinstance(validated, RootModel): return validated.root
         ast.If(
@@ -1216,7 +1296,7 @@ You can safely customize this file to add authentication, logging,
 error handling, or other client-specific functionality.
 """
 
-from .{module_name} import {base_class_name}
+from .{module_name} import {base_class_name}, BaseAPIError
 
 
 class {class_name}({base_class_name}):
@@ -1251,10 +1331,60 @@ class {class_name}({base_class_name}):
     #     super().__init__(**kwargs)
     #     if api_key:
     #         self.headers["Authorization"] = f"Bearer {{api_key}}"
+    #
+    # Example - validating API responses (e.g., checking for errors in wrapper objects):
+    #
+    # def _validate_response(self, response, validated):
+    #     \"\"\"Check for API-level errors in response wrapper.\"\"\"
+    #     if hasattr(validated, 'error') and validated.error is not None:
+    #         raise APIError(
+    #             status_code=response.status_code,
+    #             response=response,
+    #             detail=validated.error,
+    #         )
 
 
-# Convenience alias for shorter imports
+class APIError(BaseAPIError):
+    """Customizable API error class.
+
+    Override the from_response() classmethod to customize how error details
+    are extracted from API responses. The default implementation looks for
+    a 'detail' key in the JSON response body.
+
+    Example - customizing error detail extraction:
+
+        class APIError(BaseAPIError):
+            @classmethod
+            def from_response(cls, response):
+                status_code = response.status_code
+                body = response.text
+                detail = None
+                try:
+                    json_body = response.json()
+                    # Custom keys for this API
+                    detail = (
+                        json_body.get('error')
+                        or json_body.get('message')
+                        or json_body.get('detail')
+                        or json_body
+                    )
+                except Exception:
+                    detail = body if body else None
+                return cls(
+                    f'HTTP {{status_code}} Error: {{detail}}',
+                    status_code=status_code,
+                    response=response,
+                    detail=detail,
+                    body=body,
+                )
+    """
+
+    pass
+
+
+# Convenience aliases for shorter imports
 Client = {class_name}
+Error = APIError
 
-__all__ = ["{class_name}", "Client"]
+__all__ = ["{class_name}", "Client", "APIError", "Error"]
 '''

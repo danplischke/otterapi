@@ -508,7 +508,7 @@ class TestPaginatedFunctionGeneration:
     def test_build_async_paginated_function(self):
         """Test generating an async paginated function."""
         fn_ast, imports = build_standalone_paginated_fn(
-            fn_name='alist_users',
+            fn_name='async_list_users',
             method='get',
             path='/users',
             parameters=None,
@@ -525,7 +525,7 @@ class TestPaginatedFunctionGeneration:
             docs='List all users async.',
             is_async=True,
         )
-        assert fn_ast.name == 'alist_users'
+        assert fn_ast.name == 'async_list_users'
         assert isinstance(fn_ast, ast.AsyncFunctionDef)
 
     def test_build_paginated_iter_function(self):
@@ -558,7 +558,7 @@ class TestPaginatedFunctionGeneration:
     def test_build_async_paginated_iter_function(self):
         """Test generating an async paginated iterator function."""
         fn_ast, imports = build_standalone_paginated_iter_fn(
-            fn_name='alist_users_iter',
+            fn_name='async_list_users_iter',
             method='get',
             path='/users',
             parameters=None,
@@ -576,7 +576,7 @@ class TestPaginatedFunctionGeneration:
             docs='Iterate over users async.',
             is_async=True,
         )
-        assert fn_ast.name == 'alist_users_iter'
+        assert fn_ast.name == 'async_list_users_iter'
         assert isinstance(fn_ast, ast.AsyncFunctionDef)
 
         # Check that AsyncIterator is in imports
@@ -712,12 +712,12 @@ class TestPaginationCodegenIntegration:
 
             # Verify pagination functions are present
             assert 'list_users_iter' in content
-            assert 'alist_users_iter' in content
+            assert 'async_list_users_iter' in content
             assert 'paginate_offset' in content
 
             # Verify no duplicate function definitions
             assert content.count('def list_users(') == 1
-            assert content.count('async def alist_users(') == 1
+            assert content.count('async def async_list_users(') == 1
 
     def test_codegen_with_cursor_pagination(self):
         """Test code generation with cursor-based pagination."""

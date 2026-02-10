@@ -114,13 +114,16 @@ class PaginationStyle(Enum):
 def clean_docstring(docstring: str) -> str:
     """Clean and normalize a docstring by removing excess indentation.
 
+    Adds leading and trailing newlines to create blank lines before and
+    after the docstring content when rendered.
+
     Args:
         docstring: The raw docstring to clean.
 
     Returns:
-        A cleaned docstring with normalized indentation.
+        A cleaned docstring with normalized indentation and surrounding newlines.
     """
-    return textwrap.dedent(f'\n{docstring}\n').strip()
+    return '\n' + textwrap.dedent(f'\n{docstring}\n').strip() + '\n'
 
 
 # =============================================================================
@@ -687,11 +690,14 @@ class EndpointFunctionFactory:
 
         func_builder = _async_func if self.config.is_async else _func
 
+        # Add Any import for **kwargs type annotation
+        self._add_import('typing', 'Any')
+
         func_ast = func_builder(
             name=self.config.fn_name,
             args=signature.args,
             body=body,
-            kwargs=_argument('kwargs', _name('dict')),
+            kwargs=_argument('kwargs', _name('Any')),
             kwonlyargs=signature.kwonlyargs,
             kw_defaults=signature.kw_defaults,
             returns=returns,
@@ -1770,7 +1776,7 @@ def _get_base_request_arguments() -> tuple[list[ast.arg], list[ast.arg], ast.arg
         _argument('timeout', _union_expr([_name('float'), ast.Constant(value=None)])),
         _argument('stream', _name('bool')),
     ]
-    kwargs = _argument('kwargs', _name('dict'))
+    kwargs = _argument('kwargs', _name('Any'))
 
     return args, kwonlyargs, kwargs
 
@@ -2015,7 +2021,7 @@ def _build_base_request_fn(
     imports: ImportDict = {
         **http_imports,
         'pydantic': {'TypeAdapter', 'Json', 'RootModel'},
-        'typing': {'Type', 'TypeVar'},
+        'typing': {'Any', 'Type', 'TypeVar'},
     }
 
     return func_ast, imports
@@ -2353,11 +2359,14 @@ def _build_endpoint_fn(
         returns = _name('Response')
         imports.setdefault('httpx', set()).add('Response')
 
+    # Add Any import for **kwargs type annotation
+    imports.setdefault('typing', set()).add('Any')
+
     func_ast = func_builder(
         name=name,
         args=args,
         body=body,
-        kwargs=_argument('kwargs', _name('dict')),
+        kwargs=_argument('kwargs', _name('Any')),
         kwonlyargs=kwonlyargs,
         kw_defaults=kw_defaults,
         returns=returns,

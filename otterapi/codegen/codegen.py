@@ -543,7 +543,7 @@ class Codegen(OpenAPIProcessor):
             or f'{method}_{path.replace("/", "_").replace("{", "").replace("}", "")}'
         )
         fn_name = to_snake_case(raw_name)
-        async_fn_name = f'a{fn_name}'
+        async_fn_name = f'async_{fn_name}'
 
         parameters, request_body_info = self._get_param_model(
             operation, path_item_parameters
@@ -1654,12 +1654,15 @@ class Codegen(OpenAPIProcessor):
         )
         body.append(typevar_def)
 
-        # Add __all__ export (include APIError)
-        body.append(_all([base_client_name, 'APIError']))
+        # Add __all__ export (include BaseAPIError)
+        body.append(_all([base_client_name, 'BaseAPIError']))
 
-        # Add APIError class
+        # Add BaseAPIError class
         api_error_class = generate_api_error_class()
         body.append(api_error_class)
+
+        # Add APIError = BaseAPIError alias for internal use
+        body.append(_assign(_name('APIError'), _name('BaseAPIError')))
 
         # Add the client class
         body.append(class_ast)

@@ -363,8 +363,8 @@ class TestDataFrameDelegatingFunction:
         from otterapi.codegen.endpoints import build_delegating_dataframe_fn
 
         fn_ast, imports = build_delegating_dataframe_fn(
-            fn_name='aget_users_df',
-            client_method_name='aget_users_df',
+            fn_name='async_get_users_df',
+            client_method_name='async_get_users_df',
             parameters=None,
             request_body_info=None,
             library='pandas',
@@ -374,7 +374,7 @@ class TestDataFrameDelegatingFunction:
         )
 
         assert isinstance(fn_ast, ast.AsyncFunctionDef)
-        assert fn_ast.name == 'aget_users_df'
+        assert fn_ast.name == 'async_get_users_df'
 
     def test_build_delegating_dataframe_fn_with_path(self):
         """Test DataFrame function with default path."""
@@ -591,11 +591,11 @@ class TestDataFrameIntegration:
 
         # Should have _df methods for list-returning endpoint
         assert 'get_users_df' in endpoints_content
-        assert 'aget_users_df' in endpoints_content
+        assert 'async_get_users_df' in endpoints_content
 
         # Should have _pl methods for list-returning endpoint
         assert 'get_users_pl' in endpoints_content
-        assert 'aget_users_pl' in endpoints_content
+        assert 'async_get_users_pl' in endpoints_content
 
         # Should NOT have DataFrame methods for non-list endpoint (getUserById)
         # because it returns a single User, not a list
