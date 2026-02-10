@@ -506,7 +506,7 @@ def generate_base_client_class(
     """
     imports: ImportDict = {
         'httpx': {'Client', 'AsyncClient', 'Response'},
-        'typing': {'Any', 'Type', 'TypeVar'},
+        'typing': {'Any', 'TypeVar'},
         'pydantic': {'TypeAdapter', 'RootModel'},
     }
 
@@ -668,7 +668,7 @@ def _build_parse_response_method(
         args=[
             _argument('self'),
             _argument('response', _name('Response')),
-            _argument('response_type', _subscript('Type', _name('T'))),
+            _argument('response_type', _subscript('type', _name('T'))),
         ],
         kwonlyargs=[],
         kw_defaults=[],
@@ -1251,17 +1251,6 @@ class {class_name}({base_class_name}):
     #     super().__init__(**kwargs)
     #     if api_key:
     #         self.headers["Authorization"] = f"Bearer {{api_key}}"
-    #
-    # Example - overriding a method:
-    #
-    # def get_pet_by_id(self, pet_id: int, **kwargs):
-    #     \"\"\"Get pet with custom error handling.\"\"\"
-    #     try:
-    #         return super().get_pet_by_id(pet_id, **kwargs)
-    #     except httpx.HTTPStatusError as e:
-    #         if e.response.status_code == 404:
-    #             return None
-    #         raise
 
 
 # Convenience alias for shorter imports

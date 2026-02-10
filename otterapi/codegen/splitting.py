@@ -754,8 +754,10 @@ class SplitModuleEmitter:
             if pag_config:
                 has_pagination_methods = True
 
-                # Get item type from response type if it's a list
-                item_type_ast = self._get_item_type_ast(endpoint)
+                # Get item type from response type
+                item_type_ast, item_type_imports = self._get_item_type_ast(
+                    endpoint, pag_config.data_path
+                )
 
                 # Build pagination config dict
                 pag_dict = {
@@ -782,6 +784,7 @@ class SplitModuleEmitter:
                     pagination_style=pag_config.style,
                     pagination_config=pag_dict,
                     item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
                     docs=endpoint.description,
                     is_async=False,
                 )
@@ -800,6 +803,7 @@ class SplitModuleEmitter:
                     pagination_style=pag_config.style,
                     pagination_config=pag_dict,
                     item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
                     docs=endpoint.description,
                     is_async=True,
                 )
@@ -819,6 +823,7 @@ class SplitModuleEmitter:
                     pagination_style=pag_config.style,
                     pagination_config=pag_dict,
                     item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
                     docs=endpoint.description,
                     is_async=False,
                 )
@@ -827,7 +832,7 @@ class SplitModuleEmitter:
                 import_collector.add_imports(iter_imports)
 
                 # Async iterator function
-                async_iter_fn_name = f'{endpoint.async_fn_name}_iter'
+                async_iter_fn_name = endpoint.async_fn_name + '_iter'
                 async_iter_fn, async_iter_imports = build_standalone_paginated_iter_fn(
                     fn_name=async_iter_fn_name,
                     method=endpoint.method,
@@ -838,6 +843,7 @@ class SplitModuleEmitter:
                     pagination_style=pag_config.style,
                     pagination_config=pag_dict,
                     item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
                     docs=endpoint.description,
                     is_async=True,
                 )
@@ -872,6 +878,7 @@ class SplitModuleEmitter:
                                 pagination_config=pag_dict,
                                 library='pandas',
                                 item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
                                 docs=endpoint.description,
                                 is_async=False,
                             )
@@ -894,6 +901,7 @@ class SplitModuleEmitter:
                                 pagination_config=pag_dict,
                                 library='pandas',
                                 item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
                                 docs=endpoint.description,
                                 is_async=True,
                             )
@@ -919,6 +927,7 @@ class SplitModuleEmitter:
                                 pagination_config=pag_dict,
                                 library='polars',
                                 item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
                                 docs=endpoint.description,
                                 is_async=False,
                             )
@@ -941,6 +950,7 @@ class SplitModuleEmitter:
                                 pagination_config=pag_dict,
                                 library='polars',
                                 item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
                                 docs=endpoint.description,
                                 is_async=True,
                             )
@@ -1161,24 +1171,107 @@ class SplitModuleEmitter:
 
         return endpoint_names
 
-    def _get_item_type_ast(self, endpoint: Endpoint) -> ast.expr | None:
+    def _get_item_type_ast(
+        self, endpoint: Endpoint, data_path: str | None = None
+    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
         """Extract the item type AST from a list response type.
 
         For example, if response_type is list[User], returns the AST for User.
+        For paginated endpoints with envelope response types (e.g.,
+        PaginatedResponse with a 'data' field), this method uses data_path
+        to look up the field type from the response model.
 
         Args:
             endpoint: The endpoint to check.
+            data_path: Optional path to the data field in envelope response types
+                (e.g., "data"). If provided and the response type is not directly
+                a list, this will look up the field type from the response model.
 
         Returns:
-            The AST expression for the item type, or None if not a list type.
+            A tuple of (ast_expression, imports) where:
+            - ast_expression: The AST for the item type, or None if not determinable.
+            - imports: Dictionary of imports needed for the item type.
         """
         if not endpoint.response_type or not endpoint.response_type.annotation_ast:
-            return None
+            return None, {}
 
         ann = endpoint.response_type.annotation_ast
+
+        # First, check if the response type itself is list[X]
         if isinstance(ann, ast.Subscript):
             if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
-                return ann.slice
+                item_type = ann.slice
+                imports = self._collect_model_imports_from_ast(item_type)
+                return item_type, imports
+
+        # If data_path is provided, try to extract item type from envelope response
+        if data_path:
+            field_type_ast = self._get_field_type_from_response(endpoint, data_path)
+            if field_type_ast:
+                # Extract item type from list[ItemType]
+                if isinstance(field_type_ast, ast.Subscript):
+                    if (
+                        isinstance(field_type_ast.value, ast.Name)
+                        and field_type_ast.value.id == 'list'
+                    ):
+                        item_type = field_type_ast.slice
+                        imports = self._collect_model_imports_from_ast(item_type)
+                        return item_type, imports
+
+        return None, {}
+
+    def _get_field_type_from_response(
+        self, endpoint: Endpoint, field_path: str
+    ) -> ast.expr | None:
+        """Extract the type AST for a field from the response model.
+
+        For union response types (e.g., SuccessResponse | ErrorResponse),
+        this method looks for the 2xx success response in response_infos
+        to find the correct type.
+
+        Args:
+            endpoint: The endpoint to check.
+            field_path: The dotted path to the field (e.g., "data").
+
+        Returns:
+            The AST expression for the field type, or None if not found.
+        """
+        if not endpoint.response_type:
+            return None
+
+        # Get the first part of the path (for nested paths like "data.items")
+        field_name = field_path.split('.')[0]
+
+        # Determine which type to look up.
+        # _typegen_types is keyed by name, not reference.
+        type_name = endpoint.response_type.name
+
+        # If response_type has no name (it's a union type),
+        # look for the success (2xx) response in response_infos.
+        if not type_name and endpoint.response_infos:
+            for response_info in endpoint.response_infos:
+                if 200 <= response_info.status_code < 300 and response_info.type:
+                    type_name = response_info.type.name
+                    break
+
+        if not type_name:
+            return None
+
+        # Find the type definition
+        type_def = self._typegen_types.get(type_name)
+        if not type_def or not type_def.implementation_ast:
+            return None
+
+        # Parse the implementation AST to find the field
+        impl = type_def.implementation_ast
+        if not isinstance(impl, ast.ClassDef):
+            return None
+
+        # Look for the field in the class body
+        for stmt in impl.body:
+            if isinstance(stmt, ast.AnnAssign):
+                if isinstance(stmt.target, ast.Name) and stmt.target.id == field_name:
+                    return stmt.annotation
 
         return None
 

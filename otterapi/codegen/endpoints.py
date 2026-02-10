@@ -605,6 +605,7 @@ class EndpointFunctionConfig:
         False  # If True, generates DataFrame from paginated results
     )
     item_type_ast: ast.expr | None = None  # The type of items in the list
+    item_type_imports: dict[str, set[str]] | None = None  # Imports for item type
     # Response unwrap config
     unwrap_data_path: str | None = None  # If set, extract response.{path}
     unwrap_type_ast: ast.expr | None = None  # The type of the unwrapped data
@@ -799,6 +800,9 @@ class EndpointFunctionFactory:
         # Pagination return types
         if self.config.pagination_style:
             if self.config.item_type_ast:
+                # Merge imports for the item type
+                if self.config.item_type_imports:
+                    self._merge_imports(self.config.item_type_imports)
                 if self.config.is_iterator:
                     # Iterator[ItemType] or AsyncIterator[ItemType]
                     self._add_import('collections.abc', 'Iterator')
@@ -2620,6 +2624,7 @@ def build_standalone_paginated_dataframe_fn(
     pagination_config: dict,
     library: Literal['pandas', 'polars'],
     item_type_ast: ast.expr | None = None,
+    item_type_imports: dict[str, set[str]] | None = None,
     docs: str | None = None,
     is_async: bool = False,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
@@ -2638,6 +2643,7 @@ def build_standalone_paginated_dataframe_fn(
         pagination_config: Dict with pagination parameter names and paths.
         library: The DataFrame library ('pandas' or 'polars').
         item_type_ast: AST for the item type in the list.
+        item_type_imports: Imports needed for the item type.
         docs: Optional docstring for the generated function.
         is_async: Whether to generate an async function.
 
@@ -2663,6 +2669,7 @@ def build_standalone_paginated_dataframe_fn(
         is_paginated_dataframe=True,
         dataframe_library=df_library,
         item_type_ast=item_type_ast,
+        item_type_imports=item_type_imports,
     )
     return EndpointFunctionFactory(config).build()
 
@@ -2724,6 +2731,7 @@ def build_standalone_paginated_fn(
     pagination_style: str,
     pagination_config: dict,
     item_type_ast: ast.expr | None = None,
+    item_type_imports: dict[str, set[str]] | None = None,
     docs: str | None = None,
     is_async: bool = False,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
@@ -2741,6 +2749,7 @@ def build_standalone_paginated_fn(
         pagination_style: The pagination style ('offset', 'cursor', 'page').
         pagination_config: Dict with pagination parameter names and paths.
         item_type_ast: AST for the item type in the list.
+        item_type_imports: Imports needed for the item type.
         docs: Optional docstring for the generated function.
         is_async: Whether to generate an async function.
 
@@ -2761,6 +2770,7 @@ def build_standalone_paginated_fn(
         pagination_style=pag_style,
         pagination_config=pagination_config,
         item_type_ast=item_type_ast,
+        item_type_imports=item_type_imports,
     )
     return EndpointFunctionFactory(config).build()
 
@@ -2775,6 +2785,7 @@ def build_standalone_paginated_iter_fn(
     pagination_style: str,
     pagination_config: dict,
     item_type_ast: ast.expr | None = None,
+    item_type_imports: dict[str, set[str]] | None = None,
     docs: str | None = None,
     is_async: bool = False,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
@@ -2792,6 +2803,7 @@ def build_standalone_paginated_iter_fn(
         pagination_style: The pagination style ('offset', 'cursor', 'page').
         pagination_config: Dict with pagination parameter names and paths.
         item_type_ast: AST for the item type in the list.
+        item_type_imports: Imports needed for the item type.
         docs: Optional docstring for the generated function.
         is_async: Whether to generate an async function.
 
@@ -2813,5 +2825,6 @@ def build_standalone_paginated_iter_fn(
         pagination_config=pagination_config,
         is_iterator=True,
         item_type_ast=item_type_ast,
+        item_type_imports=item_type_imports,
     )
     return EndpointFunctionFactory(config).build()
