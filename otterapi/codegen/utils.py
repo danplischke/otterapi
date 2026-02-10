@@ -141,6 +141,29 @@ def validate_python_syntax(content: str) -> None:
         Path(temp_path).unlink(missing_ok=True)
 
 
+def _add_blank_lines(source: str) -> str:
+    """Add blank lines after certain blocks for better readability.
+
+    Adds a blank line after TYPE_CHECKING blocks before __all__.
+
+    Args:
+        source: The source code to process.
+
+    Returns:
+        Source code with blank lines added where needed.
+    """
+    import re
+
+    # Add blank line after TYPE_CHECKING block before __all__
+    source = re.sub(
+        r'(if TYPE_CHECKING:\n(?:    [^\n]+\n)+)(__all__)',
+        r'\1\n\2',
+        source,
+    )
+
+    return source
+
+
 def format_source(source: str) -> str:
     """Format Python source code using ruff or black if available.
 
@@ -161,7 +184,7 @@ def format_source(source: str) -> str:
             text=True,
         )
         if result.returncode == 0:
-            return result.stdout
+            return _add_blank_lines(result.stdout)
     except (FileNotFoundError, subprocess.SubprocessError):
         pass
 
@@ -169,14 +192,14 @@ def format_source(source: str) -> str:
     try:
         import black
 
-        return black.format_str(source, mode=black.Mode())
+        return _add_blank_lines(black.format_str(source, mode=black.Mode()))
     except ImportError:
         pass
     except Exception:
         pass
 
     # Return original if no formatter available
-    return source
+    return _add_blank_lines(source)
 
 
 def write_mod(

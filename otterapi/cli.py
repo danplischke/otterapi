@@ -27,11 +27,41 @@ from otterapi.exceptions import OtterAPIError, SchemaLoadError, SchemaValidation
 console = Console()
 error_console = Console(stderr=True)
 
+
+def _version_callback(value: bool) -> None:
+    """Print version and exit if --version flag is passed."""
+    if value:
+        try:
+            from otterapi._version import version as ver
+
+            console.print(f'otterapi version: [bold]{ver}[/bold]')
+        except ImportError:
+            console.print('otterapi version: [dim]unknown (development)[/dim]')
+        raise typer.Exit()
+
+
 app = typer.Typer(
     name='otterapi',
     help='Generate Python client code from OpenAPI specifications',
     no_args_is_help=True,
 )
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            '--version',
+            '-V',
+            help='Show version and exit',
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Generate Python client code from OpenAPI specifications."""
+    pass
 
 
 def setup_logging(verbose: bool = False, debug: bool = False) -> None:

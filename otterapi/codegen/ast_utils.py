@@ -6,6 +6,7 @@ and utilities for collecting and organizing imports during code generation.
 
 import ast
 import keyword
+import sys
 from collections.abc import Iterable
 
 PYTHON_KEYWORDS = set(keyword.kwlist)
@@ -208,23 +209,63 @@ class ImportCollector:
             self._imports[module] = set()
         self._imports[module].add(name)
 
+    def _get_import_category(self, module: str) -> int:
+        """Get the sort category for a module.
+
+        Uses sys.stdlib_module_names to dynamically detect standard library modules.
+
+        Returns:
+            0 for standard library, 1 for third-party, 2 for local/relative imports.
+        """
+        if module.startswith('.'):
+            return 2  # Local/relative imports
+
+        # Check if it's a standard library module
+        base_module = module.split('.')[0]
+        if base_module in sys.stdlib_module_names:
+            return 0  # Standard library
+
+        return 1  # Third-party
+
     def to_ast(self, reverse_sort: bool = True) -> list[ast.ImportFrom]:
         """Convert collected imports to AST ImportFrom statements.
 
+        Imports are sorted according to Python conventions:
+        1. Standard library imports
+        2. Third-party imports
+        3. Local/relative imports
+
+        Within each category, imports are sorted alphabetically by module name.
+        Names within each import are also sorted alphabetically.
+
         Args:
-            reverse_sort: If True, sort modules in reverse order (default).
-                         This is useful for placing standard library imports last.
+            reverse_sort: Deprecated, kept for backward compatibility but ignored.
 
         Returns:
-            List of ast.ImportFrom statements, sorted by module name.
-            Names within each import are also sorted alphabetically.
+            List of ast.ImportFrom statements, properly sorted.
         """
         import_stmts = []
-        for module, names in sorted(self._imports.items(), reverse=reverse_sort):
+
+        # Sort by (category, module_name) to get proper ordering
+        sorted_modules = sorted(
+            self._imports.items(),
+            key=lambda x: (self._get_import_category(x[0]), x[0]),
+        )
+
+        for module, names in sorted_modules:
+            # Determine the level for relative imports
+            if module.startswith('.'):
+                # Count leading dots for relative import level
+                level = len(module) - len(module.lstrip('.'))
+                import_module = module.lstrip('.') or None
+            else:
+                level = 0
+                import_module = module
+
             import_stmt = ast.ImportFrom(
-                module=module,
+                module=import_module,
                 names=[ast.alias(name=name, asname=None) for name in sorted(names)],
-                level=0,
+                level=level,
             )
             import_stmts.append(import_stmt)
         return import_stmts

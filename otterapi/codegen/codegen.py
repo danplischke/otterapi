@@ -1186,6 +1186,7 @@ class Codegen(OpenAPIProcessor):
                     import_collector.add_imports(async_polars_imports)
 
         # Add TYPE_CHECKING block for DataFrame type hints if needed
+        type_checking_block = None
         if has_dataframe_methods:
             import_collector.add_imports({'typing': {'TYPE_CHECKING'}})
             type_checking_block = ast.If(
@@ -1196,46 +1197,36 @@ class Codegen(OpenAPIProcessor):
                 ],
                 orelse=[],
             )
-            body.insert(0, type_checking_block)
 
-            # Add dataframe helper imports
-            dataframe_import = ast.ImportFrom(
-                module='_dataframe',
-                names=[
-                    ast.alias(name='to_pandas', asname=None),
-                    ast.alias(name='to_polars', asname=None),
-                ],
-                level=1,
-            )
-            body.insert(0, dataframe_import)
+            # Add dataframe helper imports to collector
+            import_collector.add_imports({'._dataframe': {'to_pandas', 'to_polars'}})
 
         # Add pagination imports if needed
         if has_pagination_methods:
             import_collector.add_imports(
                 {'collections.abc': {'Iterator', 'AsyncIterator'}}
             )
-            pagination_import = ast.ImportFrom(
-                module='_pagination',
-                names=[
-                    ast.alias(name='paginate_offset', asname=None),
-                    ast.alias(name='paginate_offset_async', asname=None),
-                    ast.alias(name='paginate_cursor', asname=None),
-                    ast.alias(name='paginate_cursor_async', asname=None),
-                    ast.alias(name='paginate_page', asname=None),
-                    ast.alias(name='paginate_page_async', asname=None),
-                    ast.alias(name='iterate_offset', asname=None),
-                    ast.alias(name='iterate_offset_async', asname=None),
-                    ast.alias(name='iterate_cursor', asname=None),
-                    ast.alias(name='iterate_cursor_async', asname=None),
-                    ast.alias(name='iterate_page', asname=None),
-                    ast.alias(name='iterate_page_async', asname=None),
-                    ast.alias(name='extract_path', asname=None),
-                ],
-                level=1,
+            import_collector.add_imports(
+                {
+                    '._pagination': {
+                        'paginate_offset',
+                        'paginate_offset_async',
+                        'paginate_cursor',
+                        'paginate_cursor_async',
+                        'paginate_page',
+                        'paginate_page_async',
+                        'iterate_offset',
+                        'iterate_offset_async',
+                        'iterate_cursor',
+                        'iterate_cursor_async',
+                        'iterate_page',
+                        'iterate_page_async',
+                        'extract_path',
+                    }
+                }
             )
-            body.insert(0, pagination_import)
 
-        return body, import_collector, endpoint_names
+        return body, import_collector, endpoint_names, type_checking_block
 
     def _generate_endpoint_file(
         self, path: UPath, models_file: UPath, endpoints: list[Endpoint]
@@ -1250,32 +1241,36 @@ class Codegen(OpenAPIProcessor):
         baseurl = self._resolve_base_url()
 
         # Build file body and collect imports
-        body, import_collector, endpoint_names = self._build_endpoint_file_body(
-            baseurl, endpoints
+        body, import_collector, endpoint_names, type_checking_block = (
+            self._build_endpoint_file_body(baseurl, endpoints)
         )
 
-        # Add __all__ export
-        body.insert(0, _all(sorted(endpoint_names)))
+        # Add Client import to collector
+        import_collector.add_imports({'.client': {'Client'}})
 
         # Add model imports only for models actually used in endpoints
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
-            model_import = self._create_model_import(models_file, model_names)
-            body.insert(0, model_import)
+            for name in model_names:
+                import_collector.add_imports({'.models': {name}})
 
-        # Add Client import (relative import from same directory)
-        client_import = ast.ImportFrom(
-            module='client',
-            names=[ast.alias(name='Client', asname=None)],
-            level=1,
-        )
-        body.insert(0, client_import)
+        # Build final body with imports in proper order
+        final_body: list[ast.stmt] = []
 
-        # Add all other imports at the beginning
-        for import_stmt in import_collector.to_ast():
-            body.insert(0, import_stmt)
+        # Add imports from collector (sorted: stdlib, third-party, local)
+        final_body.extend(import_collector.to_ast())
 
-        write_mod(body, path)
+        # Add TYPE_CHECKING block after imports if needed
+        if type_checking_block:
+            final_body.append(type_checking_block)
+
+        # Add __all__ export
+        final_body.append(_all(sorted(endpoint_names)))
+
+        # Add the rest of the body (functions)
+        final_body.extend(body)
+
+        write_mod(final_body, path)
 
     def _generate_models_file(self, path: UPath) -> None:
         """Generate the models Python file with Pydantic models.

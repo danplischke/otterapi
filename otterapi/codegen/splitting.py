@@ -1098,20 +1098,17 @@ class SplitModuleEmitter:
                     body.append(async_polars_fn)
                     import_collector.add_imports(async_polars_imports)
 
-        # Add __all__ export
-        body.insert(0, _all(sorted(endpoint_names)))
+        # Add Client import to collector
+        import_collector.add_imports({'.client': {'Client'}})
 
-        # Add model imports
+        # Add model imports to collector
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
-            model_import = self._create_model_import(model_names, module_path)
-            body.insert(0, model_import)
-
-        # Add Client import
-        client_import = self._create_client_import(module_path)
-        body.insert(0, client_import)
+            for name in model_names:
+                import_collector.add_imports({'.models': {name}})
 
         # Add TYPE_CHECKING block for DataFrame type hints if needed
+        type_checking_block = None
         if has_dataframe_methods:
             import_collector.add_imports({'typing': {'TYPE_CHECKING'}})
             type_checking_block = ast.If(
@@ -1122,52 +1119,55 @@ class SplitModuleEmitter:
                 ],
                 orelse=[],
             )
-            body.insert(0, type_checking_block)
 
-            dataframe_import = ast.ImportFrom(
-                module='_dataframe',
-                names=[
-                    ast.alias(name='to_pandas', asname=None),
-                    ast.alias(name='to_polars', asname=None),
-                ],
-                level=1,
-            )
-            body.insert(0, dataframe_import)
+            # Add dataframe helper imports to collector
+            import_collector.add_imports({'._dataframe': {'to_pandas', 'to_polars'}})
 
         # Add pagination imports if needed
         if has_pagination_methods:
             import_collector.add_imports(
                 {'collections.abc': {'Iterator', 'AsyncIterator'}}
             )
-            pagination_import = ast.ImportFrom(
-                module='_pagination',
-                names=[
-                    ast.alias(name='paginate_offset', asname=None),
-                    ast.alias(name='paginate_offset_async', asname=None),
-                    ast.alias(name='paginate_cursor', asname=None),
-                    ast.alias(name='paginate_cursor_async', asname=None),
-                    ast.alias(name='paginate_page', asname=None),
-                    ast.alias(name='paginate_page_async', asname=None),
-                    ast.alias(name='iterate_offset', asname=None),
-                    ast.alias(name='iterate_offset_async', asname=None),
-                    ast.alias(name='iterate_cursor', asname=None),
-                    ast.alias(name='iterate_cursor_async', asname=None),
-                    ast.alias(name='iterate_page', asname=None),
-                    ast.alias(name='iterate_page_async', asname=None),
-                    ast.alias(name='extract_path', asname=None),
-                ],
-                level=1,
+            import_collector.add_imports(
+                {
+                    '._pagination': {
+                        'paginate_offset',
+                        'paginate_offset_async',
+                        'paginate_cursor',
+                        'paginate_cursor_async',
+                        'paginate_page',
+                        'paginate_page_async',
+                        'iterate_offset',
+                        'iterate_offset_async',
+                        'iterate_cursor',
+                        'iterate_cursor_async',
+                        'iterate_page',
+                        'iterate_page_async',
+                        'extract_path',
+                    }
+                }
             )
-            body.insert(0, pagination_import)
 
-        # Add all other imports at the beginning
-        for import_stmt in import_collector.to_ast():
-            body.insert(0, import_stmt)
+        # Build final body with imports in proper order
+        final_body: list[ast.stmt] = []
+
+        # Add imports from collector (sorted: stdlib, third-party, local)
+        final_body.extend(import_collector.to_ast())
+
+        # Add TYPE_CHECKING block after imports if needed
+        if type_checking_block:
+            final_body.append(type_checking_block)
+
+        # Add __all__ export
+        final_body.append(_all(sorted(endpoint_names)))
+
+        # Add the rest of the body (functions)
+        final_body.extend(body)
 
         # Write the file
         file_path = UPath(file_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        write_mod(body, file_path)
+        write_mod(final_body, file_path)
 
         return endpoint_names
 
