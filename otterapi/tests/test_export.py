@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import csv
 import importlib.util
@@ -196,7 +197,7 @@ class TestGenerateExportModule:
     def test_writes_file(self, tmp_path):
         result = generate_export_module(tmp_path)
         assert result.exists()
-        content = Path(result).read_text()
+        content = Path(result).read_text(encoding='utf-8')
         assert 'def to_csv(' in content
         assert 'def to_parquet(' in content
         assert 'pydantic_to_arrow_schema' in content
@@ -205,7 +206,7 @@ class TestGenerateExportModule:
         import ast as _ast
 
         result = generate_export_module(tmp_path)
-        _ast.parse(Path(result).read_text())
+        _ast.parse(Path(result).read_text(encoding='utf-8'))
 
 
 # -----------------------------------------------------------------------------
@@ -251,7 +252,9 @@ class TestCsvWriter:
         written = exported_runtime.to_csv(iter([]), path, model=User)
         assert written == 0
         # Header is still written
-        assert path.read_text().splitlines()[0].startswith('id,name,email')
+        assert (
+            path.read_text(encoding='utf-8').splitlines()[0].startswith('id,name,email')
+        )
 
     def test_accepts_dicts(self, exported_runtime, tmp_path):
         path = tmp_path / 'from_dicts.csv'
@@ -267,7 +270,7 @@ class TestTsvWriter:
     def test_uses_tab_delimiter(self, exported_runtime, tmp_path):
         path = tmp_path / 'users.tsv'
         exported_runtime.to_tsv(_sample_users(2), path, model=User)
-        line = path.read_text().splitlines()[0]
+        line = path.read_text(encoding='utf-8').splitlines()[0]
         assert '\t' in line and ',' not in line
 
 
@@ -278,7 +281,9 @@ class TestJsonlWriter:
         written = exported_runtime.to_jsonl(iter(rows), path, model=User)
         assert written == 3
 
-        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        lines = [
+            json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()
+        ]
         assert [r['name'] for r in lines] == ['user-0', 'user-1', 'user-2']
         # Datetime serialized as ISO-8601 string
         assert isinstance(lines[0]['created_at'], str)
@@ -286,7 +291,7 @@ class TestJsonlWriter:
     def test_empty_iterable(self, exported_runtime, tmp_path):
         path = tmp_path / 'empty.jsonl'
         assert exported_runtime.to_jsonl([], path, model=User) == 0
-        assert path.read_text() == ''
+        assert path.read_text(encoding='utf-8') == ''
 
 
 class TestParquetWriter:
@@ -372,7 +377,7 @@ class TestAsyncWriters:
 
         written = asyncio.run(run())
         assert written == 3
-        assert 'user-0' in path.read_text()
+        assert 'user-0' in path.read_text(encoding='utf-8')
 
     def test_jsonl_async(self, exported_runtime, tmp_path):
         path = tmp_path / 'async.jsonl'
@@ -384,7 +389,7 @@ class TestAsyncWriters:
 
         written = asyncio.run(run())
         assert written == 2
-        assert len(path.read_text().splitlines()) == 2
+        assert len(path.read_text(encoding='utf-8').splitlines()) == 2
 
     def test_parquet_async(self, exported_runtime, tmp_path):
         pytest.importorskip('pyarrow')
@@ -400,3 +405,239 @@ class TestAsyncWriters:
         written = asyncio.run(run())
         assert written == 4
         assert pq.read_table(path).num_rows == 4
+
+
+# -----------------------------------------------------------------------------
+# Per-endpoint AST builders
+# -----------------------------------------------------------------------------
+
+
+def _make_param(name: str, *, required: bool = False, location: str = 'query'):
+    """Build a minimal Parameter object for AST builder tests."""
+    from otterapi.codegen.types import Parameter, Type
+
+    int_type = Type(
+        reference=None,
+        name='int',
+        type='primitive',
+        annotation_ast=ast.Name(id='int', ctx=ast.Load()),
+        annotation_imports={},
+    )
+    return Parameter(
+        name=name,
+        name_sanitized=name,
+        location=location,
+        required=required,
+        type=int_type,
+    )
+
+
+def _kwarg_names(fn_ast):
+    return [a.arg for a in fn_ast.args.kwonlyargs]
+
+
+class TestBuildStandaloneExportFn:
+    def test_sync_returns_int_with_export_kwargs(self):
+        from otterapi.codegen.export import build_standalone_export_fn
+
+        fn_ast, imports = build_standalone_export_fn(
+            fn_name='list_pets_export',
+            target_fn_name='list_pets',
+            parameters=[_make_param('limit')],
+            request_body_info=None,
+            item_type_ast=ast.Name(id='Pet', ctx=ast.Load()),
+            item_type_imports={'.models': {'Pet'}},
+            docs='List pets.',
+            is_async=False,
+        )
+
+        assert isinstance(fn_ast, ast.FunctionDef)
+        assert fn_ast.name == 'list_pets_export'
+        assert isinstance(fn_ast.returns, ast.Name)
+        assert fn_ast.returns.id == 'int'
+
+        kwargs = _kwarg_names(fn_ast)
+        assert 'output_path' in kwargs
+        assert 'format' in kwargs
+        assert 'batch_size' in kwargs
+        # Mirrors the underlying optional parameter
+        assert 'limit' in kwargs
+        # Forwards a generic kwargs catcher for format-specific options
+        assert fn_ast.args.kwarg is not None
+        assert fn_ast.args.kwarg.arg == 'format_kwargs'
+
+        # Body delegates to the underlying function and pipes to ``export``
+        body_calls = [
+            stmt
+            for stmt in fn_ast.body
+            if isinstance(stmt, ast.Assign)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+        ]
+        assert any(call.value.func.id == 'list_pets' for call in body_calls)
+
+        return_stmt = fn_ast.body[-1]
+        assert isinstance(return_stmt, ast.Return)
+        assert isinstance(return_stmt.value, ast.Call)
+        assert isinstance(return_stmt.value.func, ast.Name)
+        assert return_stmt.value.func.id == 'export'
+
+        assert imports['._export'] == {'export'}
+        assert imports['pathlib'] == {'Path'}
+        assert 'Literal' in imports['typing']
+        assert imports['.models'] == {'Pet'}
+
+    def test_async_uses_await_and_sync_writer(self):
+        from otterapi.codegen.export import build_standalone_export_fn
+
+        fn_ast, imports = build_standalone_export_fn(
+            fn_name='list_pets_async_export',
+            target_fn_name='list_pets_async',
+            parameters=None,
+            request_body_info=None,
+            item_type_ast=ast.Name(id='Pet', ctx=ast.Load()),
+            item_type_imports={'.models': {'Pet'}},
+            docs=None,
+            is_async=True,
+        )
+
+        assert isinstance(fn_ast, ast.AsyncFunctionDef)
+        # Underlying call is awaited (the list materializes before writing).
+        assign = next(stmt for stmt in fn_ast.body if isinstance(stmt, ast.Assign))
+        assert isinstance(assign.value, ast.Await)
+        # Non-paginated → still uses the sync ``export`` writer.
+        return_stmt = fn_ast.body[-1]
+        assert isinstance(return_stmt, ast.Return)
+        assert not isinstance(return_stmt.value, ast.Await)
+        assert imports['._export'] == {'export'}
+
+    def test_default_format_propagates_to_signature(self):
+        from otterapi.codegen.export import build_standalone_export_fn
+
+        fn_ast, _ = build_standalone_export_fn(
+            fn_name='list_pets_export',
+            target_fn_name='list_pets',
+            parameters=None,
+            request_body_info=None,
+            item_type_ast=ast.Name(id='Pet', ctx=ast.Load()),
+            item_type_imports=None,
+            docs=None,
+            is_async=False,
+            default_format='parquet',
+            default_batch_size=500,
+        )
+        defaults = dict(zip(_kwarg_names(fn_ast), fn_ast.args.kw_defaults))
+        assert defaults['format'].value == 'parquet'
+        assert defaults['batch_size'].value == 500
+
+
+class TestBuildStandalonePaginatedExportFn:
+    def test_sync_targets_iter_and_adds_pagination_knobs(self):
+        from otterapi.codegen.export import build_standalone_paginated_export_fn
+
+        fn_ast, imports = build_standalone_paginated_export_fn(
+            fn_name='get_users_export',
+            target_iter_fn_name='get_users_iter',
+            parameters=[_make_param('search')],
+            request_body_info=None,
+            item_type_ast=ast.Name(id='User', ctx=ast.Load()),
+            item_type_imports={'.models': {'User'}},
+            docs=None,
+            is_async=False,
+        )
+
+        assert isinstance(fn_ast, ast.FunctionDef)
+        kwargs = _kwarg_names(fn_ast)
+        for expected in (
+            'output_path',
+            'format',
+            'batch_size',
+            'page_size',
+            'max_items',
+        ):
+            assert expected in kwargs
+
+        # Forwards page_size and max_items into the iter call.
+        rows_assign = next(
+            stmt
+            for stmt in fn_ast.body
+            if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call)
+        )
+        call = rows_assign.value
+        assert isinstance(call.func, ast.Name)
+        assert call.func.id == 'get_users_iter'
+        forwarded = {kw.arg for kw in call.keywords}
+        assert {'search', 'page_size', 'max_items', 'client'}.issubset(forwarded)
+
+        # Sync paginated → still uses the sync ``export`` writer.
+        assert imports['._export'] == {'export'}
+
+    def test_async_uses_export_async_and_awaits(self):
+        from otterapi.codegen.export import build_standalone_paginated_export_fn
+
+        fn_ast, imports = build_standalone_paginated_export_fn(
+            fn_name='get_users_async_export',
+            target_iter_fn_name='get_users_async_iter',
+            parameters=None,
+            request_body_info=None,
+            item_type_ast=ast.Name(id='User', ctx=ast.Load()),
+            item_type_imports={'.models': {'User'}},
+            docs=None,
+            is_async=True,
+        )
+
+        assert isinstance(fn_ast, ast.AsyncFunctionDef)
+        # The async-iter call returns an AsyncIterator → assigned, not awaited.
+        rows_assign = next(stmt for stmt in fn_ast.body if isinstance(stmt, ast.Assign))
+        assert not isinstance(rows_assign.value, ast.Await)
+        # Return statement awaits the async writer.
+        return_stmt = fn_ast.body[-1]
+        assert isinstance(return_stmt, ast.Return)
+        assert isinstance(return_stmt.value, ast.Await)
+        inner = return_stmt.value.value
+        assert isinstance(inner.func, ast.Name)
+        assert inner.func.id == 'export_async'
+        assert imports['._export'] == {'export_async'}
+
+
+class TestGeneratedFunctionsAreSyntacticallyValid:
+    """Round-trip the generated AST through ast.unparse + ast.parse."""
+
+    def _module(self, fn_ast):
+        return ast.Module(body=[fn_ast], type_ignores=[])
+
+    def test_standalone_export_unparses(self):
+        from otterapi.codegen.export import build_standalone_export_fn
+
+        fn_ast, _ = build_standalone_export_fn(
+            fn_name='list_pets_export',
+            target_fn_name='list_pets',
+            parameters=[_make_param('limit')],
+            request_body_info=None,
+            item_type_ast=ast.Name(id='Pet', ctx=ast.Load()),
+            item_type_imports=None,
+            docs=None,
+            is_async=False,
+        )
+        source = ast.unparse(ast.fix_missing_locations(self._module(fn_ast)))
+        ast.parse(source)
+        assert 'def list_pets_export' in source
+        assert 'export(' in source
+
+    def test_paginated_export_unparses(self):
+        from otterapi.codegen.export import build_standalone_paginated_export_fn
+
+        fn_ast, _ = build_standalone_paginated_export_fn(
+            fn_name='get_users_async_export',
+            target_iter_fn_name='get_users_async_iter',
+            parameters=None,
+            request_body_info=None,
+            item_type_ast=ast.Name(id='User', ctx=ast.Load()),
+            item_type_imports=None,
+            docs=None,
+            is_async=True,
+        )
+        source = ast.unparse(ast.fix_missing_locations(self._module(fn_ast)))
+        ast.parse(source)
+        assert 'async def get_users_async_export' in source
+        assert 'await export_async' in source

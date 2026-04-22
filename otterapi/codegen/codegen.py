@@ -806,6 +806,10 @@ class Codegen(OpenAPIProcessor):
             build_standalone_paginated_fn,
             build_standalone_paginated_iter_fn,
         )
+        from otterapi.codegen.export import (
+            build_standalone_export_fn,
+            build_standalone_paginated_export_fn,
+        )
 
         body: list[ast.stmt] = []
         import_collector = ImportCollector()
@@ -1044,6 +1048,54 @@ class Codegen(OpenAPIProcessor):
                         endpoint_names.add(async_polars_fn_name)
                         body.append(async_polars_fn)
                         import_collector.add_imports(async_polars_imports)
+
+                # Generate paginated export methods if export is enabled
+                if self.config.export.enabled and item_type_ast is not None:
+                    export_resolved = self.config.export.should_generate_for_endpoint(
+                        endpoint_name=endpoint.sync_fn_name,
+                        returns_list=True,
+                    )
+                    if export_resolved[0]:
+                        default_format = (
+                            export_resolved[1][0] if export_resolved[1] else 'csv'
+                        )
+                        sync_export_name = f'{endpoint.sync_fn_name}_export'
+                        sync_export_fn, sync_export_imports = (
+                            build_standalone_paginated_export_fn(
+                                fn_name=sync_export_name,
+                                target_iter_fn_name=(f'{endpoint.sync_fn_name}_iter'),
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
+                                docs=endpoint.description,
+                                is_async=False,
+                                default_format=default_format,
+                                default_batch_size=self.config.export.batch_size,
+                            )
+                        )
+                        endpoint_names.add(sync_export_name)
+                        body.append(sync_export_fn)
+                        import_collector.add_imports(sync_export_imports)
+
+                        async_export_name = f'{endpoint.async_fn_name}_export'
+                        async_export_fn, async_export_imports = (
+                            build_standalone_paginated_export_fn(
+                                fn_name=async_export_name,
+                                target_iter_fn_name=(f'{endpoint.async_fn_name}_iter'),
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
+                                docs=endpoint.description,
+                                is_async=True,
+                                default_format=default_format,
+                                default_batch_size=self.config.export.batch_size,
+                            )
+                        )
+                        endpoint_names.add(async_export_name)
+                        body.append(async_export_fn)
+                        import_collector.add_imports(async_export_imports)
             else:
                 # Check if response unwrapping is configured for this endpoint
                 should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
@@ -1185,6 +1237,57 @@ class Codegen(OpenAPIProcessor):
                     endpoint_names.add(async_polars_fn_name)
                     body.append(async_polars_fn)
                     import_collector.add_imports(async_polars_imports)
+
+            # Generate non-paginated export methods if export is enabled and
+            # the endpoint returns a list of a known Pydantic item type.
+            if self.config.export.enabled and not pag_config:
+                item_type_ast, item_type_imports = self._get_item_type_ast(endpoint)
+                if item_type_ast is not None:
+                    export_resolved = self.config.export.should_generate_for_endpoint(
+                        endpoint_name=endpoint.sync_fn_name,
+                        returns_list=True,
+                    )
+                    if export_resolved[0]:
+                        default_format = (
+                            export_resolved[1][0] if export_resolved[1] else 'csv'
+                        )
+                        sync_export_name = f'{endpoint.sync_fn_name}_export'
+                        sync_export_fn, sync_export_imports = (
+                            build_standalone_export_fn(
+                                fn_name=sync_export_name,
+                                target_fn_name=endpoint.sync_fn_name,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
+                                docs=endpoint.description,
+                                is_async=False,
+                                default_format=default_format,
+                                default_batch_size=self.config.export.batch_size,
+                            )
+                        )
+                        endpoint_names.add(sync_export_name)
+                        body.append(sync_export_fn)
+                        import_collector.add_imports(sync_export_imports)
+
+                        async_export_name = f'{endpoint.async_fn_name}_export'
+                        async_export_fn, async_export_imports = (
+                            build_standalone_export_fn(
+                                fn_name=async_export_name,
+                                target_fn_name=endpoint.async_fn_name,
+                                parameters=endpoint.parameters,
+                                request_body_info=endpoint.request_body,
+                                item_type_ast=item_type_ast,
+                                item_type_imports=item_type_imports,
+                                docs=endpoint.description,
+                                is_async=True,
+                                default_format=default_format,
+                                default_batch_size=self.config.export.batch_size,
+                            )
+                        )
+                        endpoint_names.add(async_export_name)
+                        body.append(async_export_fn)
+                        import_collector.add_imports(async_export_imports)
 
         # Add TYPE_CHECKING block for DataFrame type hints if needed
         type_checking_block = None
