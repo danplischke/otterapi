@@ -121,6 +121,21 @@ class Codegen(OpenAPIProcessor):
         self.typegen: TypeGenerator | None = None
         self._schema_loader = schema_loader or SchemaLoader()
 
+    @property
+    def _adapter(self):
+        """Facade over ``self.openapi`` for issue #3, item 10.
+
+        Constructed lazily on first use so subclasses / tests that swap in
+        a different ``openapi`` after construction still work.
+        """
+        from otterapi.codegen._openapi_adapter import OpenAPIAdapter
+
+        if self.openapi is None:
+            raise RuntimeError(
+                'Codegen.openapi is not loaded yet; call _load_schema() first.'
+            )
+        return OpenAPIAdapter(self.openapi)
+
     def _load_schema(self) -> None:
         """Load and parse the OpenAPI schema from the configured source.
 
@@ -374,17 +389,15 @@ class Codegen(OpenAPIProcessor):
                 return None
 
             param_name = param_or_ref.ref.split('/')[-1]
-            if (
-                not self.openapi.components
-                or not self.openapi.components.parameters
-                or param_name not in self.openapi.components.parameters
-            ):
+            # Migrated to OpenAPIAdapter (issue #3, item 10) -- the adapter
+            # encapsulates "components/parameters/<name>" lookup so this
+            # call site stays agnostic of the v3.2 attribute path.
+            resolved = self._adapter.components_parameter(param_name)
+            if resolved is None:
                 logging.warning(
                     f"Referenced parameter '{param_name}' not found in components.parameters"
                 )
                 return None
-
-            resolved = self.openapi.components.parameters[param_name]
             # Handle nested references
             if isinstance(resolved, Reference):
                 return self._resolve_parameter_reference(resolved)
