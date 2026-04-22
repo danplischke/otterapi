@@ -33,10 +33,8 @@ from otterapi.codegen.dataframes import (
     get_dataframe_config_for_endpoint,
 )
 from otterapi.codegen.endpoints import async_request_fn, request_fn
-from otterapi.codegen.export import generate_export_module
 from otterapi.codegen.pagination import (
     PaginationMethodConfig,
-    generate_pagination_module,
     get_pagination_config_for_endpoint,
 )
 from otterapi.codegen.schema import SchemaLoader
@@ -801,15 +799,9 @@ class Codegen(OpenAPIProcessor):
         """
         from otterapi.codegen.endpoints import (
             build_default_client_code,
-            build_standalone_dataframe_fn,
             build_standalone_endpoint_fn,
-            build_standalone_paginated_dataframe_fn,
             build_standalone_paginated_fn,
             build_standalone_paginated_iter_fn,
-        )
-        from otterapi.codegen.export import (
-            build_standalone_export_fn,
-            build_standalone_paginated_export_fn,
         )
 
         body: list[ast.stmt] = []
@@ -939,164 +931,28 @@ class Codegen(OpenAPIProcessor):
                 import_collector.add_imports(async_iter_imports)
 
                 # Generate paginated DataFrame methods if dataframe is enabled
-                # For paginated endpoints, we know they return lists, so check config directly
-                if self.config.dataframe.enabled:
-                    # Check if endpoint is explicitly disabled
-                    endpoint_df_config = self.config.dataframe.endpoints.get(
-                        endpoint.sync_fn_name
-                    )
-                    if endpoint_df_config and endpoint_df_config.enabled is False:
-                        pass  # Skip DataFrame generation for this endpoint
-                    elif self.config.dataframe.pandas:
-                        generated_paginated_df = True
-                        has_dataframe_methods = True
-                        has_pagination_methods = True
-                        # Sync pandas paginated method
-                        pandas_fn_name = f'{endpoint.sync_fn_name}_df'
-                        pandas_fn, pandas_imports = (
-                            build_standalone_paginated_dataframe_fn(
-                                fn_name=pandas_fn_name,
-                                method=endpoint.method,
-                                path=endpoint.path,
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                response_type=endpoint.response_type,
-                                pagination_style=pag_config.style,
-                                pagination_config=pag_dict,
-                                library='pandas',
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=False,
-                            )
-                        )
-                        endpoint_names.add(pandas_fn_name)
-                        body.append(pandas_fn)
-                        import_collector.add_imports(pandas_imports)
-
-                        # Async pandas paginated method
-                        async_pandas_fn_name = f'{endpoint.async_fn_name}_df'
-                        async_pandas_fn, async_pandas_imports = (
-                            build_standalone_paginated_dataframe_fn(
-                                fn_name=async_pandas_fn_name,
-                                method=endpoint.method,
-                                path=endpoint.path,
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                response_type=endpoint.response_type,
-                                pagination_style=pag_config.style,
-                                pagination_config=pag_dict,
-                                library='pandas',
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=True,
-                            )
-                        )
-                        endpoint_names.add(async_pandas_fn_name)
-                        body.append(async_pandas_fn)
-                        import_collector.add_imports(async_pandas_imports)
-
-                    # Check for polars - use elif to skip if endpoint is disabled
-                    if endpoint_df_config and endpoint_df_config.enabled is False:
-                        pass  # Skip polars DataFrame generation for this endpoint
-                    elif self.config.dataframe.polars:
-                        generated_paginated_df = True
-                        has_dataframe_methods = True
-                        has_pagination_methods = True
-                        # Sync polars paginated method
-                        polars_fn_name = f'{endpoint.sync_fn_name}_pl'
-                        polars_fn, polars_imports = (
-                            build_standalone_paginated_dataframe_fn(
-                                fn_name=polars_fn_name,
-                                method=endpoint.method,
-                                path=endpoint.path,
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                response_type=endpoint.response_type,
-                                pagination_style=pag_config.style,
-                                pagination_config=pag_dict,
-                                library='polars',
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=False,
-                            )
-                        )
-                        endpoint_names.add(polars_fn_name)
-                        body.append(polars_fn)
-                        import_collector.add_imports(polars_imports)
-
-                        # Async polars paginated method
-                        async_polars_fn_name = f'{endpoint.async_fn_name}_pl'
-                        async_polars_fn, async_polars_imports = (
-                            build_standalone_paginated_dataframe_fn(
-                                fn_name=async_polars_fn_name,
-                                method=endpoint.method,
-                                path=endpoint.path,
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                response_type=endpoint.response_type,
-                                pagination_style=pag_config.style,
-                                pagination_config=pag_dict,
-                                library='polars',
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=True,
-                            )
-                        )
-                        endpoint_names.add(async_polars_fn_name)
-                        body.append(async_polars_fn)
-                        import_collector.add_imports(async_polars_imports)
+                if self._emit_paginated_dataframe_pair(
+                    body,
+                    import_collector,
+                    endpoint_names,
+                    endpoint,
+                    pag_config,
+                    pag_dict,
+                    item_type_ast,
+                    item_type_imports,
+                ):
+                    generated_paginated_df = True
+                    has_dataframe_methods = True
 
                 # Generate paginated export methods if export is enabled
-                if self.config.export.enabled and item_type_ast is not None:
-                    export_resolved = self.config.export.should_generate_for_endpoint(
-                        endpoint_name=endpoint.sync_fn_name,
-                        returns_list=True,
-                    )
-                    if export_resolved[0]:
-                        default_format = (
-                            export_resolved[1][0] if export_resolved[1] else 'csv'
-                        )
-                        sync_export_name = f'{endpoint.sync_fn_name}_export'
-                        sync_export_fn, sync_export_imports = (
-                            build_standalone_paginated_export_fn(
-                                fn_name=sync_export_name,
-                                target_iter_fn_name=(f'{endpoint.sync_fn_name}_iter'),
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=False,
-                                default_format=default_format,
-                                default_batch_size=self.config.export.batch_size,
-                            )
-                        )
-                        endpoint_names.add(sync_export_name)
-                        body.append(sync_export_fn)
-                        import_collector.add_imports(sync_export_imports)
-
-                        async_export_name = f'{endpoint.async_fn_name}_export'
-                        async_export_fn, async_export_imports = (
-                            build_standalone_paginated_export_fn(
-                                fn_name=async_export_name,
-                                target_iter_fn_name=(f'{endpoint.async_fn_name}_iter'),
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=True,
-                                default_format=default_format,
-                                default_batch_size=self.config.export.batch_size,
-                            )
-                        )
-                        endpoint_names.add(async_export_name)
-                        body.append(async_export_fn)
-                        import_collector.add_imports(async_export_imports)
+                self._emit_paginated_export_pair(
+                    body,
+                    import_collector,
+                    endpoint_names,
+                    endpoint,
+                    item_type_ast,
+                    item_type_imports,
+                )
             else:
                 # Check if response unwrapping is configured for this endpoint
                 should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
@@ -1158,137 +1014,19 @@ class Codegen(OpenAPIProcessor):
                 # Skip to next endpoint since pagination methods already generated
                 pass
 
-            # Generate DataFrame methods if configured
-            # Skip if paginated DataFrame methods were already generated for this endpoint
-            if self.config.dataframe.enabled and not generated_paginated_df:
-                df_config = self._get_dataframe_config(endpoint)
+            # Non-paginated DataFrame methods (skipped if a paginated DF pair
+            # already covered this endpoint above).
+            if not generated_paginated_df and self._emit_standalone_dataframe_pair(
+                body, import_collector, endpoint_names, endpoint
+            ):
+                has_dataframe_methods = True
 
-                if df_config.generate_pandas:
-                    has_dataframe_methods = True
-                    # Sync pandas method
-                    pandas_fn_name = f'{endpoint.sync_fn_name}_df'
-                    pandas_fn, pandas_imports = build_standalone_dataframe_fn(
-                        fn_name=pandas_fn_name,
-                        method=endpoint.method,
-                        path=endpoint.path,
-                        parameters=endpoint.parameters,
-                        request_body_info=endpoint.request_body,
-                        library='pandas',
-                        default_path=df_config.path,
-                        docs=endpoint.description,
-                        is_async=False,
-                    )
-                    endpoint_names.add(pandas_fn_name)
-                    body.append(pandas_fn)
-                    import_collector.add_imports(pandas_imports)
-
-                    # Async pandas method
-                    async_pandas_fn_name = f'{endpoint.async_fn_name}_df'
-                    async_pandas_fn, async_pandas_imports = (
-                        build_standalone_dataframe_fn(
-                            fn_name=async_pandas_fn_name,
-                            method=endpoint.method,
-                            path=endpoint.path,
-                            parameters=endpoint.parameters,
-                            request_body_info=endpoint.request_body,
-                            library='pandas',
-                            default_path=df_config.path,
-                            docs=endpoint.description,
-                            is_async=True,
-                        )
-                    )
-                    endpoint_names.add(async_pandas_fn_name)
-                    body.append(async_pandas_fn)
-                    import_collector.add_imports(async_pandas_imports)
-
-                if df_config.generate_polars:
-                    has_dataframe_methods = True
-                    # Sync polars method
-                    polars_fn_name = f'{endpoint.sync_fn_name}_pl'
-                    polars_fn, polars_imports = build_standalone_dataframe_fn(
-                        fn_name=polars_fn_name,
-                        method=endpoint.method,
-                        path=endpoint.path,
-                        parameters=endpoint.parameters,
-                        request_body_info=endpoint.request_body,
-                        library='polars',
-                        default_path=df_config.path,
-                        docs=endpoint.description,
-                        is_async=False,
-                    )
-                    endpoint_names.add(polars_fn_name)
-                    body.append(polars_fn)
-                    import_collector.add_imports(polars_imports)
-
-                    # Async polars method
-                    async_polars_fn_name = f'{endpoint.async_fn_name}_pl'
-                    async_polars_fn, async_polars_imports = (
-                        build_standalone_dataframe_fn(
-                            fn_name=async_polars_fn_name,
-                            method=endpoint.method,
-                            path=endpoint.path,
-                            parameters=endpoint.parameters,
-                            request_body_info=endpoint.request_body,
-                            library='polars',
-                            default_path=df_config.path,
-                            docs=endpoint.description,
-                            is_async=True,
-                        )
-                    )
-                    endpoint_names.add(async_polars_fn_name)
-                    body.append(async_polars_fn)
-                    import_collector.add_imports(async_polars_imports)
-
-            # Generate non-paginated export methods if export is enabled and
-            # the endpoint returns a list of a known Pydantic item type.
-            if self.config.export.enabled and not pag_config:
-                item_type_ast, item_type_imports = self._get_item_type_ast(endpoint)
-                if item_type_ast is not None:
-                    export_resolved = self.config.export.should_generate_for_endpoint(
-                        endpoint_name=endpoint.sync_fn_name,
-                        returns_list=True,
-                    )
-                    if export_resolved[0]:
-                        default_format = (
-                            export_resolved[1][0] if export_resolved[1] else 'csv'
-                        )
-                        sync_export_name = f'{endpoint.sync_fn_name}_export'
-                        sync_export_fn, sync_export_imports = (
-                            build_standalone_export_fn(
-                                fn_name=sync_export_name,
-                                target_fn_name=endpoint.sync_fn_name,
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=False,
-                                default_format=default_format,
-                                default_batch_size=self.config.export.batch_size,
-                            )
-                        )
-                        endpoint_names.add(sync_export_name)
-                        body.append(sync_export_fn)
-                        import_collector.add_imports(sync_export_imports)
-
-                        async_export_name = f'{endpoint.async_fn_name}_export'
-                        async_export_fn, async_export_imports = (
-                            build_standalone_export_fn(
-                                fn_name=async_export_name,
-                                target_fn_name=endpoint.async_fn_name,
-                                parameters=endpoint.parameters,
-                                request_body_info=endpoint.request_body,
-                                item_type_ast=item_type_ast,
-                                item_type_imports=item_type_imports,
-                                docs=endpoint.description,
-                                is_async=True,
-                                default_format=default_format,
-                                default_batch_size=self.config.export.batch_size,
-                            )
-                        )
-                        endpoint_names.add(async_export_name)
-                        body.append(async_export_fn)
-                        import_collector.add_imports(async_export_imports)
+            # Non-paginated export methods (paginated case is handled in the
+            # ``if pag_config`` branch above).
+            if not pag_config:
+                self._emit_standalone_export_pair(
+                    body, import_collector, endpoint_names, endpoint
+                )
 
         # Add TYPE_CHECKING block for DataFrame type hints if needed
         type_checking_block = None
@@ -1332,6 +1070,212 @@ class Codegen(OpenAPIProcessor):
             )
 
         return body, import_collector, endpoint_names, type_checking_block
+
+    # ------------------------------------------------------------------
+    # Per-feature emitters extracted from ``_build_endpoint_file_body``
+    # ------------------------------------------------------------------
+
+    def _emit_paginated_dataframe_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+        pag_config,
+        pag_dict: dict,
+        item_type_ast,
+        item_type_imports,
+    ) -> bool:
+        """Emit sync+async paginated DataFrame methods (pandas / polars).
+
+        Returns True if any method was emitted (used by the orchestrator to
+        flag ``has_dataframe_methods`` and skip the non-paginated DF block).
+        """
+        if not self.config.dataframe.enabled:
+            return False
+
+        endpoint_df_config = self.config.dataframe.endpoints.get(endpoint.sync_fn_name)
+        if endpoint_df_config and endpoint_df_config.enabled is False:
+            return False
+
+        from otterapi.codegen.endpoints import (
+            build_standalone_paginated_dataframe_fn,
+        )
+
+        emitted = False
+        libraries: list[str] = []
+        if self.config.dataframe.pandas:
+            libraries.append('pandas')
+        if self.config.dataframe.polars:
+            libraries.append('polars')
+
+        for library in libraries:
+            suffix = '_df' if library == 'pandas' else '_pl'
+            for is_async, base_name in (
+                (False, endpoint.sync_fn_name),
+                (True, endpoint.async_fn_name),
+            ):
+                fn_name = f'{base_name}{suffix}'
+                fn, imports = build_standalone_paginated_dataframe_fn(
+                    fn_name=fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    library=library,
+                    item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
+                    docs=endpoint.description,
+                    is_async=is_async,
+                )
+                endpoint_names.add(fn_name)
+                body.append(fn)
+                import_collector.add_imports(imports)
+                emitted = True
+
+        return emitted
+
+    def _emit_paginated_export_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+        item_type_ast,
+        item_type_imports,
+    ) -> bool:
+        """Emit sync+async export wrappers around the paginated ``_iter`` fns."""
+        if not self.config.export.enabled or item_type_ast is None:
+            return False
+        should_generate, formats, _path = (
+            self.config.export.should_generate_for_endpoint(
+                endpoint_name=endpoint.sync_fn_name,
+                returns_list=True,
+            )
+        )
+        if not should_generate:
+            return False
+
+        from otterapi.codegen.export import build_standalone_paginated_export_fn
+
+        default_format = formats[0] if formats else 'csv'
+        for is_async, base_name in (
+            (False, endpoint.sync_fn_name),
+            (True, endpoint.async_fn_name),
+        ):
+            fn_name = f'{base_name}_export'
+            fn, imports = build_standalone_paginated_export_fn(
+                fn_name=fn_name,
+                target_iter_fn_name=f'{base_name}_iter',
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+                default_format=default_format,
+                default_batch_size=self.config.export.batch_size,
+            )
+            endpoint_names.add(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+        return True
+
+    def _emit_standalone_dataframe_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+    ) -> bool:
+        """Emit sync+async DataFrame wrappers for a non-paginated endpoint."""
+        if not self.config.dataframe.enabled:
+            return False
+
+        df_config = self._get_dataframe_config(endpoint)
+        if not (df_config.generate_pandas or df_config.generate_polars):
+            return False
+
+        from otterapi.codegen.endpoints import build_standalone_dataframe_fn
+
+        emitted = False
+        for library, generate, suffix in (
+            ('pandas', df_config.generate_pandas, '_df'),
+            ('polars', df_config.generate_polars, '_pl'),
+        ):
+            if not generate:
+                continue
+            for is_async, base_name in (
+                (False, endpoint.sync_fn_name),
+                (True, endpoint.async_fn_name),
+            ):
+                fn_name = f'{base_name}{suffix}'
+                fn, imports = build_standalone_dataframe_fn(
+                    fn_name=fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    library=library,
+                    default_path=df_config.path,
+                    docs=endpoint.description,
+                    is_async=is_async,
+                )
+                endpoint_names.add(fn_name)
+                body.append(fn)
+                import_collector.add_imports(imports)
+                emitted = True
+        return emitted
+
+    def _emit_standalone_export_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+    ) -> bool:
+        """Emit sync+async export wrappers for a non-paginated list endpoint."""
+        if not self.config.export.enabled:
+            return False
+        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint)
+        if item_type_ast is None:
+            return False
+        should_generate, formats, _path = (
+            self.config.export.should_generate_for_endpoint(
+                endpoint_name=endpoint.sync_fn_name,
+                returns_list=True,
+            )
+        )
+        if not should_generate:
+            return False
+
+        from otterapi.codegen.export import build_standalone_export_fn
+
+        default_format = formats[0] if formats else 'csv'
+        for is_async, base_name in (
+            (False, endpoint.sync_fn_name),
+            (True, endpoint.async_fn_name),
+        ):
+            fn_name = f'{base_name}_export'
+            fn, imports = build_standalone_export_fn(
+                fn_name=fn_name,
+                target_fn_name=base_name,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+                default_format=default_format,
+                default_batch_size=self.config.export.batch_size,
+            )
+            endpoint_names.add(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+        return True
 
     def _generate_endpoint_file(
         self, path: UPath, models_file: UPath, endpoints: list[Endpoint]
@@ -1439,15 +1383,20 @@ class Codegen(OpenAPIProcessor):
 
         base_url = self._resolve_base_url()
 
-        # Generate pagination module if enabled
-        if self.config.pagination.enabled:
-            generate_pagination_module(directory)
-            generated_files.append(f'{output_name}/_pagination.py')
+        # Emit each enabled runtime-helper module (_pagination.py /
+        # _export.py / _dataframe.py if the latter has paginated DF methods).
+        # Pagination + Export use the unified FeatureModule pipeline; the
+        # DataFrame module's emission stays gated by the per-endpoint pass
+        # below (only written when at least one endpoint actually uses it).
+        from otterapi.codegen._features import (
+            ExportFeature,
+            PaginationFeature,
+        )
 
-        # Generate export module if enabled
-        if self.config.export.enabled:
-            generate_export_module(directory)
-            generated_files.append(f'{output_name}/_export.py')
+        for feature in (PaginationFeature(), ExportFeature()):
+            if feature.is_enabled(self.config):
+                feature.write(directory)
+                generated_files.append(f'{output_name}/{feature.module_filename}')
 
         # Generate client class
         client_name = self._get_client_class_name()
