@@ -1158,75 +1158,57 @@ class EndpointFunctionFactory:
         return body
 
     def _build_dataframe_body(self) -> list[ast.stmt]:
-        """Build the body for a DataFrame endpoint function."""
-        body: list[ast.stmt] = []
+        """Build the body for a DataFrame endpoint function.
+
+        Composed via :class:`BodyStatementBuilder` so the two modes
+        (standalone vs delegating) read top-to-bottom instead of weaving
+        AST construction in line with control flow.
+        """
+        from otterapi.codegen._body_builder import BodyStatementBuilder
 
         library = self.config.dataframe_library
         return_type_str = (
             'pd.DataFrame' if library == DataFrameLibrary.PANDAS else 'pl.DataFrame'
         )
+        helper_fn = 'to_pandas' if library == DataFrameLibrary.PANDAS else 'to_polars'
+        docstring = (self.config.docs or '') + f'\n\nReturns:\n    {return_type_str}'
 
-        doc_content = self.config.docs or ''
-        doc_suffix = f'\n\nReturns:\n    {return_type_str}'
-        body.append(
-            ast.Expr(
-                value=ast.Constant(value=clean_docstring(doc_content + doc_suffix))
-            )
-        )
+        builder = BodyStatementBuilder().add_docstring(docstring)
 
-        if self.config.mode == EndpointMode.STANDALONE:
-            body.append(
-                _assign(
-                    _name('c'),
-                    ast.BoolOp(
-                        op=ast.Or(),
-                        values=[_name('client'), _call(_name('Client'))],
-                    ),
-                )
-            )
-
-            request_keywords = self._build_request_keywords()
-
-            request_json_method = (
-                '_request_json_async' if self.config.is_async else '_request_json'
-            )
-            request_call = _call(
-                func=_attr('c', request_json_method),
-                keywords=request_keywords,
-            )
-
-            if self.config.is_async:
-                request_call = ast.Await(value=request_call)
-
-            body.append(_assign(_name('data'), request_call))
-        else:
+        if self.config.mode != EndpointMode.STANDALONE:
+            # Delegating mode: defer to the corresponding method on a fresh
+            # ``Client()`` instance.
             call_args, call_keywords = self._build_delegating_call_args()
             method_name = self.config.client_method_name or self.config.fn_name
-            client_call = _call(
+            client_call: ast.expr = _call(
                 func=_attr(_call(_name('Client')), method_name),
                 args=call_args,
                 keywords=call_keywords,
             )
-
             if self.config.is_async:
                 client_call = ast.Await(value=client_call)
+            return builder.add_return(client_call).build()
 
-            body.append(ast.Return(value=client_call))
-            return body
-
-        helper_fn = 'to_pandas' if library == DataFrameLibrary.PANDAS else 'to_polars'
-
-        body.append(
-            ast.Return(
-                value=_call(
-                    func=_name(helper_fn),
-                    args=[_name('data')],
-                    keywords=[ast.keyword(arg='path', value=_name('path'))],
-                )
-            )
+        request_method = (
+            '_request_json_async' if self.config.is_async else '_request_json'
         )
 
-        return body
+        return (
+            builder.add_client_init()
+            .add_method_call_assignment(
+                target_var='data',
+                receiver='c',
+                method=request_method,
+                keywords=self._build_request_keywords(),
+                is_async=self.config.is_async,
+            )
+            .add_return_call(
+                helper_fn,
+                args=[_name('data')],
+                keywords=[ast.keyword(arg='path', value=_name('path'))],
+            )
+            .build()
+        )
 
     def _build_paginated_body(self) -> list[ast.stmt]:
         """Build the body for a paginated endpoint function."""
