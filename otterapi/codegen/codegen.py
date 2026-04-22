@@ -33,6 +33,7 @@ from otterapi.codegen.dataframes import (
     get_dataframe_config_for_endpoint,
 )
 from otterapi.codegen.endpoints import async_request_fn, request_fn
+from otterapi.codegen.export import generate_export_module
 from otterapi.codegen.pagination import (
     PaginationMethodConfig,
     generate_pagination_module,
@@ -1332,6 +1333,11 @@ class Codegen(OpenAPIProcessor):
         if self.config.pagination.enabled:
             generate_pagination_module(directory)
             generated_files.append(f'{output_name}/_pagination.py')
+
+        # Generate export module if enabled
+        if self.config.export.enabled:
+            generate_export_module(directory)
+            generated_files.append(f'{output_name}/_export.py')
 
         # Generate client class
         client_name = self._get_client_class_name()

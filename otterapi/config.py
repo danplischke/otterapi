@@ -559,6 +559,138 @@ class DataFrameConfig(BaseModel):
         return self.pandas, self.polars, self.default_path
 
 
+ExportFormat = Literal['csv', 'tsv', 'jsonl', 'parquet']
+
+
+class EndpointExportConfig(BaseModel):
+    """Per-endpoint file export configuration.
+
+    Allows overriding the default export settings for specific endpoints.
+
+    Attributes:
+        enabled: Override whether to generate export helpers for this endpoint.
+        path: JSON path to extract data from response.
+        formats: Override which formats the endpoint should support.
+    """
+
+    enabled: bool | None = Field(
+        default=None,
+        description='Override whether to generate export helpers for this endpoint.',
+    )
+
+    path: str | None = Field(
+        default=None,
+        description='JSON path to extract data from response.',
+    )
+
+    formats: list[ExportFormat] | None = Field(
+        default=None,
+        description='Override which formats this endpoint should support.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+
+class ExportConfig(BaseModel):
+    """Configuration for tabular file export helpers.
+
+    When enabled, a runtime ``_export.py`` utility module is generated in the
+    output directory with streaming writers (CSV, TSV, JSONL, Parquet) that
+    take an iterable of Pydantic models (or dicts) and write them to disk or
+    cloud storage via ``UPath``. Parquet support requires ``pyarrow`` which
+    is exposed via the ``otterapi[parquet]`` optional extra.
+
+    Attributes:
+        enabled: Enable export helper generation.
+        formats: Default list of formats the generated helpers should support.
+        default_path: Default JSON path for extracting list data from responses.
+        include_all: Generate export helpers for all list-returning endpoints.
+        batch_size: Default batch size used when streaming pages to disk.
+        endpoints: Per-endpoint configuration overrides.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description='Enable export helper generation.',
+    )
+
+    formats: list[ExportFormat] = Field(
+        default_factory=lambda: ['csv', 'jsonl'],
+        description='Default formats supported by generated helpers.',
+    )
+
+    default_path: str | None = Field(
+        default=None,
+        description='Default JSON path for extracting list data from responses.',
+    )
+
+    include_all: bool = Field(
+        default=True,
+        description='Generate export helpers for all list-returning endpoints.',
+    )
+
+    batch_size: int = Field(
+        default=1000,
+        ge=1,
+        description='Default batch size used when streaming pages to disk.',
+    )
+
+    endpoints: dict[str, EndpointExportConfig] = Field(
+        default_factory=dict,
+        description='Per-endpoint configuration overrides.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    def should_generate_for_endpoint(
+        self,
+        endpoint_name: str,
+        returns_list: bool = True,
+    ) -> tuple[bool, list[ExportFormat], str | None]:
+        """Determine if export helpers should be generated for an endpoint.
+
+        Args:
+            endpoint_name: The name of the endpoint function.
+            returns_list: Whether the endpoint returns a list type.
+
+        Returns:
+            Tuple of (should_generate, formats, path). When should_generate is
+            False, formats is empty and path is None.
+        """
+        if not self.enabled:
+            return False, [], None
+
+        endpoint_config = self.endpoints.get(endpoint_name)
+
+        if endpoint_config is not None:
+            if endpoint_config.enabled is False:
+                return False, [], None
+
+            formats = (
+                endpoint_config.formats
+                if endpoint_config.formats is not None
+                else list(self.formats)
+            )
+            path = (
+                endpoint_config.path
+                if endpoint_config.path is not None
+                else self.default_path
+            )
+
+            if endpoint_config.enabled is True:
+                return True, formats, path
+
+            if self.include_all and returns_list:
+                return True, formats, path
+
+            return False, [], None
+
+        if not self.include_all or not returns_list:
+            return False, [], None
+
+        return True, list(self.formats), self.default_path
+
+
 class EndpointResponseUnwrapConfig(BaseModel):
     """Per-endpoint response unwrap configuration.
 
@@ -874,6 +1006,11 @@ class DocumentConfig(BaseModel):
     response_unwrap: ResponseUnwrapConfig = Field(
         default_factory=ResponseUnwrapConfig,
         description='Configuration for response unwrapping.',
+    )
+
+    export: ExportConfig = Field(
+        default_factory=ExportConfig,
+        description='Configuration for tabular file export helpers.',
     )
 
     @field_validator('source')
