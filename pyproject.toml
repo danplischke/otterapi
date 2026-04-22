@@ -76,7 +76,17 @@ only-include = ["otterapi", "/README.md"]
 include = ["otterapi", "/README.md"]
 
 [tool.ruff]
-exclude = [".venv", "venv", "build", "dist", "__pycache__", ".eggs"]
+exclude = [
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "__pycache__",
+    ".eggs",
+    # Golden-file fixtures must remain byte-identical to what the codegen
+    # actually emits; linting / formatting them silently breaks the diffs.
+    "otterapi/tests/fixtures/golden",
+]
 
 [tool.ruff.lint]
 extend-select = [

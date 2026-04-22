@@ -120,6 +120,7 @@ class Codegen(OpenAPIProcessor):
         super().__init__(None)
         self.config = config
         self.openapi: OpenAPIv3_2 | None = None
+        self.typegen: TypeGenerator | None = None
         self._schema_loader = schema_loader or SchemaLoader()
 
     def _load_schema(self) -> None:
@@ -1382,7 +1383,10 @@ class Codegen(OpenAPIProcessor):
         Args:
             path: Path where the models file should be written.
         """
-        assert self.typegen is not None
+        if self.typegen is None:
+            raise RuntimeError(
+                'TypeGenerator is not initialized; call _load_schema() first.'
+            )
 
         body: list[ast.stmt] = []
         import_collector = ImportCollector()
@@ -1410,7 +1414,10 @@ class Codegen(OpenAPIProcessor):
     def generate(self):
         self._load_schema()
 
-        assert self.openapi is not None
+        if self.openapi is None:
+            raise RuntimeError(
+                'OpenAPI document was not loaded; _load_schema() failed silently.'
+            )
 
         if not self.openapi.paths:
             raise ValueError('OpenAPI spec has no paths to generate endpoints from')
