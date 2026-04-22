@@ -1,11 +1,41 @@
 __all__ = (
+    'BadGatewayError',
+    'BadRequestError',
+    'BaseAPIError',
     'BaseConstraintsAPIClient',
     'Client',
+    'ClientError',
+    'ConflictError',
+    'ForbiddenError',
+    'GatewayTimeoutError',
+    'InternalServerError',
+    'NotFoundError',
+    'RateLimitError',
+    'ServerError',
+    'ServiceUnavailableError',
+    'UnauthorizedError',
+    'UnprocessableEntityError',
     'User',
     'async_list_users',
     'list_users',
 )
 from .endpoints import async_list_users, list_users
 from .client import Client
-from ._client import BaseConstraintsAPIClient
+from ._client import (
+    BaseConstraintsAPIClient,
+    BaseAPIError,
+    ClientError,
+    ServerError,
+    BadRequestError,
+    UnauthorizedError,
+    ForbiddenError,
+    NotFoundError,
+    ConflictError,
+    UnprocessableEntityError,
+    RateLimitError,
+    InternalServerError,
+    BadGatewayError,
+    ServiceUnavailableError,
+    GatewayTimeoutError,
+)
 from .models import User

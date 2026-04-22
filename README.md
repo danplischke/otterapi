@@ -566,6 +566,86 @@ otter validate
 
 ---
 
+## 🐍 Programmatic API
+
+For scripts and CI pipelines you can drive code generation from Python
+instead of the CLI:
+
+```python
+from otterapi.codegen import Codegen
+from otterapi.config import DocumentConfig
+
+config = DocumentConfig(
+    source='https://petstore3.swagger.io/api/v3/openapi.json',
+    output='./client',
+    base_url='https://petstore3.swagger.io/api/v3',
+    # Any of the optional sections from otter.yml work here too:
+    # pagination=PaginationConfig(enabled=True),
+    # export=ExportConfig(enabled=True, formats=['parquet']),
+)
+Codegen(config).generate()
+```
+
+`Codegen.generate()` writes the same files the CLI would and raises
+`pydantic.ValidationError` (wrapped as `ConfigValidationError` when
+loading from YAML/JSON/TOML) on bad config -- friendly multi-line
+messages include the source path and the offending field path.
+
+---
+
+## ❗ Error Handling
+
+Generated clients raise a typed exception hierarchy rooted at
+`BaseAPIError` -- you no longer need to inspect `.status_code` to
+discriminate by error class:
+
+```python
+from my_client import (
+    Client, list_users,
+    BaseAPIError,        # catches every API error
+    ClientError,         # all 4xx
+    ServerError,         # all 5xx
+    NotFoundError,       # specific: HTTP 404
+    RateLimitError,      # specific: HTTP 429
+)
+
+try:
+    users = list_users(client=Client())
+except NotFoundError as e:
+    log.warning("not found: %s", e.detail)
+except RateLimitError:
+    backoff_and_retry()
+except ServerError:
+    page_oncall()
+except BaseAPIError as e:
+    log.error("unexpected API error %d: %s", e.status_code, e.detail)
+```
+
+Mapped status codes get specific subclasses (400 / 401 / 403 / 404 /
+409 / 422 / 429 / 500 / 502 / 503 / 504); other 4xx / 5xx codes fall
+through to `ClientError` / `ServerError`. Subclass `BaseAPIError` in
+your generated `client.py` to customize how `from_response` parses
+detail payloads.
+
+---
+
+## ♻️ Regenerating after spec changes
+
+OtterAPI is **idempotent** for the regenerated files:
+
+* `models.py`, `endpoints.py`, `_client.py`, `_pagination.py`,
+  `_export.py`, `_dataframe.py` are rewritten on every `otter generate`
+  -- never edit them by hand.
+* `client.py` is generated **once** and then left alone. This is your
+  customization seam (auth, retries, logging, custom error parsing).
+
+If a spec change renames a model or endpoint, the corresponding symbol
+in your generated package's `__init__.py` will move with it. Pin a
+version of OtterAPI in your dev/test deps if you want a guaranteed
+stable surface across regen runs.
+
+---
+
 ## 🛠 Development
 
 ```bash

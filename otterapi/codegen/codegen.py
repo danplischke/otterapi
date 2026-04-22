@@ -1526,16 +1526,85 @@ class Codegen(OpenAPIProcessor):
         )
         all_names.append('Client')
 
-        # Import BaseClient from _client.py
+        # Import BaseClient + the full error hierarchy from _client.py so
+        # users can ``from my_pkg import NotFoundError`` etc. without
+        # reaching into the underscore-prefixed runtime module.
         base_client_name = f'Base{client_class_name}'
+        client_exports = [base_client_name, *_exported_error_names()]
         body.append(
             ast.ImportFrom(
                 module='_client',
-                names=[ast.alias(name=base_client_name, asname=None)],
+                names=[ast.alias(name=name, asname=None) for name in client_exports],
                 level=1,
             )
         )
-        all_names.append(base_client_name)
+        all_names.extend(client_exports)
+
+        # Re-export runtime helpers from any enabled feature modules so the
+        # package's public surface lives entirely in __init__.py (the
+        # underscore-prefixed files stay as the "regenerated, do not edit"
+        # source of truth -- users never need to import from them directly).
+        if self.config.pagination.enabled:
+            pagination_exports = [
+                'paginate_offset',
+                'paginate_offset_async',
+                'paginate_cursor',
+                'paginate_cursor_async',
+                'paginate_page',
+                'paginate_page_async',
+                'iterate_offset',
+                'iterate_offset_async',
+                'iterate_cursor',
+                'iterate_cursor_async',
+                'iterate_page',
+                'iterate_page_async',
+            ]
+            body.append(
+                ast.ImportFrom(
+                    module='_pagination',
+                    names=[ast.alias(name=n, asname=None) for n in pagination_exports],
+                    level=1,
+                )
+            )
+            all_names.extend(pagination_exports)
+
+        if self.config.export.enabled:
+            export_exports = [
+                'export',
+                'export_async',
+                'to_csv',
+                'to_csv_async',
+                'to_tsv',
+                'to_tsv_async',
+                'to_jsonl',
+                'to_jsonl_async',
+                'to_parquet',
+                'to_parquet_async',
+            ]
+            body.append(
+                ast.ImportFrom(
+                    module='_export',
+                    names=[ast.alias(name=n, asname=None) for n in export_exports],
+                    level=1,
+                )
+            )
+            all_names.extend(export_exports)
+
+        if self.config.dataframe.enabled:
+            df_exports = []
+            if self.config.dataframe.pandas:
+                df_exports.append('to_pandas')
+            if self.config.dataframe.polars:
+                df_exports.append('to_polars')
+            if df_exports:
+                body.append(
+                    ast.ImportFrom(
+                        module='_dataframe',
+                        names=[ast.alias(name=n, asname=None) for n in df_exports],
+                        level=1,
+                    )
+                )
+                all_names.extend(df_exports)
 
         # Also get all model names from typegen
         all_model_names = {

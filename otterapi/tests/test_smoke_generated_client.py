@@ -115,11 +115,10 @@ class TestSyncGeneratedClient:
     def test_api_error_raised_on_4xx(self, generated_client_module):
         Client = generated_client_module.Client
         list_users = generated_client_module.list_users
-        # The base class is what ``_client.py`` actually raises today; the
-        # subclass in ``client.py`` is a customization seam. Both live in the
-        # generated package; ``BaseAPIError`` is the most specific common
-        # ancestor we can rely on without per-status hierarchy (Wave 3.13).
-        BaseAPIError = generated_client_module._client.BaseAPIError
+        # Wave 3.14: error classes are re-exported from the package root --
+        # users no longer need to reach into the underscore-prefixed
+        # ``_client`` submodule.
+        BaseAPIError = generated_client_module.BaseAPIError
 
         def fail_handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(404, json={'detail': 'no users for you'})
@@ -153,12 +152,21 @@ class TestAsyncGeneratedClient:
 
 class TestGeneratedPackageStructure:
     def test_package_exposes_expected_symbols(self, generated_client_module):
-        # The __init__.py re-exports the client + endpoint helpers.
-        for name in ('Client', 'User', 'list_users', 'async_list_users'):
+        # The __init__.py re-exports the client + endpoint helpers + the
+        # full per-status error hierarchy (Wave 3.14).
+        for name in (
+            'Client',
+            'User',
+            'list_users',
+            'async_list_users',
+            'BaseAPIError',
+            'ClientError',
+            'ServerError',
+            'NotFoundError',
+            'RateLimitError',
+            'InternalServerError',
+        ):
             assert hasattr(generated_client_module, name), f'missing: {name}'
-        # APIError is reachable via the client submodule (a candidate for
-        # surfacing on the package root in Wave 3.15).
-        assert hasattr(generated_client_module.client, 'APIError')
 
     def test_models_carry_constraint_metadata(self, generated_client_module):
         User = generated_client_module.User
