@@ -372,6 +372,17 @@ def generate_api_error_class() -> ast.ClassDef:
             ],
             orelse=[],
         ),
+        # cls = _resolve_error_class(status_code, cls)  -- pick the most
+        # specific exception subclass registered for this status code,
+        # falling through to ClientError / ServerError tier and finally
+        # to ``cls`` itself when the status is unrecognised.
+        _assign(
+            _name('cls'),
+            _call(
+                _name('_resolve_error_class'),
+                args=[_name('status_code'), _name('cls')],
+            ),
+        ),
         # return cls(message, status_code=status_code, response=response, detail=detail, body=body)
         ast.Return(
             value=_call(
@@ -487,6 +498,155 @@ Attributes:
     )
 
     return class_def
+
+
+# Per-status-code exception hierarchy emitted alongside ``BaseAPIError`` so
+# users can ``except NotFoundError`` instead of always inspecting
+# ``e.status_code``. Two tier parents (``ClientError`` / ``ServerError``)
+# let users catch every 4xx or every 5xx in one ``except``.
+_API_ERROR_HIERARCHY_SOURCE = '''\
+class ClientError(BaseAPIError):
+    """Base class for 4xx HTTP errors."""
+
+    pass
+
+
+class ServerError(BaseAPIError):
+    """Base class for 5xx HTTP errors."""
+
+    pass
+
+
+class BadRequestError(ClientError):
+    """Raised on HTTP 400."""
+
+    pass
+
+
+class UnauthorizedError(ClientError):
+    """Raised on HTTP 401."""
+
+    pass
+
+
+class ForbiddenError(ClientError):
+    """Raised on HTTP 403."""
+
+    pass
+
+
+class NotFoundError(ClientError):
+    """Raised on HTTP 404."""
+
+    pass
+
+
+class ConflictError(ClientError):
+    """Raised on HTTP 409."""
+
+    pass
+
+
+class UnprocessableEntityError(ClientError):
+    """Raised on HTTP 422."""
+
+    pass
+
+
+class RateLimitError(ClientError):
+    """Raised on HTTP 429."""
+
+    pass
+
+
+class InternalServerError(ServerError):
+    """Raised on HTTP 500."""
+
+    pass
+
+
+class BadGatewayError(ServerError):
+    """Raised on HTTP 502."""
+
+    pass
+
+
+class ServiceUnavailableError(ServerError):
+    """Raised on HTTP 503."""
+
+    pass
+
+
+class GatewayTimeoutError(ServerError):
+    """Raised on HTTP 504."""
+
+    pass
+
+
+_STATUS_ERROR_MAP: dict[int, type[BaseAPIError]] = {
+    400: BadRequestError,
+    401: UnauthorizedError,
+    403: ForbiddenError,
+    404: NotFoundError,
+    409: ConflictError,
+    422: UnprocessableEntityError,
+    429: RateLimitError,
+    500: InternalServerError,
+    502: BadGatewayError,
+    503: ServiceUnavailableError,
+    504: GatewayTimeoutError,
+}
+
+
+def _resolve_error_class(status_code: int, default: type[BaseAPIError]) -> type[BaseAPIError]:
+    """Pick the most specific ``BaseAPIError`` subclass for a status code.
+
+    Falls through ``_STATUS_ERROR_MAP`` -> ``ClientError`` (4xx) ->
+    ``ServerError`` (5xx) -> ``default`` (typically ``BaseAPIError``).
+    """
+    explicit = _STATUS_ERROR_MAP.get(status_code)
+    if explicit is not None:
+        return explicit
+    if 400 <= status_code < 500:
+        return ClientError
+    if 500 <= status_code < 600:
+        return ServerError
+    return default
+'''
+
+
+def _exported_error_names() -> list[str]:
+    """Names of every emitted error class for ``__all__`` re-export."""
+    return [
+        'BaseAPIError',
+        'ClientError',
+        'ServerError',
+        'BadRequestError',
+        'UnauthorizedError',
+        'ForbiddenError',
+        'NotFoundError',
+        'ConflictError',
+        'UnprocessableEntityError',
+        'RateLimitError',
+        'InternalServerError',
+        'BadGatewayError',
+        'ServiceUnavailableError',
+        'GatewayTimeoutError',
+    ]
+
+
+def generate_api_error_hierarchy() -> list[ast.stmt]:
+    """Emit ``BaseAPIError`` plus the per-status-code subclass hierarchy.
+
+    Returns the full list of statements ready to splice into the generated
+    ``_client.py``: BaseAPIError ClassDef, tier parents, specific
+    subclasses, the status -> class registry, and the resolver helper used
+    by ``BaseAPIError.from_response``.
+    """
+    return [
+        generate_api_error_class(),
+        *ast.parse(_API_ERROR_HIERARCHY_SOURCE).body,
+    ]
 
 
 def generate_base_client_class(

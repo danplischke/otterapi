@@ -22,7 +22,8 @@ from otterapi.codegen.ast_utils import (
 )
 from otterapi.codegen.client import (
     EndpointInfo,
-    generate_api_error_class,
+    _exported_error_names,
+    generate_api_error_hierarchy,
     generate_base_client_class,
     generate_client_stub,
 )
@@ -1727,12 +1728,12 @@ class Codegen(OpenAPIProcessor):
         )
         body.append(typevar_def)
 
-        # Add __all__ export (include BaseAPIError)
-        body.append(_all([base_client_name, 'BaseAPIError']))
+        # Add __all__ export (include the full per-status error hierarchy
+        # so users can ``from .<pkg>._client import NotFoundError`` etc.).
+        body.append(_all([base_client_name, *_exported_error_names()]))
 
-        # Add BaseAPIError class
-        api_error_class = generate_api_error_class()
-        body.append(api_error_class)
+        # Add the BaseAPIError + per-status subclass hierarchy.
+        body.extend(generate_api_error_hierarchy())
 
         # Add APIError = BaseAPIError alias for internal use
         body.append(_assign(_name('APIError'), _name('BaseAPIError')))

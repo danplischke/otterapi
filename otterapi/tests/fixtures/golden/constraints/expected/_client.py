@@ -4,7 +4,23 @@ from typing import Any, TypeVar
 from types import UnionType
 
 T = TypeVar('T')
-__all__ = ('BaseConstraintsAPIClient', 'BaseAPIError')
+__all__ = (
+    'BaseConstraintsAPIClient',
+    'BaseAPIError',
+    'ClientError',
+    'ServerError',
+    'BadRequestError',
+    'UnauthorizedError',
+    'ForbiddenError',
+    'NotFoundError',
+    'ConflictError',
+    'UnprocessableEntityError',
+    'RateLimitError',
+    'InternalServerError',
+    'BadGatewayError',
+    'ServiceUnavailableError',
+    'GatewayTimeoutError',
+)
 
 
 class BaseAPIError(Exception):
@@ -70,6 +86,7 @@ class BaseAPIError(Exception):
                 message = f'HTTP {status_code} Error: {detail}'
             else:
                 message = f'HTTP {status_code} Error: {detail}'
+        cls = _resolve_error_class(status_code, cls)
         return cls(
             message,
             status_code=status_code,
@@ -83,6 +100,117 @@ class BaseAPIError(Exception):
 
     def __repr__(self) -> str:
         return f'BaseAPIError(status_code={self.status_code}, detail={self.detail!r})'
+
+
+class ClientError(BaseAPIError):
+    """Base class for 4xx HTTP errors."""
+
+    pass
+
+
+class ServerError(BaseAPIError):
+    """Base class for 5xx HTTP errors."""
+
+    pass
+
+
+class BadRequestError(ClientError):
+    """Raised on HTTP 400."""
+
+    pass
+
+
+class UnauthorizedError(ClientError):
+    """Raised on HTTP 401."""
+
+    pass
+
+
+class ForbiddenError(ClientError):
+    """Raised on HTTP 403."""
+
+    pass
+
+
+class NotFoundError(ClientError):
+    """Raised on HTTP 404."""
+
+    pass
+
+
+class ConflictError(ClientError):
+    """Raised on HTTP 409."""
+
+    pass
+
+
+class UnprocessableEntityError(ClientError):
+    """Raised on HTTP 422."""
+
+    pass
+
+
+class RateLimitError(ClientError):
+    """Raised on HTTP 429."""
+
+    pass
+
+
+class InternalServerError(ServerError):
+    """Raised on HTTP 500."""
+
+    pass
+
+
+class BadGatewayError(ServerError):
+    """Raised on HTTP 502."""
+
+    pass
+
+
+class ServiceUnavailableError(ServerError):
+    """Raised on HTTP 503."""
+
+    pass
+
+
+class GatewayTimeoutError(ServerError):
+    """Raised on HTTP 504."""
+
+    pass
+
+
+_STATUS_ERROR_MAP: dict[int, type[BaseAPIError]] = {
+    400: BadRequestError,
+    401: UnauthorizedError,
+    403: ForbiddenError,
+    404: NotFoundError,
+    409: ConflictError,
+    422: UnprocessableEntityError,
+    429: RateLimitError,
+    500: InternalServerError,
+    502: BadGatewayError,
+    503: ServiceUnavailableError,
+    504: GatewayTimeoutError,
+}
+
+
+def _resolve_error_class(
+    status_code: int, default: type[BaseAPIError]
+) -> type[BaseAPIError]:
+    """Pick the most specific ``BaseAPIError`` subclass for a status code.
+
+    Falls through ``_STATUS_ERROR_MAP`` -> ``ClientError`` (4xx) ->
+    ``ServerError`` (5xx) -> ``default`` (typically ``BaseAPIError``).
+    """
+    explicit = _STATUS_ERROR_MAP.get(status_code)
+    if explicit is not None:
+        return explicit
+    if 400 <= status_code < 500:
+        return ClientError
+    if 500 <= status_code < 600:
+        return ServerError
+    return default
 
 
 APIError = BaseAPIError

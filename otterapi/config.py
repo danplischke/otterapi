@@ -1201,6 +1201,60 @@ def load_config_file(path: str | Path) -> dict:
             return load_yaml(path)
 
 
+class ConfigValidationError(ValueError):
+    """Raised when an OtterAPI config file is syntactically loadable but
+    semantically invalid.
+
+    Wraps :class:`pydantic.ValidationError` with a friendlier multi-line
+    message that includes the source file path and, when known, the
+    field path so users do not have to dig through Pydantic's raw
+    ``ValidationError.errors()`` output to find the typo.
+    """
+
+    def __init__(self, message: str, *, source: str | Path | None, errors: list):
+        super().__init__(message)
+        self.source = source
+        self.errors = errors
+
+
+def _format_pydantic_error(
+    source: str | Path | None, exc: Exception
+) -> ConfigValidationError:
+    """Convert a ``pydantic.ValidationError`` into a friendlier message."""
+    from pydantic import ValidationError
+
+    if not isinstance(exc, ValidationError):
+        # Re-raise non-ValidationError exceptions unchanged.
+        raise exc
+
+    errors = exc.errors()
+    lines: list[str] = []
+    where = f' in {source}' if source else ''
+    lines.append(
+        f'Invalid OtterAPI configuration{where} '
+        f'({len(errors)} error{"s" if len(errors) != 1 else ""}):'
+    )
+    for err in errors:
+        loc = '.'.join(str(part) for part in err.get('loc', ())) or '<root>'
+        msg = err.get('msg', 'invalid')
+        err_type = err.get('type', '')
+        suffix = f' [type={err_type}]' if err_type else ''
+        lines.append(f'  - {loc}: {msg}{suffix}')
+    lines.append(
+        'Run `otterapi init` to scaffold a valid config or check '
+        'https://github.com/danplischke/otterapi for the schema.'
+    )
+    return ConfigValidationError('\n'.join(lines), source=source, errors=errors)
+
+
+def _validate_config(data: dict, source: str | Path | None = None) -> CodegenConfig:
+    """Validate ``data`` into ``CodegenConfig``, raising the friendly error type."""
+    try:
+        return CodegenConfig.model_validate(data)
+    except Exception as exc:
+        raise _format_pydantic_error(source, exc) from exc
+
+
 def get_config(path: str | None = None) -> CodegenConfig:
     """Load OtterAPI configuration from a file or environment.
 
@@ -1218,12 +1272,13 @@ def get_config(path: str | None = None) -> CodegenConfig:
 
     Raises:
         FileNotFoundError: If no configuration can be found.
-        pydantic.ValidationError: If the configuration is invalid.
+        ConfigValidationError: If the configuration is invalid (wraps
+            ``pydantic.ValidationError`` with a friendly multi-line message).
     """
     # If path is specified, use it directly
     if path:
         data = load_config_file(path)
-        return CodegenConfig.model_validate(data)
+        return _validate_config(data, source=path)
 
     cwd = Path.cwd()
 
@@ -1232,14 +1287,14 @@ def get_config(path: str | None = None) -> CodegenConfig:
         config_path = cwd / filename
         if config_path.exists():
             data = load_config_file(config_path)
-            return CodegenConfig.model_validate(data)
+            return _validate_config(data, source=config_path)
 
     # Try pyproject.toml
     pyproject_path = cwd / 'pyproject.toml'
     if pyproject_path.exists():
         try:
             data = load_toml(pyproject_path)
-            return CodegenConfig.model_validate(data)
+            return _validate_config(data, source=pyproject_path)
         except KeyError:
             pass  # No otterapi section, continue looking
 
