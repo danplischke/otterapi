@@ -848,79 +848,71 @@ class EndpointFunctionFactory:
         return _name('Response')
 
     def _build_standalone_body(self) -> list[ast.stmt]:
-        """Build the body for a standalone endpoint function."""
-        body: list[ast.stmt] = []
+        """Build the body for a standalone endpoint function.
 
+        Shape:
+            [docstring]
+            c = client or Client()
+            [raw_response]  return [await] c._request(...)
+            [json path]     response = [await] c._request(...)
+                            [return / unwrap] [await] c._parse_response(...)
+        """
+        from otterapi.codegen._body_builder import BodyStatementBuilder
+
+        builder = BodyStatementBuilder()
         if self.config.docs:
-            body.append(
-                ast.Expr(value=ast.Constant(value=clean_docstring(self.config.docs)))
-            )
-
-        # c = client or Client()
-        body.append(
-            _assign(
-                _name('c'),
-                ast.BoolOp(
-                    op=ast.Or(),
-                    values=[_name('client'), _call(_name('Client'))],
-                ),
-            )
-        )
+            builder.add_docstring(self.config.docs)
+        builder.add_client_init()
 
         request_keywords = self._build_request_keywords()
-
         request_method = '_request_async' if self.config.is_async else '_request'
-        request_call = _call(
-            func=_attr('c', request_method),
+
+        # The request call + its await wrapping gets reused in three places
+        # below; build it once and re-wrap when needed.
+        def _request_call() -> ast.expr:
+            call: ast.expr = _call(
+                func=_attr('c', request_method), keywords=request_keywords
+            )
+            return ast.Await(value=call) if self.config.is_async else call
+
+        if not self.config.response_type:
+            return builder.add_return(_request_call()).build()
+
+        self._merge_imports(self.config.response_type.annotation_imports)
+        if self.config.response_type_imports:
+            self._merge_imports(self.config.response_type_imports)
+
+        if self._is_raw_response_type(self.config.response_type):
+            # Raw types (Response / bytes / str) skip Pydantic parsing.
+            return builder.add_return(_request_call()).build()
+
+        # JSON response: request, parse, optionally unwrap.
+        builder.add_method_call_assignment(
+            target_var='response',
+            receiver='c',
+            method=request_method,
             keywords=request_keywords,
+            is_async=self.config.is_async,
         )
 
+        parse_method = (
+            '_parse_response_async' if self.config.is_async else '_parse_response'
+        )
+        parse_call: ast.expr = _call(
+            func=_attr('c', parse_method),
+            args=[_name('response'), self.config.response_type.annotation_ast],
+        )
         if self.config.is_async:
-            request_call = ast.Await(value=request_call)
+            parse_call = ast.Await(value=parse_call)
 
-        if self.config.response_type:
-            self._merge_imports(self.config.response_type.annotation_imports)
-            # Merge model imports for response type (for models used in _parse_response call)
-            if self.config.response_type_imports:
-                self._merge_imports(self.config.response_type_imports)
+        if self.config.unwrap_data_path:
+            builder.add_statement(_assign(_name('result'), parse_call))
+            unwrap_expr = self._build_unwrap_expression(
+                'result', self.config.unwrap_data_path
+            )
+            return builder.add_return(unwrap_expr).build()
 
-            # Check if response type is a raw type (Response, bytes, str) that doesn't need parsing
-            is_raw_response = self._is_raw_response_type(self.config.response_type)
-
-            if is_raw_response:
-                # For non-JSON responses, just return the response directly
-                body.append(ast.Return(value=request_call))
-            else:
-                # For JSON responses, parse and validate with Pydantic
-                body.append(_assign(_name('response'), request_call))
-
-                parse_method = (
-                    '_parse_response_async'
-                    if self.config.is_async
-                    else '_parse_response'
-                )
-                parse_call = _call(
-                    func=_attr('c', parse_method),
-                    args=[_name('response'), self.config.response_type.annotation_ast],
-                )
-                if self.config.is_async:
-                    parse_call = ast.Await(value=parse_call)
-
-                # Handle response unwrapping
-                if self.config.unwrap_data_path:
-                    # result = c._parse_response(response, Type)
-                    body.append(_assign(_name('result'), parse_call))
-                    # return result.data (or result.nested.path)
-                    unwrap_expr = self._build_unwrap_expression(
-                        'result', self.config.unwrap_data_path
-                    )
-                    body.append(ast.Return(value=unwrap_expr))
-                else:
-                    body.append(ast.Return(value=parse_call))
-        else:
-            body.append(ast.Return(value=request_call))
-
-        return body
+        return builder.add_return(parse_call).build()
 
     def _is_raw_response_type(self, response_type: 'Type') -> bool:
         """Check if the response type is a raw type that doesn't need JSON parsing.
@@ -971,66 +963,51 @@ class EndpointFunctionFactory:
         return expr
 
     def _build_delegating_body(self) -> list[ast.stmt]:
-        """Build the body for a delegating endpoint function."""
-        body: list[ast.stmt] = []
+        """Build the body for a delegating endpoint function.
 
+        Pure forwarder: create a fresh ``Client()`` and call the same-named
+        method on it, optionally awaited. Composed via
+        :class:`BodyStatementBuilder` so the flow reads top-to-bottom.
+        """
+        from otterapi.codegen._body_builder import BodyStatementBuilder
+
+        builder = BodyStatementBuilder()
         if self.config.docs:
-            body.append(
-                ast.Expr(value=ast.Constant(value=clean_docstring(self.config.docs)))
-            )
+            builder.add_docstring(self.config.docs)
 
         call_args, call_keywords = self._build_delegating_call_args()
-
         method_name = self.config.client_method_name or self.config.fn_name
-        client_call = _call(
+        client_call: ast.expr = _call(
             func=_attr(_call(_name('Client')), method_name),
             args=call_args,
             keywords=call_keywords,
         )
-
         if self.config.is_async:
             client_call = ast.Await(value=client_call)
 
-        body.append(ast.Return(value=client_call))
-
-        return body
+        return builder.add_return(client_call).build()
 
     def _build_paginated_dataframe_body(self) -> list[ast.stmt]:
         """Build the body for a paginated DataFrame endpoint function.
 
         This combines pagination (to fetch all items) with DataFrame conversion.
         """
-        body: list[ast.stmt] = []
-        pag_config = self.config.pagination_config or {}
+        from otterapi.codegen._body_builder import BodyStatementBuilder
 
+        pag_config = self.config.pagination_config or {}
         library = self.config.dataframe_library
         return_type_str = (
             'pd.DataFrame' if library == DataFrameLibrary.PANDAS else 'pl.DataFrame'
         )
+        docstring = (self.config.docs or '') + f'\n\nReturns:\n    {return_type_str}'
 
-        # Add docstring
-        doc_content = self.config.docs or ''
-        doc_suffix = f'\n\nReturns:\n    {return_type_str}'
-        body.append(
-            ast.Expr(
-                value=ast.Constant(value=clean_docstring(doc_content + doc_suffix))
-            )
+        builder = (
+            BodyStatementBuilder()
+            .add_docstring(docstring)
+            .add_client_init()
+            .add_statement(self._build_fetch_page_function())
         )
-
-        # c = client or Client()
-        body.append(
-            _assign(
-                _name('c'),
-                ast.BoolOp(
-                    op=ast.Or(),
-                    values=[_name('client'), _call(_name('Client'))],
-                ),
-            )
-        )
-
-        # Build the fetch_page inner function
-        fetch_page_fn = self._build_fetch_page_function()
-        body.append(fetch_page_fn)
+        body = builder.build()
 
         # Build extract_items lambda
         data_path = pag_config.get('data_path')
@@ -1211,30 +1188,24 @@ class EndpointFunctionFactory:
         )
 
     def _build_paginated_body(self) -> list[ast.stmt]:
-        """Build the body for a paginated endpoint function."""
-        body: list[ast.stmt] = []
+        """Build the body for a paginated endpoint function.
+
+        Docstring + client init + fetch_page helper get composed via
+        :class:`BodyStatementBuilder`; the style-specific
+        ``paginate_{offset,cursor,page}`` call construction stays inline
+        (each style has its own keyword shape that doesn't fit a uniform
+        primitive).
+        """
+        from otterapi.codegen._body_builder import BodyStatementBuilder
+
         pag_config = self.config.pagination_config or {}
 
-        # Add docstring
+        builder = BodyStatementBuilder()
         if self.config.docs:
-            body.append(
-                ast.Expr(value=ast.Constant(value=clean_docstring(self.config.docs)))
-            )
-
-        # c = client or Client()
-        body.append(
-            _assign(
-                _name('c'),
-                ast.BoolOp(
-                    op=ast.Or(),
-                    values=[_name('client'), _call(_name('Client'))],
-                ),
-            )
-        )
-
-        # Build the fetch_page inner function
-        fetch_page_fn = self._build_fetch_page_function()
-        body.append(fetch_page_fn)
+            builder.add_docstring(self.config.docs)
+        builder.add_client_init()
+        builder.add_statement(self._build_fetch_page_function())
+        body = builder.build()
 
         # Build extract_items lambda
         data_path = pag_config.get('data_path')
@@ -1349,30 +1320,22 @@ class EndpointFunctionFactory:
         return body
 
     def _build_paginated_iter_body(self) -> list[ast.stmt]:
-        """Build the body for a paginated iterator endpoint function."""
-        body: list[ast.stmt] = []
+        """Build the body for a paginated iterator endpoint function.
+
+        Same scaffolding as :meth:`_build_paginated_body`; the style branch
+        below dispatches to ``iterate_{offset,cursor,page}`` instead of
+        ``paginate_*``.
+        """
+        from otterapi.codegen._body_builder import BodyStatementBuilder
+
         pag_config = self.config.pagination_config or {}
 
-        # Add docstring
+        builder = BodyStatementBuilder()
         if self.config.docs:
-            body.append(
-                ast.Expr(value=ast.Constant(value=clean_docstring(self.config.docs)))
-            )
-
-        # c = client or Client()
-        body.append(
-            _assign(
-                _name('c'),
-                ast.BoolOp(
-                    op=ast.Or(),
-                    values=[_name('client'), _call(_name('Client'))],
-                ),
-            )
-        )
-
-        # Build the fetch_page inner function
-        fetch_page_fn = self._build_fetch_page_function()
-        body.append(fetch_page_fn)
+            builder.add_docstring(self.config.docs)
+        builder.add_client_init()
+        builder.add_statement(self._build_fetch_page_function())
+        body = builder.build()
 
         # Build extract_items lambda
         data_path = pag_config.get('data_path')

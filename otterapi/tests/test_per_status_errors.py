@@ -28,8 +28,10 @@ def _generate(target: Path) -> None:
     Codegen(config).generate()
 
 
-@pytest.fixture
-def generated_pkg(tmp_path):
+@pytest.fixture(scope='module')
+def generated_pkg(tmp_path_factory):
+    """Regenerate the per-status error client once per module (22 tests)."""
+    tmp_path = tmp_path_factory.mktemp('per_status')
     pkg = 'per_status_pkg'
     sys.path.insert(0, str(tmp_path))
     _generate(tmp_path / pkg)
@@ -46,7 +48,7 @@ def generated_pkg(tmp_path):
             pass
 
 
-@pytest.fixture
+@pytest.fixture(scope='module')
 def errors(generated_pkg):
     return generated_pkg._client
 

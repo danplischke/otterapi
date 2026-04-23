@@ -1094,6 +1094,30 @@ class TypeGenerator(OpenAPIProcessor):
         # This ensures enums inside Pet get names like "PetStatus" not "addPetRequestBodyStatus"
         effective_base_name = schema_name or base_name
 
+        # ``not`` schemas describe what a value *isn't* -- Pydantic doesn't have
+        # a 1:1 translation, so silently treating them as whatever the outer
+        # type says would produce a model that accepts forbidden values. Log a
+        # warning and fall back to ``Any`` so the payload is still accepted but
+        # the looseness is visible. (Issue #3 follow-up, audit item "not
+        # schemas silently pass through".)
+        if getattr(schema, 'not_', None) is not None:
+            import logging
+
+            logging.warning(
+                'OpenAPI ``not`` schema encountered for %s; falling back to '
+                'Any (Pydantic has no direct equivalent).',
+                effective_base_name or field_name or '<inline>',
+            )
+            any_type = Type(
+                reference=None,
+                name=None,
+                annotation_ast=_name('Any'),
+                implementation_ast=None,
+                type='primitive',
+            )
+            any_type.add_annotation_import('typing', 'Any')
+            return any_type
+
         # TODO: schema.type can be array?
         if schema.type == DataType.array:
             type_ = self._create_array_type(

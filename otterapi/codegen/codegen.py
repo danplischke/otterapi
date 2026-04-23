@@ -425,17 +425,12 @@ class Codegen(OpenAPIProcessor):
                 return None
 
             response_name = response_or_ref.ref.split('/')[-1]
-            if (
-                not self.openapi.components
-                or not self.openapi.components.responses
-                or response_name not in self.openapi.components.responses
-            ):
+            resolved = self._adapter.components_response(response_name)
+            if resolved is None:
                 logging.warning(
                     f"Referenced response '{response_name}' not found in components.responses"
                 )
                 return None
-
-            resolved = self.openapi.components.responses[response_name]
             # Handle nested references
             if isinstance(resolved, Reference):
                 return self._resolve_response_reference(resolved)
@@ -462,17 +457,12 @@ class Codegen(OpenAPIProcessor):
                 return None
 
             body_name = body_or_ref.ref.split('/')[-1]
-            if (
-                not self.openapi.components
-                or not self.openapi.components.requestBodies
-                or body_name not in self.openapi.components.requestBodies
-            ):
+            resolved = self._adapter.components_request_body(body_name)
+            if resolved is None:
                 logging.warning(
                     f"Referenced request body '{body_name}' not found in components.requestBodies"
                 )
                 return None
-
-            resolved = self.openapi.components.requestBodies[body_name]
             # Handle nested references
             if isinstance(resolved, Reference):
                 return self._resolve_request_body_reference(resolved)
@@ -638,13 +628,9 @@ class Codegen(OpenAPIProcessor):
             List of generated Endpoint objects.
         """
         endpoints: list[Endpoint] = []
-        # Paths is a RootModel, access .root to get the underlying dict
-        paths_dict = (
-            self.openapi.paths.root
-            if hasattr(self.openapi.paths, 'root')
-            else self.openapi.paths
-        )
-        for path, path_item in paths_dict.items():
+        # Use the adapter for path access -- hides the "RootModel vs dict"
+        # wrinkle from the rest of codegen (issue #3 item 10).
+        for path, path_item in self._adapter.paths().items():
             # Apply path filtering
             if not self._should_include_path(path):
                 continue
@@ -720,20 +706,21 @@ class Codegen(OpenAPIProcessor):
         if self.config.base_url:
             return self.config.base_url
 
-        # If no servers in spec, config must provide base_url
-        if not self.openapi.servers:
+        # Fetch declared servers through the adapter (issue #3 item 10).
+        servers = self._adapter.servers()
+        if not servers:
             raise ValueError(
                 'No base url provided. Make sure you specify the base_url in the otterapi config or the OpenAPI document contains a valid servers section'
             )
 
         # Only support single server
-        if len(self.openapi.servers) > 1:
+        if len(servers) > 1:
             raise ValueError(
                 'Multiple servers are not supported. Set the base_url in the config.'
             )
 
         # TODO: handle server variables
-        baseurl = self.openapi.servers[0].url
+        baseurl = servers[0].url
 
         if not baseurl:
             raise ValueError(
@@ -1089,6 +1076,20 @@ class Codegen(OpenAPIProcessor):
     # Per-feature emitters extracted from ``_build_endpoint_file_body``
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _sync_async_pair(endpoint: Endpoint) -> list[tuple[bool, str]]:
+        """Return the (is_async, base_fn_name) pair every feature emitter loops over.
+
+        Factoring this out removes the four near-identical inline tuples in
+        the paired emitters below and keeps the "sync first, async second"
+        emission order consistent across DataFrame / export / paginated
+        variants (issue #3 item 5 follow-up).
+        """
+        return [
+            (False, endpoint.sync_fn_name),
+            (True, endpoint.async_fn_name),
+        ]
+
     def _emit_paginated_dataframe_pair(
         self,
         body: list[ast.stmt],
@@ -1125,10 +1126,7 @@ class Codegen(OpenAPIProcessor):
 
         for library in libraries:
             suffix = '_df' if library == 'pandas' else '_pl'
-            for is_async, base_name in (
-                (False, endpoint.sync_fn_name),
-                (True, endpoint.async_fn_name),
-            ):
+            for is_async, base_name in self._sync_async_pair(endpoint):
                 fn_name = f'{base_name}{suffix}'
                 fn, imports = build_standalone_paginated_dataframe_fn(
                     fn_name=fn_name,
@@ -1176,10 +1174,7 @@ class Codegen(OpenAPIProcessor):
         from otterapi.codegen.export import build_standalone_paginated_export_fn
 
         default_format = formats[0] if formats else 'csv'
-        for is_async, base_name in (
-            (False, endpoint.sync_fn_name),
-            (True, endpoint.async_fn_name),
-        ):
+        for is_async, base_name in self._sync_async_pair(endpoint):
             fn_name = f'{base_name}_export'
             fn, imports = build_standalone_paginated_export_fn(
                 fn_name=fn_name,
@@ -1222,10 +1217,7 @@ class Codegen(OpenAPIProcessor):
         ):
             if not generate:
                 continue
-            for is_async, base_name in (
-                (False, endpoint.sync_fn_name),
-                (True, endpoint.async_fn_name),
-            ):
+            for is_async, base_name in self._sync_async_pair(endpoint):
                 fn_name = f'{base_name}{suffix}'
                 fn, imports = build_standalone_dataframe_fn(
                     fn_name=fn_name,
@@ -1269,10 +1261,7 @@ class Codegen(OpenAPIProcessor):
         from otterapi.codegen.export import build_standalone_export_fn
 
         default_format = formats[0] if formats else 'csv'
-        for is_async, base_name in (
-            (False, endpoint.sync_fn_name),
-            (True, endpoint.async_fn_name),
-        ):
+        for is_async, base_name in self._sync_async_pair(endpoint):
             fn_name = f'{base_name}_export'
             fn, imports = build_standalone_export_fn(
                 fn_name=fn_name,
@@ -1377,7 +1366,7 @@ class Codegen(OpenAPIProcessor):
                 'OpenAPI document was not loaded; _load_schema() failed silently.'
             )
 
-        if not self.openapi.paths:
+        if not self._adapter.has_paths():
             raise ValueError('OpenAPI spec has no paths to generate endpoints from')
 
         directory = UPath(self.config.output)
@@ -1696,9 +1685,10 @@ class Codegen(OpenAPIProcessor):
         if self.config.client_class_name:
             return self.config.client_class_name
 
-        # Derive from API title
-        if self.openapi and self.openapi.info and self.openapi.info.title:
-            title = self.openapi.info.title
+        # Derive from API title (via the adapter so the parser's attribute
+        # shape stays encapsulated; issue #3 item 10).
+        if self.openapi is not None and self._adapter.title():
+            title = self._adapter.title()
             # Convert to PascalCase and add Client suffix
             name = sanitize_identifier(title)
             if not name.endswith('Client'):

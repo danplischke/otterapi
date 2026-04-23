@@ -1,0 +1,27 @@
+openapi: 3.0.0
+info:
+  title: DataFrame API
+  version: 1.0.0
+paths:
+  /rows:
+    get:
+      operationId: listRows
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Row'
+components:
+  schemas:
+    Row:
+      type: object
+      required: [id, value]
+      properties:
+        id:
+          type: integer
+        value:
+          type: number

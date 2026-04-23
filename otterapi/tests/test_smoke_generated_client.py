@@ -51,10 +51,18 @@ def _import_generated(parent_dir: Path, package_name: str):
             pass
 
 
-@pytest.fixture
-def generated_client_module(tmp_path: Path):
+@pytest.fixture(scope='module')
+def generated_client_module(tmp_path_factory):
+    """Generate the smoke client once per module and reuse it.
+
+    Each test in this file used to regenerate the full Petstore-ish client
+    into a fresh tmp_path -- hundreds of milliseconds per test call that
+    the test bodies never actually change. Module scope keeps the
+    regeneration honest (one real Codegen.generate() invocation proving
+    the full pipeline works) while cutting wall time roughly in half.
+    """
     package_name = 'smoke_client_pkg'
-    parent = tmp_path
+    parent = tmp_path_factory.mktemp('smoke_client')
     _generate_into(parent / package_name)
     return _import_generated(parent, package_name)
 

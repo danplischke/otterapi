@@ -6,6 +6,11 @@ For each subdirectory of ``tests/fixtures/golden/`` we:
 2. Diff every emitted ``*.py`` against ``expected/<filename>``.
 3. Fail on mismatch with a unified diff.
 
+A fixture may place an optional ``config.yaml`` alongside ``spec.yaml``
+carrying extra ``DocumentConfig`` fields (e.g. ``pagination.enabled: true``
+or ``dataframe.pandas: true``) so the harness can cover feature-specific
+emitters, not just the plain correctness paths.
+
 Use ``OTTER_UPDATE_GOLDEN=1 uv run pytest otterapi/tests/test_golden.py``
 to (re)write the ``expected/`` directory after intentional codegen changes.
 
@@ -22,6 +27,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
@@ -66,16 +72,28 @@ def _diff(label: str, expected: str, actual: str) -> str:
     )
 
 
+def _load_fixture_config(spec_dir: Path) -> dict:
+    """Read the optional ``config.yaml`` carrying per-fixture overrides."""
+    config_path = spec_dir / 'config.yaml'
+    if not config_path.is_file():
+        return {}
+    return yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
+
+
 @pytest.mark.parametrize('spec_dir', _golden_specs(), ids=lambda p: p.name)
 def test_golden(spec_dir: Path, tmp_path: Path) -> None:
     spec_path = spec_dir / 'spec.yaml'
     expected_dir = spec_dir / 'expected'
     output_dir = tmp_path / spec_dir.name
 
-    config = DocumentConfig(
-        source=str(spec_path),
-        output=str(output_dir),
-        base_url='https://example.test',
+    overrides = _load_fixture_config(spec_dir)
+    config = DocumentConfig.model_validate(
+        {
+            'source': str(spec_path),
+            'output': str(output_dir),
+            'base_url': 'https://example.test',
+            **overrides,
+        }
     )
     Codegen(config).generate()
 
