@@ -321,6 +321,65 @@ class Endpoint:
                 self.imports[module].update(names)
 
 
+def _schema_constraints_to_field_kwargs(schema: 'Schema') -> list[ast.keyword]:
+    """Translate OpenAPI validation constraints into Pydantic ``Field()`` kwargs.
+
+    Maps the JSON-Schema-derived validators on ``schema`` (minLength, pattern,
+    minimum, multipleOf, ...) into the equivalent Pydantic v2 ``Field``
+    arguments. Returns an empty list when the schema carries no constraints
+    (or only carries OpenAPI defaults like ``minLength=0``), so callers can
+    safely concatenate the result onto an existing keyword list.
+
+    The OpenAPI 3.1+ semantics for ``exclusiveMinimum`` / ``exclusiveMaximum``
+    (the value itself is the bound) are honored; OpenAPI 3.0's boolean form
+    is upgraded earlier in the pipeline.
+    """
+    kwargs: list[ast.keyword] = []
+
+    def _add(name: str, value):
+        kwargs.append(ast.keyword(arg=name, value=ast.Constant(value=value)))
+
+    # String constraints. minLength has an OpenAPI default of 0 which we treat
+    # as "no constraint" -- only emit when the spec explicitly tightens it.
+    min_length = getattr(schema, 'minLength', None)
+    if min_length is not None and min_length > 0:
+        _add('min_length', min_length)
+    max_length = getattr(schema, 'maxLength', None)
+    if max_length is not None:
+        _add('max_length', max_length)
+    pattern = getattr(schema, 'pattern', None)
+    if pattern:
+        _add('pattern', pattern)
+
+    # Numeric constraints (Pydantic uses ge/le/gt/lt to disambiguate
+    # inclusive vs. exclusive bounds, which matches OpenAPI 3.1+ semantics).
+    minimum = getattr(schema, 'minimum', None)
+    if minimum is not None:
+        _add('ge', minimum)
+    maximum = getattr(schema, 'maximum', None)
+    if maximum is not None:
+        _add('le', maximum)
+    excl_min = getattr(schema, 'exclusiveMinimum', None)
+    if excl_min is not None:
+        _add('gt', excl_min)
+    excl_max = getattr(schema, 'exclusiveMaximum', None)
+    if excl_max is not None:
+        _add('lt', excl_max)
+    multiple_of = getattr(schema, 'multipleOf', None)
+    if multiple_of is not None:
+        _add('multiple_of', multiple_of)
+
+    # Array constraints. Same minItems-default-of-0 caveat as minLength.
+    min_items = getattr(schema, 'minItems', None)
+    if min_items is not None and min_items > 0:
+        _add('min_length', min_items)
+    max_items = getattr(schema, 'maxItems', None)
+    if max_items is not None:
+        _add('max_length', max_items)
+
+    return kwargs
+
+
 @dataclasses.dataclass
 class TypeGenerator(OpenAPIProcessor):
     types: dict[str, Type] = dataclasses.field(default_factory=dict)
@@ -683,6 +742,9 @@ class TypeGenerator(OpenAPIProcessor):
             )
             field_name = sanitized_field_name
 
+        # Forward OpenAPI validation constraints to Pydantic Field()
+        field_keywords.extend(_schema_constraints_to_field_kwargs(field_schema))
+
         if field_keywords:
             value = _call(
                 func=_name(Field.__name__),
@@ -769,14 +831,51 @@ class TypeGenerator(OpenAPIProcessor):
                 for t in (schema.anyOf or schema.oneOf)
             ]
 
+            union_ast = _union_expr(types=[t.annotation_ast for t in types_])
+
+            # If the schema declares a discriminator, wrap the union in
+            # ``Annotated[Union[...], Field(discriminator='propertyName')]``
+            # so Pydantic v2 enforces the tag-based dispatch at validation
+            # time. Without this, polymorphic responses fall back to "first
+            # union member that validates wins", which silently mis-routes
+            # payloads when variants share field shapes.
+            extra_imports: dict[str, set[str]] = {}
+            if schema.discriminator is not None:
+                discriminator_kw = ast.keyword(
+                    arg='discriminator',
+                    value=ast.Constant(value=schema.discriminator.propertyName),
+                )
+                annotation_ast = ast.Subscript(
+                    value=_name('Annotated'),
+                    slice=ast.Tuple(
+                        elts=[
+                            union_ast,
+                            _call(
+                                func=_name(Field.__name__),
+                                keywords=[discriminator_kw],
+                            ),
+                        ],
+                        ctx=ast.Load(),
+                    ),
+                    ctx=ast.Load(),
+                )
+                extra_imports['typing'] = {'Annotated'}
+                extra_imports.setdefault(Field.__module__, set()).add(Field.__name__)
+            else:
+                annotation_ast = union_ast
+
             union_type = Type(
                 reference=None,
                 name=None,  # Union type doesn't need a name, it's used inline
-                annotation_ast=_union_expr(types=[t.annotation_ast for t in types_]),
+                annotation_ast=annotation_ast,
                 implementation_ast=None,
                 type='primitive',
             )
             union_type.copy_imports_from_sub_types(types_)
+            for module, names in extra_imports.items():
+                for n in names:
+                    union_type.add_annotation_import(module=module, name=n)
+                    union_type.add_implementation_import(module=module, name=n)
             return union_type
 
         name = name or (
@@ -812,7 +911,21 @@ class TypeGenerator(OpenAPIProcessor):
             body.append(field)
             field_types.append(type_)
 
-        # Add deprecation docstring if schema is deprecated
+        # When the schema declares ``additionalProperties: false``, mirror that
+        # constraint via Pydantic's ``model_config = {'extra': 'forbid'}`` so
+        # generated models actually reject unexpected fields at runtime.
+        if schema.additionalProperties is False:
+            model_config_assign = ast.Assign(
+                targets=[_name('model_config')],
+                value=ast.Dict(
+                    keys=[ast.Constant(value='extra')],
+                    values=[ast.Constant(value='forbid')],
+                ),
+            )
+            body = [model_config_assign] + body
+
+        # Add deprecation docstring if schema is deprecated. Prepended after
+        # model_config so the docstring stays the first statement.
         if schema.deprecated:
             deprecation_doc = ast.Expr(
                 value=ast.Constant(
@@ -980,6 +1093,30 @@ class TypeGenerator(OpenAPIProcessor):
         # Use schema_name (from $ref) as base_name for nested types if available
         # This ensures enums inside Pet get names like "PetStatus" not "addPetRequestBodyStatus"
         effective_base_name = schema_name or base_name
+
+        # ``not`` schemas describe what a value *isn't* -- Pydantic doesn't have
+        # a 1:1 translation, so silently treating them as whatever the outer
+        # type says would produce a model that accepts forbidden values. Log a
+        # warning and fall back to ``Any`` so the payload is still accepted but
+        # the looseness is visible. (Issue #3 follow-up, audit item "not
+        # schemas silently pass through".)
+        if getattr(schema, 'not_', None) is not None:
+            import logging
+
+            logging.warning(
+                'OpenAPI ``not`` schema encountered for %s; falling back to '
+                'Any (Pydantic has no direct equivalent).',
+                effective_base_name or field_name or '<inline>',
+            )
+            any_type = Type(
+                reference=None,
+                name=None,
+                annotation_ast=_name('Any'),
+                implementation_ast=None,
+                type='primitive',
+            )
+            any_type.add_annotation_import('typing', 'Any')
+            return any_type
 
         # TODO: schema.type can be array?
         if schema.type == DataType.array:

@@ -559,6 +559,138 @@ class DataFrameConfig(BaseModel):
         return self.pandas, self.polars, self.default_path
 
 
+ExportFormat = Literal['csv', 'tsv', 'jsonl', 'parquet']
+
+
+class EndpointExportConfig(BaseModel):
+    """Per-endpoint file export configuration.
+
+    Allows overriding the default export settings for specific endpoints.
+
+    Attributes:
+        enabled: Override whether to generate export helpers for this endpoint.
+        path: JSON path to extract data from response.
+        formats: Override which formats the endpoint should support.
+    """
+
+    enabled: bool | None = Field(
+        default=None,
+        description='Override whether to generate export helpers for this endpoint.',
+    )
+
+    path: str | None = Field(
+        default=None,
+        description='JSON path to extract data from response.',
+    )
+
+    formats: list[ExportFormat] | None = Field(
+        default=None,
+        description='Override which formats this endpoint should support.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+
+class ExportConfig(BaseModel):
+    """Configuration for tabular file export helpers.
+
+    When enabled, a runtime ``_export.py`` utility module is generated in the
+    output directory with streaming writers (CSV, TSV, JSONL, Parquet) that
+    take an iterable of Pydantic models (or dicts) and write them to disk or
+    cloud storage via ``UPath``. Parquet support requires ``pyarrow`` which
+    is exposed via the ``otterapi[parquet]`` optional extra.
+
+    Attributes:
+        enabled: Enable export helper generation.
+        formats: Default list of formats the generated helpers should support.
+        default_path: Default JSON path for extracting list data from responses.
+        include_all: Generate export helpers for all list-returning endpoints.
+        batch_size: Default batch size used when streaming pages to disk.
+        endpoints: Per-endpoint configuration overrides.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description='Enable export helper generation.',
+    )
+
+    formats: list[ExportFormat] = Field(
+        default_factory=lambda: ['csv', 'jsonl'],
+        description='Default formats supported by generated helpers.',
+    )
+
+    default_path: str | None = Field(
+        default=None,
+        description='Default JSON path for extracting list data from responses.',
+    )
+
+    include_all: bool = Field(
+        default=True,
+        description='Generate export helpers for all list-returning endpoints.',
+    )
+
+    batch_size: int = Field(
+        default=1000,
+        ge=1,
+        description='Default batch size used when streaming pages to disk.',
+    )
+
+    endpoints: dict[str, EndpointExportConfig] = Field(
+        default_factory=dict,
+        description='Per-endpoint configuration overrides.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    def should_generate_for_endpoint(
+        self,
+        endpoint_name: str,
+        returns_list: bool = True,
+    ) -> tuple[bool, list[ExportFormat], str | None]:
+        """Determine if export helpers should be generated for an endpoint.
+
+        Args:
+            endpoint_name: The name of the endpoint function.
+            returns_list: Whether the endpoint returns a list type.
+
+        Returns:
+            Tuple of (should_generate, formats, path). When should_generate is
+            False, formats is empty and path is None.
+        """
+        if not self.enabled:
+            return False, [], None
+
+        endpoint_config = self.endpoints.get(endpoint_name)
+
+        if endpoint_config is not None:
+            if endpoint_config.enabled is False:
+                return False, [], None
+
+            formats = (
+                endpoint_config.formats
+                if endpoint_config.formats is not None
+                else list(self.formats)
+            )
+            path = (
+                endpoint_config.path
+                if endpoint_config.path is not None
+                else self.default_path
+            )
+
+            if endpoint_config.enabled is True:
+                return True, formats, path
+
+            if self.include_all and returns_list:
+                return True, formats, path
+
+            return False, [], None
+
+        if not self.include_all or not returns_list:
+            return False, [], None
+
+        return True, list(self.formats), self.default_path
+
+
 class EndpointResponseUnwrapConfig(BaseModel):
     """Per-endpoint response unwrap configuration.
 
@@ -876,6 +1008,11 @@ class DocumentConfig(BaseModel):
         description='Configuration for response unwrapping.',
     )
 
+    export: ExportConfig = Field(
+        default_factory=ExportConfig,
+        description='Configuration for tabular file export helpers.',
+    )
+
     @field_validator('source')
     @classmethod
     def validate_source(cls, v: str) -> str:
@@ -1064,6 +1201,60 @@ def load_config_file(path: str | Path) -> dict:
             return load_yaml(path)
 
 
+class ConfigValidationError(ValueError):
+    """Raised when an OtterAPI config file is syntactically loadable but
+    semantically invalid.
+
+    Wraps :class:`pydantic.ValidationError` with a friendlier multi-line
+    message that includes the source file path and, when known, the
+    field path so users do not have to dig through Pydantic's raw
+    ``ValidationError.errors()`` output to find the typo.
+    """
+
+    def __init__(self, message: str, *, source: str | Path | None, errors: list):
+        super().__init__(message)
+        self.source = source
+        self.errors = errors
+
+
+def _format_pydantic_error(
+    source: str | Path | None, exc: Exception
+) -> ConfigValidationError:
+    """Convert a ``pydantic.ValidationError`` into a friendlier message."""
+    from pydantic import ValidationError
+
+    if not isinstance(exc, ValidationError):
+        # Re-raise non-ValidationError exceptions unchanged.
+        raise exc
+
+    errors = exc.errors()
+    lines: list[str] = []
+    where = f' in {source}' if source else ''
+    lines.append(
+        f'Invalid OtterAPI configuration{where} '
+        f'({len(errors)} error{"s" if len(errors) != 1 else ""}):'
+    )
+    for err in errors:
+        loc = '.'.join(str(part) for part in err.get('loc', ())) or '<root>'
+        msg = err.get('msg', 'invalid')
+        err_type = err.get('type', '')
+        suffix = f' [type={err_type}]' if err_type else ''
+        lines.append(f'  - {loc}: {msg}{suffix}')
+    lines.append(
+        'Run `otterapi init` to scaffold a valid config or check '
+        'https://github.com/danplischke/otterapi for the schema.'
+    )
+    return ConfigValidationError('\n'.join(lines), source=source, errors=errors)
+
+
+def _validate_config(data: dict, source: str | Path | None = None) -> CodegenConfig:
+    """Validate ``data`` into ``CodegenConfig``, raising the friendly error type."""
+    try:
+        return CodegenConfig.model_validate(data)
+    except Exception as exc:
+        raise _format_pydantic_error(source, exc) from exc
+
+
 def get_config(path: str | None = None) -> CodegenConfig:
     """Load OtterAPI configuration from a file or environment.
 
@@ -1081,12 +1272,13 @@ def get_config(path: str | None = None) -> CodegenConfig:
 
     Raises:
         FileNotFoundError: If no configuration can be found.
-        pydantic.ValidationError: If the configuration is invalid.
+        ConfigValidationError: If the configuration is invalid (wraps
+            ``pydantic.ValidationError`` with a friendly multi-line message).
     """
     # If path is specified, use it directly
     if path:
         data = load_config_file(path)
-        return CodegenConfig.model_validate(data)
+        return _validate_config(data, source=path)
 
     cwd = Path.cwd()
 
@@ -1095,14 +1287,14 @@ def get_config(path: str | None = None) -> CodegenConfig:
         config_path = cwd / filename
         if config_path.exists():
             data = load_config_file(config_path)
-            return CodegenConfig.model_validate(data)
+            return _validate_config(data, source=config_path)
 
     # Try pyproject.toml
     pyproject_path = cwd / 'pyproject.toml'
     if pyproject_path.exists():
         try:
             data = load_toml(pyproject_path)
-            return CodegenConfig.model_validate(data)
+            return _validate_config(data, source=pyproject_path)
         except KeyError:
             pass  # No otterapi section, continue looking
 

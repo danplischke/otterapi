@@ -28,6 +28,61 @@ console = Console()
 error_console = Console(stderr=True)
 
 
+def _commented_optional_sections() -> str:
+    """Return a YAML block of commented-out optional config sections.
+
+    Appended to ``otter.yml`` by ``otterapi init`` so users discover the
+    pagination / dataframe / export / module_split / response_unwrap
+    knobs by editing rather than by hunting through the README.
+    """
+    return """
+# ----------------------------------------------------------------------
+# Optional sections -- uncomment to enable. See the README for details:
+#   https://github.com/danplischke/otterapi
+# ----------------------------------------------------------------------
+
+# documents:
+#   - source: ...
+#     output: ...
+#
+#     # Pagination: emit *_iter() helpers that stream paginated endpoints.
+#     # auto_detect=true picks up offset/limit, cursor/limit, page/per_page
+#     # parameters automatically.
+#     pagination:
+#       enabled: true
+#       auto_detect: true
+#       default_page_size: 100
+#
+#     # File export: emit *_export() helpers that stream rows to CSV /
+#     # TSV / JSONL / Parquet. Parquet support requires `pip install
+#     # otterapi[parquet]`.
+#     export:
+#       enabled: true
+#       formats: [csv, jsonl]   # csv | tsv | jsonl | parquet
+#       batch_size: 1000
+#
+#     # DataFrame conversion: emit *_df() (pandas) / *_pl() (polars)
+#     # helpers for list-returning endpoints.
+#     dataframe:
+#       enabled: true
+#       pandas: true
+#       polars: false
+#
+#     # Module splitting: shard a giant API into per-tag / per-path
+#     # subpackages. Strategies: none | path | tag | hybrid | custom.
+#     module_split:
+#       enabled: false
+#       strategy: hybrid
+#
+#     # Response unwrapping: when responses use an envelope wrapper
+#     # ({"data": [...], "meta": {...}}), generated endpoints can return
+#     # just the inner data.
+#     response_unwrap:
+#       enabled: false
+#       data_path: data
+"""
+
+
 def _version_callback(value: bool) -> None:
     """Print version and exit if --version flag is passed."""
     if value:
@@ -249,6 +304,10 @@ def init(
         content = json.dumps(config_data, indent=2)
     else:
         content = yaml.dump(config_data, default_flow_style=False, sort_keys=False)
+        # Wave 3.17 (issue #3 item 17): append commented-out scaffolds for the
+        # optional sections so users can discover them by editing instead of
+        # cross-referencing the README.
+        content += _commented_optional_sections()
 
     config_path.write_text(content)
 

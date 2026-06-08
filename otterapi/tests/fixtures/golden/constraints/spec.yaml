@@ -1,0 +1,42 @@
+openapi: 3.0.0
+info:
+  title: Constraints API
+  version: 1.0.0
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+components:
+  schemas:
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username, age]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+        username:
+          type: string
+          minLength: 3
+          maxLength: 20
+          pattern: '^[a-z][a-z0-9_]*$'
+        age:
+          type: integer
+          minimum: 0
+          maximum: 150
+        tags:
+          type: array
+          items:
+            type: string
+          minItems: 0
+          maxItems: 10

@@ -71,6 +71,12 @@ jobs:
             python-version: "3.12"
           - os: windows-latest
             python-version: "3.12"
+          # Wave 3.18 (issue #3 item 18): cheap insurance against the
+          # encoding-class bugs that hit Windows in PR #2; one extra
+          # cross-version run on the most common stack catches them on
+          # the next minor release of Python.
+          - os: windows-latest
+            python-version: "3.11"
 
     steps:
       - uses: actions/checkout@v4
@@ -97,6 +103,33 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
           verbose: true
+
+  test-no-extras:
+    name: Test (no optional extras installed)
+    runs-on: ubuntu-latest
+    # Wave 3.18 (issue #3 item 18): exercise the lazy-import paths so
+    # importing the codegen and generated client never *requires* pandas
+    # / polars / pyarrow to be installed -- only when the matching
+    # helpers are actually called.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install only the base + dev groups (no test extras)
+        run: uv sync --group dev --no-default-groups
+
+      - name: Smoke import + minimal codegen
+        run: |
+          uv run python -c "from otterapi.codegen import Codegen, TypeGenerator, SchemaLoader; print('imports OK')"
+          uv run python -c "from otterapi.config import DocumentConfig, get_config; print('config OK')"
+          uv run python -c "from otterapi.cli import app; print('cli OK')"
 
   integration-test:
     name: Integration Test

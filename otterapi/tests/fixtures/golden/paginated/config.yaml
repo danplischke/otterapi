@@ -1,0 +1,6 @@
+# Enable pagination so the paginated + _iter + _aiter emitters run. The
+# auto_detect path picks up the offset/limit parameters on listItems.
+pagination:
+  enabled: true
+  auto_detect: true
+  default_page_size: 50

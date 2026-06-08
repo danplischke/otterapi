@@ -1,0 +1,5 @@
+# Exercise both the pandas and polars _df / _pl emitters.
+dataframe:
+  enabled: true
+  pandas: true
+  polars: true

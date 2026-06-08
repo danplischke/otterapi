@@ -23,93 +23,77 @@ Example:
     >>> codegen.generate()
 """
 
-from otterapi.codegen.ast_utils import ImportCollector
-from otterapi.codegen.codegen import Codegen
-
-# Re-export from dataframes module
+# ``X as X`` is the PEP 484 / ruff signal for "this is a deliberate
+# re-export". Wave 3.15 (issue #3 item 15) keeps these symbols reachable
+# via ``otterapi.codegen.X`` for backwards compatibility while removing
+# them from ``__all__``.
+from otterapi.codegen.ast_utils import ImportCollector as ImportCollector
+from otterapi.codegen.codegen import Codegen as Codegen
 from otterapi.codegen.dataframes import (
-    DataFrameMethodConfig,
-    generate_dataframe_module,
-    get_dataframe_config_for_endpoint,
+    DataFrameMethodConfig as DataFrameMethodConfig,
+    generate_dataframe_module as generate_dataframe_module,
+    get_dataframe_config_for_endpoint as get_dataframe_config_for_endpoint,
 )
-from otterapi.codegen.emitter import CodeEmitter, FileEmitter, StringEmitter
-
-# Re-export from endpoints module
+from otterapi.codegen.emitter import (
+    CodeEmitter as CodeEmitter,
+    FileEmitter as FileEmitter,
+    StringEmitter as StringEmitter,
+)
 from otterapi.codegen.endpoints import (
-    DataFrameLibrary,
-    EndpointFunctionConfig,
-    EndpointFunctionFactory,
-    EndpointMode,
-    FunctionSignature,
-    FunctionSignatureBuilder,
-    ParameterASTBuilder,
+    DataFrameLibrary as DataFrameLibrary,
+    EndpointFunctionConfig as EndpointFunctionConfig,
+    EndpointFunctionFactory as EndpointFunctionFactory,
+    EndpointMode as EndpointMode,
+    FunctionSignature as FunctionSignature,
+    FunctionSignatureBuilder as FunctionSignatureBuilder,
+    ParameterASTBuilder as ParameterASTBuilder,
 )
-from otterapi.codegen.schema import SchemaLoader, SchemaResolver
-
-# Re-export from splitting module
+from otterapi.codegen.schema import (
+    SchemaLoader as SchemaLoader,
+    SchemaResolver as SchemaResolver,
+)
 from otterapi.codegen.splitting import (
-    EmittedModule,
-    ModuleMapResolver,
-    ModuleTree,
-    ModuleTreeBuilder,
-    ResolvedModule,
-    SplitModuleEmitter,
-    build_module_tree,
+    EmittedModule as EmittedModule,
+    ModuleMapResolver as ModuleMapResolver,
+    ModuleTree as ModuleTree,
+    ModuleTreeBuilder as ModuleTreeBuilder,
+    ResolvedModule as ResolvedModule,
+    SplitModuleEmitter as SplitModuleEmitter,
+    build_module_tree as build_module_tree,
 )
 from otterapi.codegen.types import (
-    Endpoint,
-    ModelNameCollector,
-    Parameter,
-    RequestBodyInfo,
-    ResponseInfo,
-    Type,
-    TypeGenerator,
-    TypeInfo,
-    TypeRegistry,
-    collect_used_model_names,
+    Endpoint as Endpoint,
+    ModelNameCollector as ModelNameCollector,
+    Parameter as Parameter,
+    RequestBodyInfo as RequestBodyInfo,
+    ResponseInfo as ResponseInfo,
+    Type as Type,
+    TypeGenerator as TypeGenerator,
+    TypeInfo as TypeInfo,
+    TypeRegistry as TypeRegistry,
+    collect_used_model_names as collect_used_model_names,
 )
 
+# ---------------------------------------------------------------------------
+# Stable public surface (Wave 3.15, issue #3 item 15)
+# ---------------------------------------------------------------------------
+# Only the names listed in ``__all__`` are part of the supported public API.
+# Other names imported above (``ImportCollector``, ``EndpointFunctionFactory``,
+# ``ParameterASTBuilder``, the splitting internals, etc.) remain accessible
+# via direct attribute access for backwards compatibility but are considered
+# internal -- they may move or change shape between minor releases. New
+# integrations should import only from the list below.
 __all__ = [
     # Main codegen class
     'Codegen',
-    # Type generation
+    # Type generation -- describing operations, parameters, response shapes.
     'TypeGenerator',
     'Type',
-    'TypeRegistry',
-    'TypeInfo',
-    'ModelNameCollector',
-    'collect_used_model_names',
-    # Schema handling
-    'SchemaLoader',
-    'SchemaResolver',
-    # Endpoint types
     'Endpoint',
     'Parameter',
     'RequestBodyInfo',
     'ResponseInfo',
-    # Code emission
-    'CodeEmitter',
-    'FileEmitter',
-    'StringEmitter',
-    'ImportCollector',
-    # Endpoint building
-    'EndpointFunctionConfig',
-    'EndpointFunctionFactory',
-    'EndpointMode',
-    'DataFrameLibrary',
-    'FunctionSignature',
-    'FunctionSignatureBuilder',
-    'ParameterASTBuilder',
-    # DataFrame utilities
-    'DataFrameMethodConfig',
-    'generate_dataframe_module',
-    'get_dataframe_config_for_endpoint',
-    # Module splitting
-    'ModuleTree',
-    'ModuleTreeBuilder',
-    'ModuleMapResolver',
-    'ResolvedModule',
-    'EmittedModule',
-    'SplitModuleEmitter',
-    'build_module_tree',
+    # Schema handling -- loading + resolving an OpenAPI document.
+    'SchemaLoader',
+    'SchemaResolver',
 ]
