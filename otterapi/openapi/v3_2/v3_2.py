@@ -17,6 +17,7 @@ from pydantic import (
     PositiveFloat,
     RootModel,
     StringConstraints,
+    field_validator,
 )
 
 
@@ -513,13 +514,23 @@ class Header(BaseModel):
     required: bool | None = False
     deprecated: bool | None = False
     allowEmptyValue: bool | None = False
-    style: ParameterStyle | str | None = ParameterStyle.simple
+    style: ParameterStyle | None = ParameterStyle.simple
     explode: bool | None = None
     allowReserved: bool | None = False
     schema_: Schema | Reference | None = Field(None, alias='schema')
     content: dict[str, MediaType] | None = None
     example: Any | None = None
     examples: dict[str, Example | Reference] | None = None
+
+    @field_validator('style', mode='before')
+    @classmethod
+    def _coerce_style(cls, v: Any) -> Any:
+        if v is None or isinstance(v, ParameterStyle):
+            return v
+        try:
+            return ParameterStyle(v)
+        except (ValueError, KeyError):
+            return None
 
 
 class Paths(RootModel[dict[str, 'PathItem']]):
