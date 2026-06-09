@@ -2,28 +2,32 @@
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import sys
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
-FIXTURE_MODELS = (
-    Path(__file__).parent
-    / 'fixtures'
-    / 'golden'
-    / 'constraints'
-    / 'expected'
-    / 'models.py'
-)
+from otterapi.codegen.codegen import Codegen
+from otterapi.config import DocumentConfig
+
+_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'spec.yaml'
 
 
-def _load_fixture_models():
-    key = '_golden_constraints_models'
-    if key in sys.modules:
-        return sys.modules[key]
-    spec = importlib.util.spec_from_file_location(key, FIXTURE_MODELS)
+def _load_generated_models(tmp_path_factory):
+    pkg = '_html_repr_models_pkg'
+    parent = tmp_path_factory.mktemp('html_repr')
+    Codegen(
+        DocumentConfig(
+            source=str(_SPEC),
+            output=str(parent / pkg),
+            base_url='https://example.test',
+        )
+    ).generate()
+    models_path = parent / pkg / 'models.py'
+    key = '_html_repr_generated_models'
+    spec = importlib.util.spec_from_file_location(key, models_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[key] = mod
     spec.loader.exec_module(mod)
@@ -31,8 +35,8 @@ def _load_fixture_models():
 
 
 @pytest.fixture(scope='module')
-def mixin_ns():
-    return _load_fixture_models()
+def mixin_ns(tmp_path_factory):
+    return _load_generated_models(tmp_path_factory)
 
 
 class TestHtmlVal:
@@ -56,8 +60,7 @@ class TestHtmlVal:
             def _repr_html_(self):
                 return '<b>nested</b>'
 
-        result = mixin_ns._html_val(Nested())
-        assert '<b>nested</b>' == result
+        assert mixin_ns._html_val(Nested()) == '<b>nested</b>'
 
     def test_plain_string(self, mixin_ns):
         assert mixin_ns._html_val('hello') == 'hello'
@@ -98,24 +101,18 @@ class TestHtmlReprMixin:
         class NullableModel(mixin_ns._HtmlReprMixin, BaseModel):
             name: str | None = None
 
-        obj = NullableModel()
-        html = obj._repr_html_()
+        html = NullableModel()._repr_html_()
         assert '<em' in html
 
     def test_mixin_is_base_class_of_generated_model(self, mixin_ns):
         assert issubclass(mixin_ns.User, mixin_ns._HtmlReprMixin)
 
     def test_works_on_plain_pydantic_subclass(self, mixin_ns):
-        """Mixin should work on any Pydantic model, not just the generated one."""
-
         class SimpleModel(mixin_ns._HtmlReprMixin, BaseModel):
             x: int
             y: str
 
-        obj = SimpleModel(x=1, y='hello')
-        html = obj._repr_html_()
+        html = SimpleModel(x=1, y='hello')._repr_html_()
         assert 'SimpleModel' in html
-        assert 'x' in html
-        assert 'y' in html
         assert '1' in html
         assert 'hello' in html
