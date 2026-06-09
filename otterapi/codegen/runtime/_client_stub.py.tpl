@@ -14,20 +14,36 @@ class __CLASS_NAME__(__BASE_CLASS_NAME__):
     This class inherits from the generated __BASE_CLASS_NAME__ and can be
     customized without being overwritten on code regeneration.
 
-    Example:
-        >>> client = __CLASS_NAME__()
-        >>> # Use default base URL from OpenAPI spec
+    The client holds a persistent connection pool and retries transient errors
+    (429/5xx) automatically.  Use it as a context manager so the pool is
+    released cleanly::
+
+        with __CLASS_NAME__() as client:
+            data = list_genes(client=client)
+
+    Async context manager::
+
+        async with __CLASS_NAME__() as client:
+            data = await async_list_genes(client=client)
+
+    Calling async endpoints from a Jupyter notebook or plain script::
+
+        from .__MODULE_NAME__ import run_sync
+        gene = run_sync(async_get_gene(symbol="BRCA1"))
+
+    Fan-out over many targets in parallel::
+
+        from .__MODULE_NAME__ import run_concurrently
+        genes = run_concurrently(
+            [async_get_gene(symbol=g) for g in gene_list],
+            concurrency=10,
+        )
+
+    Other examples::
 
         >>> client = __CLASS_NAME__(base_url="https://staging.api.example.com")
-        >>> # Override base URL
-
-        >>> client = __CLASS_NAME__(timeout=60.0, headers={"Authorization": "Bearer token"})
-        >>> # Custom timeout and headers
-
-        >>> import httpx
-        >>> with httpx.Client() as http_client:
-        ...     client = __CLASS_NAME__(http_client=http_client)
-        ...     # Use custom HTTP client (useful for testing/mocking)
+        >>> client = __CLASS_NAME__(max_retries=0)  # disable retry
+        >>> client = __CLASS_NAME__(timeout=60.0, headers={"X-Request-ID": "abc"})
     """
 
     pass

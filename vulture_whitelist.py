@@ -103,6 +103,19 @@ CursorPaginationConfig
 PagePaginationConfig
 export_async
 
+# _concurrency.py — called by generated package consumers
+run_sync
+run_concurrently
+run_concurrently_async
+_._repr_html_
+
+# _retry.py — called from generated _client.py via ._retry import
+_backoff_sleep
+_backoff_sleep_async
+
+# _pagination.py — _progress_context used internally, always called
+_.close  # tqdm bar
+
 # ---------------------------------------------------------------------------
 # Golden fixture files (otterapi/tests/fixtures/golden/)
 # Generated pydantic model fields — accessed as instance attributes, not
@@ -141,3 +154,9 @@ _.return_value
 
 # Dataclass / pydantic model fields used in test fixtures
 _.created_at
+
+# Context-manager __exit__ / __aexit__ parameters — intentionally unused;
+# the signatures are mandated by the protocol.
+exc_type
+exc_val
+exc_tb

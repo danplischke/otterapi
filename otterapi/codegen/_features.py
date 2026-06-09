@@ -122,6 +122,24 @@ class ExportFeature(FeatureModule):
         return bool(config.export.enabled)
 
 
+class ConcurrencyFeature(FeatureModule):
+    """Emits ``_concurrency.py`` (run_sync / run_concurrently helpers)."""
+
+    module_filename = '_concurrency.py'
+
+    def is_enabled(self, _config: DocumentConfig) -> bool:
+        return True
+
+
+class RetryFeature(FeatureModule):
+    """Emits ``_retry.py`` (backoff sleep helpers used by the generated _client.py)."""
+
+    module_filename = '_retry.py'
+
+    def is_enabled(self, _config: DocumentConfig) -> bool:
+        return True
+
+
 def all_features() -> list[FeatureModule]:
     """Canonical ordered list of every runtime-helper feature."""
-    return [PaginationFeature(), DataFrameFeature(), ExportFeature()]
+    return [PaginationFeature(), DataFrameFeature(), ExportFeature(), ConcurrencyFeature(), RetryFeature()]

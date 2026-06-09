@@ -23,7 +23,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -86,10 +86,25 @@ def _arrow_sanitize(value: Any) -> Any:
     return value
 
 
-def _row_to_arrow_dict(row: Row, model: type[BaseModel]) -> dict[str, Any]:
-    """Normalize a row to a pyarrow-native dict for Parquet writes."""
+def _row_to_arrow_dict(
+    row: Row,
+    model: type[BaseModel],
+    *,
+    _string_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Normalize a row to a pyarrow-native dict for Parquet writes.
+
+    ``_string_fields`` names fields whose schema type is ``pa.string()`` but
+    whose Python value may not be a ``str`` (e.g. ``Union[int, str]`` falls
+    back to string in the schema).  Those values are coerced with ``str()``.
+    """
     raw = _as_model_instance(row, model).model_dump(mode='python')
-    return {key: _arrow_sanitize(value) for key, value in raw.items()}
+    result = {key: _arrow_sanitize(value) for key, value in raw.items()}
+    for name in _string_fields:
+        val = result.get(name)
+        if val is not None and not isinstance(val, str):
+            result[name] = str(val)
+    return result
 
 
 def _chunks(iterable: Iterable[Row], size: int) -> Iterator[list[Row]]:
@@ -297,6 +312,27 @@ async def to_jsonl_async(
 # Parquet (pyarrow, lazy import)
 # -----------------------------------------------------------------------------
 
+# Mapping from Pydantic sentinel types (AwareDatetime, NaiveDatetime, etc.) to a
+# simple kind string used in _python_type_to_arrow.  These are plain classes, not
+# Annotated[...] wrappers, so _strip_annotated cannot unwrap them.
+_PYDANTIC_SENTINELS: dict[type, str] = {}
+try:
+    import pydantic.types as _pydantic_types
+
+    for _attr, _kind in (
+        ('AwareDatetime', 'timestamp_tz'),
+        ('NaiveDatetime', 'timestamp'),
+        ('PastDatetime', 'timestamp'),
+        ('FutureDatetime', 'timestamp'),
+        ('PastDate', 'date'),
+        ('FutureDate', 'date'),
+    ):
+        _t = getattr(_pydantic_types, _attr, None)
+        if _t is not None:
+            _PYDANTIC_SENTINELS[_t] = _kind
+except ImportError:
+    pass
+
 
 def _require_pyarrow():
     try:
@@ -310,8 +346,21 @@ def _require_pyarrow():
     return pa, pq
 
 
+def _strip_annotated(annotation: Any) -> Any:
+    """Unwrap ``Annotated[T, ...]`` to its base type ``T``.
+
+    Handles constrained Pydantic types like ``PositiveInt``, ``StrictStr``, etc.
+    that are expressed as ``Annotated[base, ...]``.  Plain sentinel classes such
+    as ``AwareDatetime`` are handled separately via ``_PYDANTIC_SENTINELS``.
+    """
+    while get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return annotation
+
+
 def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
     """Return ``(inner, nullable)`` for Optional / ``T | None`` annotations."""
+    annotation = _strip_annotated(annotation)
     origin = get_origin(annotation)
     if origin is Union or origin is types.UnionType:
         args = [a for a in get_args(annotation) if a is not type(None)]
@@ -326,6 +375,8 @@ def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
 def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
     """Map a Python/Pydantic annotation to a pyarrow DataType."""
     inner, _nullable = _unwrap_optional(annotation)
+    # Strip any remaining Annotated wrapper (e.g. inside Optional[AwareDatetime]).
+    inner = _strip_annotated(inner)
     origin = get_origin(inner)
 
     if isinstance(inner, type) and issubclass(inner, BaseModel):
@@ -349,8 +400,17 @@ def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
         return pa.string()
 
     if origin in (list, tuple, set, frozenset):
-        (item_annotation,) = get_args(inner) or (Any,)
-        return pa.list_(_python_type_to_arrow(item_annotation, pa))
+        args = get_args(inner)
+        if not args:
+            return pa.list_(pa.string())
+        if origin is tuple:
+            if len(args) == 2 and args[1] is Ellipsis:
+                # tuple[T, ...] - homogeneous variable-length
+                return pa.list_(_python_type_to_arrow(args[0], pa))
+            if len(args) > 1:
+                # tuple[A, B, ...] - heterogeneous, no native Parquet type
+                return pa.string()
+        return pa.list_(_python_type_to_arrow(args[0], pa))
 
     if origin is dict:
         return pa.string()  # JSON-encoded fallback (keeps schema simple).
@@ -368,11 +428,22 @@ def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
     if inner is Decimal:
         return pa.decimal128(38, 18)
     if inner is datetime:
-        return pa.timestamp('us', tz='UTC')
+        # Use no-tz timestamp so both naive and aware datetimes write without error.
+        return pa.timestamp('us')
     if inner is date:
         return pa.date32()
     if inner is time:
         return pa.time64('us')
+
+    # Pydantic sentinel types (AwareDatetime, NaiveDatetime, PastDate, etc.) are
+    # plain classes, not Annotated wrappers, so _strip_annotated can't resolve them.
+    _kind = _PYDANTIC_SENTINELS.get(inner)
+    if _kind == 'timestamp_tz':
+        return pa.timestamp('us', tz='UTC')
+    if _kind == 'timestamp':
+        return pa.timestamp('us')
+    if _kind == 'date':
+        return pa.date32()
 
     return pa.string()
 
@@ -436,6 +507,7 @@ def to_parquet(
     """
     pa, pq = _require_pyarrow()
     schema = pydantic_to_arrow_schema(model)
+    string_fields = frozenset(f.name for f in schema if pa.types.is_string(f.type))
     target = _as_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -443,7 +515,10 @@ def to_parquet(
     try:
         with pq.ParquetWriter(sink, schema, compression=compression) as writer:
             for batch in _chunks(rows, batch_size):
-                records = [_row_to_arrow_dict(row, model) for row in batch]
+                records = [
+                    _row_to_arrow_dict(row, model, _string_fields=string_fields)
+                    for row in batch
+                ]
                 table = pa.Table.from_pylist(records, schema=schema)
                 writer.write_table(table)
                 written += len(records)
@@ -467,6 +542,7 @@ async def to_parquet_async(
     """Async variant of :func:`to_parquet`."""
     pa, pq = _require_pyarrow()
     schema = pydantic_to_arrow_schema(model)
+    string_fields = frozenset(f.name for f in schema if pa.types.is_string(f.type))
     target = _as_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -474,7 +550,10 @@ async def to_parquet_async(
     try:
         with pq.ParquetWriter(sink, schema, compression=compression) as writer:
             async for batch in _achunks(rows, batch_size):
-                records = [_row_to_arrow_dict(row, model) for row in batch]
+                records = [
+                    _row_to_arrow_dict(row, model, _string_fields=string_fields)
+                    for row in batch
+                ]
                 table = pa.Table.from_pylist(records, schema=schema)
                 writer.write_table(table)
                 written += len(records)

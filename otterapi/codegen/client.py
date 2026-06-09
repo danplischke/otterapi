@@ -670,14 +670,18 @@ def generate_base_client_class(
         Tuple of (class AST node, required imports).
     """
     imports: ImportDict = {
-        'httpx': {'Client', 'AsyncClient', 'Response'},
+        'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
         'typing': {'Any', 'TypeVar'},
         'types': {'UnionType'},
         'pydantic': {'TypeAdapter', 'RootModel'},
+        '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
     }
 
     # Build __init__ method
     init_method = _build_init_method(default_base_url, default_timeout)
+
+    # Build lifecycle methods
+    lifecycle_methods = _build_lifecycle_methods()
 
     # Build _request method (sync)
     request_method = _build_request_method(is_async=False)
@@ -715,12 +719,17 @@ Args:
     base_url: Base URL for API requests. Default: {default_base_url}
     timeout: Request timeout in seconds. Default: {default_timeout}
     headers: Default headers to include in all requests.
-    http_client: Custom httpx.Client for sync requests.
+    http_client: Custom httpx.Client for sync requests (persisted and reused).
     async_http_client: Custom httpx.AsyncClient for async requests.
+    max_retries: Retry attempts for transient failures (429/5xx/network errors).
+        Set to 0 to disable retries. Default: 3.
+    retry_statuses: HTTP status codes that trigger a retry.
+    backoff_factor: Multiplier for exponential backoff between retries. Default: 0.5.
 """
             )
         ),
         init_method,
+        *lifecycle_methods,
         request_method,
         async_request_method,
         request_json_method,
@@ -745,6 +754,23 @@ def _build_init_method(
     default_base_url: str, default_timeout: float
 ) -> ast.FunctionDef:
     """Build the __init__ method for the client class."""
+    # frozenset({429, 500, 502, 503, 504}) literal
+    default_retry_statuses = ast.Call(
+        func=_name('frozenset'),
+        args=[
+            ast.Set(
+                elts=[
+                    ast.Constant(value=429),
+                    ast.Constant(value=500),
+                    ast.Constant(value=502),
+                    ast.Constant(value=503),
+                    ast.Constant(value=504),
+                ]
+            )
+        ],
+        keywords=[],
+    )
+
     init_body: list[ast.stmt] = [
         # self.base_url = base_url.rstrip('/')
         _assign(
@@ -752,31 +778,37 @@ def _build_init_method(
             _call(_attr(_name('base_url'), 'rstrip'), [ast.Constant(value='/')]),
         ),
         # self.timeout = timeout
-        _assign(
-            _attr('self', 'timeout'),
-            _name('timeout'),
-        ),
+        _assign(_attr('self', 'timeout'), _name('timeout')),
         # self.headers = headers or {}
         _assign(
             _attr('self', 'headers'),
-            ast.BoolOp(
-                op=ast.Or(),
-                values=[_name('headers'), ast.Dict(keys=[], values=[])],
+            ast.BoolOp(op=ast.Or(), values=[_name('headers'), ast.Dict(keys=[], values=[])]),
+        ),
+        # self.max_retries = max_retries
+        _assign(_attr('self', 'max_retries'), _name('max_retries')),
+        # self.retry_statuses = retry_statuses
+        _assign(_attr('self', 'retry_statuses'), _name('retry_statuses')),
+        # self.backoff_factor = backoff_factor
+        _assign(_attr('self', 'backoff_factor'), _name('backoff_factor')),
+        # self._owns_sync_client = http_client is None
+        _assign(
+            _attr('self', '_owns_sync_client'),
+            ast.Compare(
+                left=_name('http_client'),
+                ops=[ast.Is()],
+                comparators=[ast.Constant(value=None)],
             ),
         ),
-        # self._client = http_client
+        # self._sync_client = http_client or Client()
         _assign(
-            _attr('self', '_client'),
-            _name('http_client'),
+            _attr('self', '_sync_client'),
+            ast.BoolOp(op=ast.Or(), values=[_name('http_client'), _call(_name('Client'))]),
         ),
         # self._async_client = async_http_client
-        _assign(
-            _attr('self', '_async_client'),
-            _name('async_http_client'),
-        ),
+        _assign(_attr('self', '_async_client'), _name('async_http_client')),
     ]
 
-    init_method = ast.FunctionDef(
+    return ast.FunctionDef(
         name='__init__',
         args=ast.arguments(
             posonlyargs=[],
@@ -786,14 +818,10 @@ def _build_init_method(
                 _argument('timeout', _name('float')),
                 _argument(
                     'headers',
-                    _union_expr(
-                        [
-                            _subscript(
-                                'dict', ast.Tuple(elts=[_name('str'), _name('str')])
-                            ),
-                            ast.Constant(value=None),
-                        ]
-                    ),
+                    _union_expr([
+                        _subscript('dict', ast.Tuple(elts=[_name('str'), _name('str')])),
+                        ast.Constant(value=None),
+                    ]),
                 ),
                 _argument(
                     'http_client',
@@ -803,6 +831,12 @@ def _build_init_method(
                     'async_http_client',
                     _union_expr([_name('AsyncClient'), ast.Constant(value=None)]),
                 ),
+                _argument('max_retries', _name('int')),
+                _argument(
+                    'retry_statuses',
+                    _subscript('frozenset', _name('int')),
+                ),
+                _argument('backoff_factor', _name('float')),
             ],
             kwonlyargs=[],
             kw_defaults=[],
@@ -813,6 +847,9 @@ def _build_init_method(
                 ast.Constant(value=None),
                 ast.Constant(value=None),
                 ast.Constant(value=None),
+                ast.Constant(value=3),
+                default_retry_statuses,
+                ast.Constant(value=0.5),
             ],
         ),
         body=init_body,
@@ -820,7 +857,102 @@ def _build_init_method(
         returns=ast.Constant(value=None),
     )
 
-    return init_method
+
+def _build_lifecycle_methods() -> list[ast.stmt]:
+    """Build close/aclose/__enter__/__exit__/__aenter__/__aexit__ methods."""
+
+    def _simple_method(name: str, body: list[ast.stmt], is_async: bool = False) -> ast.stmt:
+        cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
+        return cls(
+            name=name,
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[_argument('self')],
+                kwonlyargs=[],
+                kw_defaults=[],
+                kwarg=None,
+                defaults=[],
+            ),
+            body=body,
+            decorator_list=[],
+            returns=ast.Constant(value=None),
+        )
+
+    def _ctx_method(name: str, body: list[ast.stmt], extra_args: list | None = None, is_async: bool = False) -> ast.stmt:
+        cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
+        args_list = [_argument('self')] + (extra_args or [])
+        return cls(
+            name=name,
+            args=ast.arguments(
+                posonlyargs=[],
+                args=args_list,
+                kwonlyargs=[],
+                kw_defaults=[],
+                kwarg=None,
+                defaults=[],
+            ),
+            body=body,
+            decorator_list=[],
+            returns=ast.Constant(value=None),
+        )
+
+    # close(self): if self._owns_sync_client: self._sync_client.close()
+    close_method = _simple_method(
+        'close',
+        [
+            ast.If(
+                test=_attr('self', '_owns_sync_client'),
+                body=[ast.Expr(_call(_attr(_attr('self', '_sync_client'), 'close')))],
+                orelse=[],
+            )
+        ],
+    )
+
+    # aclose(self): if self._async_client is not None: await self._async_client.aclose()
+    aclose_method = _simple_method(
+        'aclose',
+        [
+            ast.If(
+                test=ast.Compare(
+                    left=_attr('self', '_async_client'),
+                    ops=[ast.IsNot()],
+                    comparators=[ast.Constant(value=None)],
+                ),
+                body=[
+                    ast.Expr(
+                        ast.Await(_call(_attr(_attr('self', '_async_client'), 'aclose')))
+                    )
+                ],
+                orelse=[],
+            )
+        ],
+        is_async=True,
+    )
+
+    # __enter__(self): return self  (no return annotation — inferred from body)
+    enter_method = _ctx_method('__enter__', [ast.Return(_name('self'))])
+    enter_method.returns = None  # type: ignore[assignment]
+
+    # __exit__(self, *args): self.close()
+    exit_method = _ctx_method(
+        '__exit__',
+        [ast.Expr(_call(_attr('self', 'close')))],
+        extra_args=[_argument('exc_type', _name('Any')), _argument('exc_val', _name('Any')), _argument('exc_tb', _name('Any'))],
+    )
+
+    # __aenter__(self): return self  (no return annotation — inferred from body)
+    aenter_method = _ctx_method('__aenter__', [ast.Return(_name('self'))], is_async=True)
+    aenter_method.returns = None  # type: ignore[assignment]
+
+    # __aexit__(self, *args): await self.aclose()
+    aexit_method = _ctx_method(
+        '__aexit__',
+        [ast.Expr(ast.Await(_call(_attr('self', 'aclose'))))],
+        extra_args=[_argument('exc_type', _name('Any')), _argument('exc_val', _name('Any')), _argument('exc_tb', _name('Any'))],
+        is_async=True,
+    )
+
+    return [close_method, aclose_method, enter_method, exit_method, aenter_method, aexit_method]
 
 
 def _build_validate_response_method() -> ast.FunctionDef:
@@ -1188,164 +1320,214 @@ def _build_filtered_params_expr() -> ast.expr:
     )
 
 
-def _build_sync_request_body(
-    url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
-) -> list[ast.stmt]:
-    """Build the body for sync _request method."""
-    # Build filtered_params assignment
-    filtered_params_stmt = _assign(
-        _name('filtered_params'),
-        _build_filtered_params_expr(),
-    )
+def _build_request_keywords(
+    merged_headers: ast.expr, timeout_expr: ast.expr
+) -> list[ast.keyword]:
+    """Shared keyword args for httpx request calls."""
+    return [
+        ast.keyword(arg='params', value=_name('filtered_params')),
+        ast.keyword(arg='headers', value=merged_headers),
+        ast.keyword(arg='json', value=_name('json')),
+        ast.keyword(arg='data', value=_name('data')),
+        ast.keyword(arg='files', value=_name('files')),
+        ast.keyword(arg='content', value=_name('content')),
+        ast.keyword(arg='timeout', value=timeout_expr),
+    ]
 
-    request_call = _call(
-        _attr('client', 'request'),
-        args=[_name('method'), url_expr],
-        keywords=[
-            ast.keyword(arg='params', value=_name('filtered_params')),
-            ast.keyword(arg='headers', value=merged_headers),
-            ast.keyword(arg='json', value=_name('json')),
-            ast.keyword(arg='data', value=_name('data')),
-            ast.keyword(arg='files', value=_name('files')),
-            ast.keyword(arg='content', value=_name('content')),
-            ast.keyword(arg='timeout', value=timeout_expr),
+
+def _build_retry_check(backoff_fn: str, is_async: bool) -> ast.If:
+    """Build: if response.is_error: <retry-or-raise>."""
+    backoff_call = _call(
+        _name(backoff_fn),
+        args=[
+            _name('attempt'),
+            _attr('self', 'backoff_factor'),
+            _name('response'),
+        ],
+    )
+    if is_async:
+        backoff_stmt = ast.Expr(ast.Await(backoff_call))
+    else:
+        backoff_stmt = ast.Expr(backoff_call)
+
+    # attempt < self.max_retries and response.status_code in self.retry_statuses
+    should_retry = ast.BoolOp(
+        op=ast.And(),
+        values=[
+            ast.Compare(
+                left=_name('attempt'),
+                ops=[ast.Lt()],
+                comparators=[_attr('self', 'max_retries')],
+            ),
+            ast.Compare(
+                left=_attr('response', 'status_code'),
+                ops=[ast.In()],
+                comparators=[_attr('self', 'retry_statuses')],
+            ),
         ],
     )
 
-    return [
-        filtered_params_stmt,
-        ast.If(
-            test=_attr('self', '_client'),
-            body=[
-                _assign(
-                    _name('response'),
-                    _call(
-                        _attr(_attr('self', '_client'), 'request'),
-                        args=[_name('method'), url_expr],
-                        keywords=[
-                            ast.keyword(arg='params', value=_name('filtered_params')),
-                            ast.keyword(arg='headers', value=merged_headers),
-                            ast.keyword(arg='json', value=_name('json')),
-                            ast.keyword(arg='data', value=_name('data')),
-                            ast.keyword(arg='files', value=_name('files')),
-                            ast.keyword(arg='content', value=_name('content')),
-                            ast.keyword(arg='timeout', value=timeout_expr),
-                        ],
-                    ),
-                ),
-            ],
-            orelse=[
-                ast.With(
-                    items=[
-                        ast.withitem(
-                            context_expr=_call(_name('Client')),
-                            optional_vars=_name('client'),
+    return ast.If(
+        test=_attr('response', 'is_error'),
+        body=[
+            ast.If(
+                test=should_retry,
+                body=[backoff_stmt, ast.Continue()],
+                orelse=[
+                    ast.Raise(
+                        exc=_call(
+                            _attr(_name('APIError'), 'from_response'),
+                            args=[_name('response')],
                         )
-                    ],
-                    body=[
-                        _assign(_name('response'), request_call),
-                    ],
-                ),
-            ],
-        ),
-        # if response.is_error: raise APIError.from_response(response)
-        ast.If(
-            test=_attr('response', 'is_error'),
-            body=[
-                ast.Raise(
-                    exc=_call(
-                        _attr(_name('APIError'), 'from_response'),
-                        args=[_name('response')],
                     )
+                ],
+            )
+        ],
+        orelse=[],
+    )
+
+
+def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandler:
+    """Build: except TransportError: retry or re-raise."""
+    backoff_call = _call(
+        _name(backoff_fn),
+        args=[_name('attempt'), _attr('self', 'backoff_factor'), ast.Constant(value=None)],
+    )
+    if is_async:
+        backoff_stmt = ast.Expr(ast.Await(backoff_call))
+    else:
+        backoff_stmt = ast.Expr(backoff_call)
+
+    return ast.ExceptHandler(
+        type=_name('TransportError'),
+        name=None,
+        body=[
+            ast.If(
+                test=ast.Compare(
+                    left=_name('attempt'),
+                    ops=[ast.Lt()],
+                    comparators=[_attr('self', 'max_retries')],
                 ),
-            ],
-            orelse=[],
+                body=[backoff_stmt, ast.Continue()],
+                orelse=[ast.Raise()],
+            )
+        ],
+    )
+
+
+def _build_sync_request_body(
+    url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
+) -> list[ast.stmt]:
+    """Build the body for sync _request method with retry loop."""
+    filtered_params_stmt = _assign(_name('filtered_params'), _build_filtered_params_expr())
+
+    request_stmt = _assign(
+        _name('response'),
+        _call(
+            _attr(_attr('self', '_sync_client'), 'request'),
+            args=[_name('method'), url_expr],
+            keywords=_build_request_keywords(merged_headers, timeout_expr),
         ),
+    )
+
+    try_body = [
+        request_stmt,
+        _build_retry_check('_backoff_sleep', is_async=False),
         ast.Return(value=_name('response')),
     ]
+
+    for_loop = ast.For(
+        target=ast.Name(id='attempt', ctx=ast.Store()),
+        iter=_call(
+            _name('range'),
+            [ast.BinOp(left=_attr('self', 'max_retries'), op=ast.Add(), right=ast.Constant(value=1))],
+        ),
+        body=[
+            ast.Try(
+                body=try_body,
+                handlers=[_build_transport_handler('_backoff_sleep', is_async=False)],
+                orelse=[],
+                finalbody=[],
+            )
+        ],
+        orelse=[],
+    )
+
+    return [filtered_params_stmt, for_loop]
 
 
 def _build_async_request_body(
     url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
 ) -> list[ast.stmt]:
-    """Build the body for async _request_async method."""
-    # Build filtered_params assignment
-    filtered_params_stmt = _assign(
-        _name('filtered_params'),
-        _build_filtered_params_expr(),
-    )
+    """Build the body for async _request_async method with retry loop.
 
-    request_call = ast.Await(
-        value=_call(
-            _attr('client', 'request'),
-            args=[_name('method'), url_expr],
-            keywords=[
-                ast.keyword(arg='params', value=_name('filtered_params')),
-                ast.keyword(arg='headers', value=merged_headers),
-                ast.keyword(arg='json', value=_name('json')),
-                ast.keyword(arg='data', value=_name('data')),
-                ast.keyword(arg='files', value=_name('files')),
-                ast.keyword(arg='content', value=_name('content')),
-                ast.keyword(arg='timeout', value=timeout_expr),
-            ],
+    Uses self._async_client when the caller provided one (e.g. a MockTransport in
+    tests), otherwise creates a per-call AsyncClient to avoid event-loop binding
+    issues when coroutines are dispatched to a thread via run_sync / run_concurrently.
+    """
+    filtered_params_stmt = _assign(_name('filtered_params'), _build_filtered_params_expr())
+
+    def _request_call(client_expr: ast.expr) -> ast.stmt:
+        return _assign(
+            _name('response'),
+            ast.Await(
+                value=_call(
+                    _attr(client_expr, 'request'),
+                    args=[_name('method'), url_expr],
+                    keywords=_build_request_keywords(merged_headers, timeout_expr),
+                )
+            ),
         )
+
+    # if self._async_client is not None:
+    #     response = await self._async_client.request(...)
+    # else:
+    #     async with AsyncClient() as _owned_ac:
+    #         response = await _owned_ac.request(...)
+    async_with_stmt = ast.AsyncWith(
+        items=[
+            ast.withitem(
+                context_expr=_call(_name('AsyncClient')),
+                optional_vars=ast.Name(id='_owned_ac', ctx=ast.Store()),
+            )
+        ],
+        body=[_request_call(_name('_owned_ac'))],
     )
 
-    return [
-        filtered_params_stmt,
-        ast.If(
-            test=_attr('self', '_async_client'),
-            body=[
-                _assign(
-                    _name('response'),
-                    ast.Await(
-                        value=_call(
-                            _attr(_attr('self', '_async_client'), 'request'),
-                            args=[_name('method'), url_expr],
-                            keywords=[
-                                ast.keyword(
-                                    arg='params', value=_name('filtered_params')
-                                ),
-                                ast.keyword(arg='headers', value=merged_headers),
-                                ast.keyword(arg='json', value=_name('json')),
-                                ast.keyword(arg='data', value=_name('data')),
-                                ast.keyword(arg='files', value=_name('files')),
-                                ast.keyword(arg='content', value=_name('content')),
-                                ast.keyword(arg='timeout', value=timeout_expr),
-                            ],
-                        )
-                    ),
-                ),
-            ],
-            orelse=[
-                ast.AsyncWith(
-                    items=[
-                        ast.withitem(
-                            context_expr=_call(_name('AsyncClient')),
-                            optional_vars=_name('client'),
-                        )
-                    ],
-                    body=[
-                        _assign(_name('response'), request_call),
-                    ],
-                ),
-            ],
+    client_if = ast.If(
+        test=ast.Compare(
+            left=_attr('self', '_async_client'),
+            ops=[ast.IsNot()],
+            comparators=[ast.Constant(value=None)],
         ),
-        # if response.is_error: raise APIError.from_response(response)
-        ast.If(
-            test=_attr('response', 'is_error'),
-            body=[
-                ast.Raise(
-                    exc=_call(
-                        _attr(_name('APIError'), 'from_response'),
-                        args=[_name('response')],
-                    )
-                ),
-            ],
-            orelse=[],
-        ),
+        body=[_request_call(_attr('self', '_async_client'))],
+        orelse=[async_with_stmt],
+    )
+
+    try_body = [
+        client_if,
+        _build_retry_check('_backoff_sleep_async', is_async=True),
         ast.Return(value=_name('response')),
     ]
+
+    for_loop = ast.For(
+        target=ast.Name(id='attempt', ctx=ast.Store()),
+        iter=_call(
+            _name('range'),
+            [ast.BinOp(left=_attr('self', 'max_retries'), op=ast.Add(), right=ast.Constant(value=1))],
+        ),
+        body=[
+            ast.Try(
+                body=try_body,
+                handlers=[_build_transport_handler('_backoff_sleep_async', is_async=True)],
+                orelse=[],
+                finalbody=[],
+            )
+        ],
+        orelse=[],
+    )
+
+    return [filtered_params_stmt, for_loop]
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:

@@ -14,20 +14,36 @@ class DiscriminatorAPIClient(BaseDiscriminatorAPIClient):
     This class inherits from the generated BaseDiscriminatorAPIClient and can be
     customized without being overwritten on code regeneration.
 
-    Example:
-        >>> client = DiscriminatorAPIClient()
-        >>> # Use default base URL from OpenAPI spec
+    The client holds a persistent connection pool and retries transient errors
+    (429/5xx) automatically.  Use it as a context manager so the pool is
+    released cleanly::
+
+        with DiscriminatorAPIClient() as client:
+            data = list_genes(client=client)
+
+    Async context manager::
+
+        async with DiscriminatorAPIClient() as client:
+            data = await async_list_genes(client=client)
+
+    Calling async endpoints from a Jupyter notebook or plain script::
+
+        from ._client import run_sync
+        gene = run_sync(async_get_gene(symbol="BRCA1"))
+
+    Fan-out over many targets in parallel::
+
+        from ._client import run_concurrently
+        genes = run_concurrently(
+            [async_get_gene(symbol=g) for g in gene_list],
+            concurrency=10,
+        )
+
+    Other examples::
 
         >>> client = DiscriminatorAPIClient(base_url="https://staging.api.example.com")
-        >>> # Override base URL
-
-        >>> client = DiscriminatorAPIClient(timeout=60.0, headers={"Authorization": "Bearer token"})
-        >>> # Custom timeout and headers
-
-        >>> import httpx
-        >>> with httpx.Client() as http_client:
-        ...     client = DiscriminatorAPIClient(http_client=http_client)
-        ...     # Use custom HTTP client (useful for testing/mocking)
+        >>> client = DiscriminatorAPIClient(max_retries=0)  # disable retry
+        >>> client = DiscriminatorAPIClient(timeout=60.0, headers={"X-Request-ID": "abc"})
     """
 
     pass

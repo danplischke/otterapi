@@ -1,5 +1,6 @@
+from ._retry import _backoff_sleep, _backoff_sleep_async
 from pydantic import RootModel, TypeAdapter
-from httpx import AsyncClient, Client, Response
+from httpx import AsyncClient, Client, Response, TransportError
 from typing import Any, TypeVar
 from types import UnionType
 
@@ -228,8 +229,12 @@ class BaseDiscriminatorAPIClient:
         base_url: Base URL for API requests. Default: https://example.test
         timeout: Request timeout in seconds. Default: 30.0
         headers: Default headers to include in all requests.
-        http_client: Custom httpx.Client for sync requests.
+        http_client: Custom httpx.Client for sync requests (persisted and reused).
         async_http_client: Custom httpx.AsyncClient for async requests.
+        max_retries: Retry attempts for transient failures (429/5xx/network errors).
+            Set to 0 to disable retries. Default: 3.
+        retry_statuses: HTTP status codes that trigger a retry.
+        backoff_factor: Multiplier for exponential backoff between retries. Default: 0.5.
     """
 
     def __init__(
@@ -239,12 +244,39 @@ class BaseDiscriminatorAPIClient:
         headers: dict[str, str] | None = None,
         http_client: Client | None = None,
         async_http_client: AsyncClient | None = None,
+        max_retries: int = 3,
+        retry_statuses: frozenset[int] = frozenset({429, 500, 502, 503, 504}),
+        backoff_factor: float = 0.5,
     ) -> None:
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.headers = headers or {}
-        self._client = http_client
+        self.max_retries = max_retries
+        self.retry_statuses = retry_statuses
+        self.backoff_factor = backoff_factor
+        self._owns_sync_client = http_client is None
+        self._sync_client = http_client or Client()
         self._async_client = async_http_client
+
+    def close(self) -> None:
+        if self._owns_sync_client:
+            self._sync_client.close()
+
+    async def aclose(self) -> None:
+        if self._async_client is not None:
+            await self._async_client.aclose()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.aclose()
 
     def _request(
         self,
@@ -262,21 +294,9 @@ class BaseDiscriminatorAPIClient:
         filtered_params = (
             {k: v for k, v in params.items() if v is not None} if params else None
         )
-        if self._client:
-            response = self._client.request(
-                method,
-                f'{self.base_url}{path}',
-                params=filtered_params,
-                headers={**self.headers, **(headers or {})},
-                json=json,
-                data=data,
-                files=files,
-                content=content,
-                timeout=timeout if timeout is not None else self.timeout,
-            )
-        else:
-            with Client() as client:
-                response = client.request(
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self._sync_client.request(
                     method,
                     f'{self.base_url}{path}',
                     params=filtered_params,
@@ -287,9 +307,22 @@ class BaseDiscriminatorAPIClient:
                     content=content,
                     timeout=timeout if timeout is not None else self.timeout,
                 )
-        if response.is_error:
-            raise APIError.from_response(response)
-        return response
+                if response.is_error:
+                    if (
+                        attempt < self.max_retries
+                        and response.status_code in self.retry_statuses
+                    ):
+                        _backoff_sleep(attempt, self.backoff_factor, response)
+                        continue
+                    else:
+                        raise APIError.from_response(response)
+                return response
+            except TransportError:
+                if attempt < self.max_retries:
+                    _backoff_sleep(attempt, self.backoff_factor, None)
+                    continue
+                else:
+                    raise
 
     async def _request_async(
         self,
@@ -307,34 +340,51 @@ class BaseDiscriminatorAPIClient:
         filtered_params = (
             {k: v for k, v in params.items() if v is not None} if params else None
         )
-        if self._async_client:
-            response = await self._async_client.request(
-                method,
-                f'{self.base_url}{path}',
-                params=filtered_params,
-                headers={**self.headers, **(headers or {})},
-                json=json,
-                data=data,
-                files=files,
-                content=content,
-                timeout=timeout if timeout is not None else self.timeout,
-            )
-        else:
-            async with AsyncClient() as client:
-                response = await client.request(
-                    method,
-                    f'{self.base_url}{path}',
-                    params=filtered_params,
-                    headers={**self.headers, **(headers or {})},
-                    json=json,
-                    data=data,
-                    files=files,
-                    content=content,
-                    timeout=timeout if timeout is not None else self.timeout,
-                )
-        if response.is_error:
-            raise APIError.from_response(response)
-        return response
+        for attempt in range(self.max_retries + 1):
+            try:
+                if self._async_client is not None:
+                    response = await self._async_client.request(
+                        method,
+                        f'{self.base_url}{path}',
+                        params=filtered_params,
+                        headers={**self.headers, **(headers or {})},
+                        json=json,
+                        data=data,
+                        files=files,
+                        content=content,
+                        timeout=timeout if timeout is not None else self.timeout,
+                    )
+                else:
+                    async with AsyncClient() as _owned_ac:
+                        response = await _owned_ac.request(
+                            method,
+                            f'{self.base_url}{path}',
+                            params=filtered_params,
+                            headers={**self.headers, **(headers or {})},
+                            json=json,
+                            data=data,
+                            files=files,
+                            content=content,
+                            timeout=timeout if timeout is not None else self.timeout,
+                        )
+                if response.is_error:
+                    if (
+                        attempt < self.max_retries
+                        and response.status_code in self.retry_statuses
+                    ):
+                        await _backoff_sleep_async(
+                            attempt, self.backoff_factor, response
+                        )
+                        continue
+                    else:
+                        raise APIError.from_response(response)
+                return response
+            except TransportError:
+                if attempt < self.max_retries:
+                    await _backoff_sleep_async(attempt, self.backoff_factor, None)
+                    continue
+                else:
+                    raise
 
     def _request_json(
         self,

@@ -8,9 +8,12 @@ import csv
 import importlib.util
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, date, time
+from decimal import Decimal
+from typing import Union
 from enum import Enum
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from pydantic import BaseModel
@@ -225,10 +228,93 @@ class TestPydanticToArrowSchema:
         assert str(types_by_name['name'].type) == 'string'
         assert types_by_name['email'].nullable is True
         assert types_by_name['created_at'].nullable is True
-        # Optional[datetime] → timestamp[us, tz=UTC]
         assert 'timestamp' in str(types_by_name['created_at'].type)
         # list[str] → list<string>
         assert 'list' in str(types_by_name['tags'].type)
+
+    def test_naive_datetime_maps_to_no_tz_timestamp(self, exported_runtime):
+        """Naive datetime must not produce a UTC-timezone column (breaks at write time)."""
+        schema = exported_runtime.pydantic_to_arrow_schema(User)
+        dt_type = str(schema.field('created_at').type)
+        assert 'timestamp' in dt_type
+        assert 'UTC' not in dt_type
+
+    def test_pydantic_datetime_sentinels_map_correctly(self, exported_runtime):
+        """AwareDatetime (a Pydantic sentinel class) must resolve to timestamp, not string."""
+        try:
+            from pydantic import AwareDatetime
+        except ImportError:
+            pytest.skip('pydantic.AwareDatetime not available')
+
+        class EventModel(BaseModel):
+            ts: AwareDatetime
+
+        schema = exported_runtime.pydantic_to_arrow_schema(EventModel)
+        assert 'timestamp' in str(schema.field('ts').type)
+
+    def test_tuple_homogeneous_maps_to_list(self, exported_runtime):
+        """tuple[T, ...] must map to list<T>, not crash."""
+
+        class TupleModel(BaseModel):
+            coords: tuple[float, ...]
+
+        schema = exported_runtime.pydantic_to_arrow_schema(TupleModel)
+        assert 'list' in str(schema.field('coords').type)
+
+    def test_tuple_heterogeneous_maps_to_string(self, exported_runtime):
+        """tuple[A, B] must fall back to string rather than crashing."""
+
+        class PairModel(BaseModel):
+            pair: tuple[int, str]
+
+        schema = exported_runtime.pydantic_to_arrow_schema(PairModel)
+        assert str(schema.field('pair').type) == 'string'
+
+
+class TestParquetTypeHandlingRegression:
+    """Regression tests for the four type-handling bugs."""
+
+    def test_naive_datetime_writes_without_error(self, exported_runtime, tmp_path):
+        """Naive datetime values must write to Parquet without ArrowInvalid."""
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        path = tmp_path / 'naive_dt.parquet'
+        rows = [User(id=1, name='a', created_at=datetime(2024, 6, 1, 10, 0, 0))]
+        exported_runtime.to_parquet(rows, path, model=User)
+        table = pq.read_table(path)
+        assert table.num_rows == 1
+
+    def test_homogeneous_tuple_round_trips(self, exported_runtime, tmp_path):
+        """tuple[T, ...] fields must write and read back correctly."""
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class CoordModel(BaseModel):
+            pts: tuple[float, ...]
+
+        path = tmp_path / 'tuples.parquet'
+        exported_runtime.to_parquet(
+            [CoordModel(pts=(1.0, 2.0, 3.0))], path, model=CoordModel
+        )
+        table = pq.read_table(path)
+        assert table.num_rows == 1
+
+    def test_multi_union_field_coerced_to_string(self, exported_runtime, tmp_path):
+        """Union[int, str] values must be coerced to string to match the schema."""
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class FlexModel(BaseModel):
+            value: Union[int, str]
+
+        path = tmp_path / 'union.parquet'
+        exported_runtime.to_parquet(
+            [FlexModel(value=42), FlexModel(value='hello')], path, model=FlexModel
+        )
+        table = pq.read_table(path)
+        assert table.num_rows == 2
+        assert str(table.schema.field('value').type) == 'string'
 
 
 class TestCsvWriter:
@@ -405,6 +491,429 @@ class TestAsyncWriters:
         written = asyncio.run(run())
         assert written == 4
         assert pq.read_table(path).num_rows == 4
+
+
+# -----------------------------------------------------------------------------
+# Extended schema-mapping tests
+# -----------------------------------------------------------------------------
+
+
+class IntStatus(int, Enum):
+    ACTIVE = 1
+    INACTIVE = 0
+
+
+class Address(BaseModel):
+    street: str
+    city: str
+
+
+class RichModel(BaseModel):
+    uid: UUID
+    flag: bool
+    score: float
+    amount: Decimal
+    raw: bytes
+    born: date
+    wakeup: time
+    meta: dict[str, str]
+    addr: Address
+    rank: IntStatus
+    labels: set[str]
+    coords: frozenset[float]
+    counts: list[int]
+
+
+class TestPydanticToArrowSchemaExtended:
+    def test_uuid_maps_to_string(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert str(schema.field('uid').type) == 'string'
+
+    def test_bool_maps_to_bool(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert str(schema.field('flag').type) == 'bool'
+
+    def test_decimal_maps_to_decimal128(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert 'decimal' in str(schema.field('amount').type)
+
+    def test_bytes_maps_to_binary(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert str(schema.field('raw').type) == 'binary'
+
+    def test_date_maps_to_date32(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert str(schema.field('born').type) == 'date32[day]'
+
+    def test_time_maps_to_time64(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert 'time64' in str(schema.field('wakeup').type)
+
+    def test_dict_falls_back_to_string(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert str(schema.field('meta').type) == 'string'
+
+    def test_nested_model_maps_to_struct(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert 'struct' in str(schema.field('addr').type)
+
+    def test_int_enum_maps_to_int64(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert str(schema.field('rank').type) == 'int64'
+
+    def test_set_maps_to_list(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert 'list' in str(schema.field('labels').type)
+
+    def test_frozenset_maps_to_list(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        assert 'list' in str(schema.field('coords').type)
+
+    def test_list_int_maps_to_list_int64(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        schema = exported_runtime.pydantic_to_arrow_schema(RichModel)
+        field_str = str(schema.field('counts').type)
+        assert 'list' in field_str and 'int64' in field_str
+
+    def test_annotated_constrained_type_unwrapped(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+        from pydantic import PositiveInt
+
+        class ConstrainedModel(BaseModel):
+            count: PositiveInt
+
+        schema = exported_runtime.pydantic_to_arrow_schema(ConstrainedModel)
+        assert str(schema.field('count').type) == 'int64'
+
+    def test_optional_field_marked_nullable(self, exported_runtime):
+        pytest.importorskip('pyarrow')
+
+        class NullableModel(BaseModel):
+            x: bool | None = None
+
+        schema = exported_runtime.pydantic_to_arrow_schema(NullableModel)
+        assert schema.field('x').nullable is True
+        assert str(schema.field('x').type) == 'bool'
+
+    def test_bare_unparameterized_list_falls_back_to_string(self, exported_runtime):
+        """Bare ``list`` without type args has no origin, so it falls back to string."""
+        pytest.importorskip('pyarrow')
+
+        class BareModel(BaseModel):
+            items: list
+
+        schema = exported_runtime.pydantic_to_arrow_schema(BareModel)
+        assert str(schema.field('items').type) == 'string'
+
+
+# -----------------------------------------------------------------------------
+# Extended CSV / TSV writer tests
+# -----------------------------------------------------------------------------
+
+
+class TestCsvWriterExtended:
+    def test_no_header(self, exported_runtime, tmp_path):
+        path = tmp_path / 'no_header.csv'
+        exported_runtime.to_csv(_sample_users(2), path, model=User, header=False)
+        lines = path.read_text(encoding='utf-8').splitlines()
+        # First line should be data, not a header
+        assert lines[0].startswith('0,')
+
+    def test_batch_size_one_produces_correct_output(self, exported_runtime, tmp_path):
+        path = tmp_path / 'batched.csv'
+        written = exported_runtime.to_csv(_sample_users(3), path, model=User, batch_size=1)
+        assert written == 3
+        with open(path, newline='', encoding='utf-8') as fh:
+            records = list(csv.DictReader(fh))
+        assert len(records) == 3
+
+    def test_list_field_json_encoded(self, exported_runtime, tmp_path):
+        path = tmp_path / 'lists.csv'
+        exported_runtime.to_csv([User(id=1, name='a', tags=['x', 'y'])], path, model=User)
+        with open(path, newline='', encoding='utf-8') as fh:
+            rows = list(csv.DictReader(fh))
+        assert rows[0]['tags'] == '["x","y"]'
+
+    def test_none_optional_renders_as_empty(self, exported_runtime, tmp_path):
+        path = tmp_path / 'nulls.csv'
+        exported_runtime.to_csv([User(id=1, name='a', email=None)], path, model=User)
+        with open(path, newline='', encoding='utf-8') as fh:
+            rows = list(csv.DictReader(fh))
+        assert rows[0]['email'] == ''
+
+    def test_enum_field_rendered_as_value(self, exported_runtime, tmp_path):
+        path = tmp_path / 'enum.csv'
+        exported_runtime.to_csv(
+            [User(id=1, name='a', status=Status.INACTIVE)], path, model=User
+        )
+        with open(path, newline='', encoding='utf-8') as fh:
+            rows = list(csv.DictReader(fh))
+        assert rows[0]['status'] == 'inactive'
+
+
+# -----------------------------------------------------------------------------
+# Extended JSONL writer tests
+# -----------------------------------------------------------------------------
+
+
+class TestJsonlWriterExtended:
+    def test_dict_rows_accepted(self, exported_runtime, tmp_path):
+        path = tmp_path / 'dicts.jsonl'
+        written = exported_runtime.to_jsonl(
+            [{'id': 1, 'name': 'alice'}, {'id': 2, 'name': 'bob'}],
+            path,
+            model=User,
+        )
+        assert written == 2
+        records = [json.loads(l) for l in path.read_text(encoding='utf-8').splitlines()]
+        assert records[0]['id'] == 1
+        assert records[1]['name'] == 'bob'
+
+    def test_none_optional_serialized_as_null(self, exported_runtime, tmp_path):
+        path = tmp_path / 'nulls.jsonl'
+        exported_runtime.to_jsonl([User(id=1, name='a', email=None)], path, model=User)
+        record = json.loads(path.read_text(encoding='utf-8').strip())
+        assert record['email'] is None
+
+    def test_enum_serialized_as_value(self, exported_runtime, tmp_path):
+        path = tmp_path / 'enum.jsonl'
+        exported_runtime.to_jsonl(
+            [User(id=1, name='a', status=Status.INACTIVE)], path, model=User
+        )
+        record = json.loads(path.read_text(encoding='utf-8').strip())
+        assert record['status'] == 'inactive'
+
+    def test_batch_size_one(self, exported_runtime, tmp_path):
+        path = tmp_path / 'batched.jsonl'
+        written = exported_runtime.to_jsonl(_sample_users(4), path, model=User, batch_size=1)
+        assert written == 4
+        assert len(path.read_text(encoding='utf-8').splitlines()) == 4
+
+
+# -----------------------------------------------------------------------------
+# Extended Parquet writer tests
+# -----------------------------------------------------------------------------
+
+
+class TestParquetWriterExtended:
+    def test_uuid_field_written_as_string(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class UUIDModel(BaseModel):
+            id: UUID
+            name: str
+
+        path = tmp_path / 'uuids.parquet'
+        u = UUID('12345678-1234-5678-1234-567812345678')
+        exported_runtime.to_parquet([UUIDModel(id=u, name='test')], path, model=UUIDModel)
+        table = pq.read_table(path)
+        assert str(table.schema.field('id').type) == 'string'
+        assert table.column('id')[0].as_py() == str(u)
+
+    def test_decimal_field_preserved(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class DecimalModel(BaseModel):
+            price: Decimal
+
+        path = tmp_path / 'decimals.parquet'
+        exported_runtime.to_parquet(
+            [DecimalModel(price=Decimal('19.99'))], path, model=DecimalModel
+        )
+        table = pq.read_table(path)
+        assert 'decimal' in str(table.schema.field('price').type)
+
+    def test_int_enum_written_as_integer(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class EnumModel(BaseModel):
+            rank: IntStatus
+
+        path = tmp_path / 'int_enum.parquet'
+        exported_runtime.to_parquet(
+            [EnumModel(rank=IntStatus.ACTIVE)], path, model=EnumModel
+        )
+        table = pq.read_table(path)
+        assert str(table.schema.field('rank').type) == 'int64'
+        assert table.column('rank')[0].as_py() == 1
+
+    def test_str_enum_written_as_string(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class StatusModel(BaseModel):
+            status: Status
+
+        path = tmp_path / 'str_enum.parquet'
+        exported_runtime.to_parquet(
+            [StatusModel(status=Status.INACTIVE)], path, model=StatusModel
+        )
+        table = pq.read_table(path)
+        assert str(table.schema.field('status').type) == 'string'
+        assert table.column('status')[0].as_py() == 'inactive'
+
+    def test_nested_model_written_as_struct(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class Outer(BaseModel):
+            name: str
+            addr: Address
+
+        path = tmp_path / 'nested.parquet'
+        exported_runtime.to_parquet(
+            [Outer(name='alice', addr=Address(street='1 Main St', city='Springfield'))],
+            path,
+            model=Outer,
+        )
+        table = pq.read_table(path)
+        assert 'struct' in str(table.schema.field('addr').type)
+
+    def test_dict_rows_accepted(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        path = tmp_path / 'from_dicts.parquet'
+        written = exported_runtime.to_parquet(
+            [{'id': 1, 'name': 'a'}, {'id': 2, 'name': 'b'}],
+            path,
+            model=User,
+        )
+        assert written == 2
+        assert pq.read_table(path).num_rows == 2
+
+    def test_no_compression(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        path = tmp_path / 'uncompressed.parquet'
+        exported_runtime.to_parquet(_sample_users(2), path, model=User, compression=None)
+        assert pq.read_table(path).num_rows == 2
+
+    def test_bool_field_round_trip(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class BoolModel(BaseModel):
+            active: bool
+
+        path = tmp_path / 'bools.parquet'
+        exported_runtime.to_parquet(
+            [BoolModel(active=True), BoolModel(active=False)], path, model=BoolModel
+        )
+        table = pq.read_table(path)
+        assert str(table.schema.field('active').type) == 'bool'
+        assert table.column('active')[0].as_py() is True
+        assert table.column('active')[1].as_py() is False
+
+    def test_date_field_round_trip(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        class DateModel(BaseModel):
+            born: date
+
+        path = tmp_path / 'dates.parquet'
+        exported_runtime.to_parquet(
+            [DateModel(born=date(1990, 6, 15))], path, model=DateModel
+        )
+        table = pq.read_table(path)
+        assert str(table.schema.field('born').type) == 'date32[day]'
+
+
+# -----------------------------------------------------------------------------
+# Extended dispatch tests (sync + async)
+# -----------------------------------------------------------------------------
+
+
+class TestExportDispatchExtended:
+    def test_dispatch_parquet(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        path = tmp_path / 'users.parquet'
+        written = exported_runtime.export(
+            _sample_users(3), path, model=User, format='parquet'
+        )
+        assert written == 3
+        assert pq.read_table(path).num_rows == 3
+
+    def test_export_async_csv(self, exported_runtime, tmp_path):
+        path = tmp_path / 'async_dispatch.csv'
+
+        async def _aiter(items):
+            for it in items:
+                yield it
+
+        async def run():
+            return await exported_runtime.export_async(
+                _aiter(_sample_users(2)), path, model=User, format='csv'
+            )
+
+        written = asyncio.run(run())
+        assert written == 2
+        assert 'user-0' in path.read_text(encoding='utf-8')
+
+    def test_export_async_jsonl(self, exported_runtime, tmp_path):
+        path = tmp_path / 'async_dispatch.jsonl'
+
+        async def _aiter(items):
+            for it in items:
+                yield it
+
+        async def run():
+            return await exported_runtime.export_async(
+                _aiter(_sample_users(2)), path, model=User, format='jsonl'
+            )
+
+        asyncio.run(run())
+        assert len(path.read_text(encoding='utf-8').splitlines()) == 2
+
+    def test_export_async_parquet(self, exported_runtime, tmp_path):
+        pytest.importorskip('pyarrow')
+        pq = pytest.importorskip('pyarrow.parquet')
+
+        path = tmp_path / 'async_dispatch.parquet'
+
+        async def _aiter(items):
+            for it in items:
+                yield it
+
+        async def run():
+            return await exported_runtime.export_async(
+                _aiter(_sample_users(3)), path, model=User, format='parquet'
+            )
+
+        written = asyncio.run(run())
+        assert written == 3
+        assert pq.read_table(path).num_rows == 3
+
+    def test_export_async_rejects_unknown_format(self, exported_runtime, tmp_path):
+        async def _aiter(items):
+            for it in items:
+                yield it
+
+        async def run():
+            await exported_runtime.export_async(
+                _aiter([]), tmp_path / 'x', model=User, format='excel'
+            )
+
+        with pytest.raises(ValueError, match='Unsupported export format'):
+            asyncio.run(run())
 
 
 # -----------------------------------------------------------------------------

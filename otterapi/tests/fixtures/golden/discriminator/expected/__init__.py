@@ -19,6 +19,9 @@ __all__ = (
     'UnprocessableEntityError',
     'async_list_animals',
     'list_animals',
+    'run_concurrently',
+    'run_concurrently_async',
+    'run_sync',
 )
 from .endpoints import async_list_animals, list_animals
 from .client import Client
@@ -39,4 +42,5 @@ from ._client import (
     ServiceUnavailableError,
     GatewayTimeoutError,
 )
+from ._concurrency import run_concurrently, run_concurrently_async, run_sync
 from .models import Cat, Dog

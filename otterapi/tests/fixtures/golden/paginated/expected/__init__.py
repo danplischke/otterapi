@@ -32,6 +32,9 @@ __all__ = (
     'paginate_offset_async',
     'paginate_page',
     'paginate_page_async',
+    'run_concurrently',
+    'run_concurrently_async',
+    'run_sync',
 )
 from .endpoints import (
     async_list_items,
@@ -71,4 +74,5 @@ from ._pagination import (
     iterate_page,
     iterate_page_async,
 )
+from ._concurrency import run_concurrently, run_concurrently_async, run_sync
 from .models import Item

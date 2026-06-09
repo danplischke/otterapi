@@ -18,6 +18,9 @@ __all__ = (
     'User',
     'async_list_users',
     'list_users',
+    'run_concurrently',
+    'run_concurrently_async',
+    'run_sync',
 )
 from .endpoints import async_list_users, list_users
 from .client import Client
@@ -38,4 +41,5 @@ from ._client import (
     ServiceUnavailableError,
     GatewayTimeoutError,
 )
+from ._concurrency import run_concurrently, run_concurrently_async, run_sync
 from .models import User

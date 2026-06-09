@@ -19,6 +19,44 @@ from otterapi.codegen.ast_utils import (
     _name,
     _union_expr,
 )
+
+_HTML_REPR_SOURCE = '''\
+def _html_val(v):
+    if v is None:
+        return \'<em style="color:#aaa">None</em>\'
+    if isinstance(v, list):
+        n = len(v)
+        preview = ", ".join(str(x) for x in v[:3])
+        suffix = f", … ({n})" if n > 3 else ""
+        return f"[{preview}{suffix}]"
+    if hasattr(v, "_repr_html_"):
+        return v._repr_html_()
+    return str(v)
+
+
+class _HtmlReprMixin:
+    """Mixin that renders a Pydantic model as an HTML table in Jupyter notebooks."""
+
+    def _repr_html_(self) -> str:
+        fields = getattr(self.__class__, "model_fields", {})
+        rows = []
+        for i, name in enumerate(fields):
+            val = getattr(self, name, None)
+            bg = \' style="background:#f8f8f8"\' if i % 2 == 0 else ""
+            rows.append(
+                f\'<tr{bg}><td style="font-weight:bold;padding:2px 8px;\'
+                f\'white-space:nowrap;color:#444">{name}</td>\'
+                f\'<td style="padding:2px 8px">{_html_val(val)}</td></tr>\'
+            )
+        class_name = type(self).__name__
+        inner = "".join(rows)
+        return (
+            f\'<details open><summary style="font-weight:bold;cursor:pointer;\'
+            f\'font-family:monospace">{class_name}</summary>\'
+            f\'<table style="border-collapse:collapse;font-size:13px;\'
+            f\'font-family:monospace">{inner}</table></details>\'
+        )
+'''
 from otterapi.codegen.client import (
     EndpointInfo,
     _exported_error_names,
@@ -1303,13 +1341,28 @@ class Codegen(OpenAPIProcessor):
 
         for type_name, type_ in self.typegen.types.items():
             if type_.implementation_ast:
-                body.append(type_.implementation_ast)
+                impl = type_.implementation_ast
+                # Inject _HtmlReprMixin as the first base of every model class so
+                # it renders as an HTML table in Jupyter without touching the
+                # per-model implementation_ast (which is exec'd in unit tests).
+                if isinstance(impl, ast.ClassDef):
+                    impl = ast.ClassDef(
+                        name=impl.name,
+                        bases=[ast.Name(id='_HtmlReprMixin', ctx=ast.Load()), *impl.bases],
+                        keywords=impl.keywords,
+                        body=impl.body,
+                        decorator_list=impl.decorator_list,
+                    )
+                body.append(impl)
                 if type_.name:
                     all_names.add(type_.name)
 
                 # Collect imports from implementation and annotations
                 import_collector.add_imports(type_.implementation_imports)
                 import_collector.add_imports(type_.annotation_imports)
+
+        # Prepend the _HtmlReprMixin helper (defines _repr_html_ for Jupyter)
+        body[0:0] = ast.parse(_HTML_REPR_SOURCE).body
 
         # Add __all__ export
         body.insert(0, _all(sorted(all_names)))
@@ -1354,11 +1407,13 @@ class Codegen(OpenAPIProcessor):
         # DataFrame module's emission stays gated by the per-endpoint pass
         # below (only written when at least one endpoint actually uses it).
         from otterapi.codegen._features import (
+            ConcurrencyFeature,
             ExportFeature,
             PaginationFeature,
+            RetryFeature,
         )
 
-        for feature in (PaginationFeature(), ExportFeature()):
+        for feature in (PaginationFeature(), ExportFeature(), ConcurrencyFeature(), RetryFeature()):
             if feature.is_enabled(self.config):
                 feature.write(directory)
                 generated_files.append(f'{output_name}/{feature.module_filename}')
@@ -1570,6 +1625,16 @@ class Codegen(OpenAPIProcessor):
                     )
                 )
                 all_names.extend(df_exports)
+
+        concurrency_exports = ['run_concurrently', 'run_concurrently_async', 'run_sync']
+        body.append(
+            ast.ImportFrom(
+                module='_concurrency',
+                names=[ast.alias(name=n, asname=None) for n in concurrency_exports],
+                level=1,
+            )
+        )
+        all_names.extend(concurrency_exports)
 
         # Also get all model names from typegen
         all_model_names = {

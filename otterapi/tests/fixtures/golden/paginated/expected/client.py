@@ -14,20 +14,36 @@ class PaginatedAPIClient(BasePaginatedAPIClient):
     This class inherits from the generated BasePaginatedAPIClient and can be
     customized without being overwritten on code regeneration.
 
-    Example:
-        >>> client = PaginatedAPIClient()
-        >>> # Use default base URL from OpenAPI spec
+    The client holds a persistent connection pool and retries transient errors
+    (429/5xx) automatically.  Use it as a context manager so the pool is
+    released cleanly::
+
+        with PaginatedAPIClient() as client:
+            data = list_genes(client=client)
+
+    Async context manager::
+
+        async with PaginatedAPIClient() as client:
+            data = await async_list_genes(client=client)
+
+    Calling async endpoints from a Jupyter notebook or plain script::
+
+        from ._client import run_sync
+        gene = run_sync(async_get_gene(symbol="BRCA1"))
+
+    Fan-out over many targets in parallel::
+
+        from ._client import run_concurrently
+        genes = run_concurrently(
+            [async_get_gene(symbol=g) for g in gene_list],
+            concurrency=10,
+        )
+
+    Other examples::
 
         >>> client = PaginatedAPIClient(base_url="https://staging.api.example.com")
-        >>> # Override base URL
-
-        >>> client = PaginatedAPIClient(timeout=60.0, headers={"Authorization": "Bearer token"})
-        >>> # Custom timeout and headers
-
-        >>> import httpx
-        >>> with httpx.Client() as http_client:
-        ...     client = PaginatedAPIClient(http_client=http_client)
-        ...     # Use custom HTTP client (useful for testing/mocking)
+        >>> client = PaginatedAPIClient(max_retries=0)  # disable retry
+        >>> client = PaginatedAPIClient(timeout=60.0, headers={"X-Request-ID": "abc"})
     """
 
     pass

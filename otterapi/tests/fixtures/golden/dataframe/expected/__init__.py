@@ -22,6 +22,9 @@ __all__ = (
     'list_rows',
     'list_rows_df',
     'list_rows_pl',
+    'run_concurrently',
+    'run_concurrently_async',
+    'run_sync',
     'to_pandas',
     'to_polars',
 )
@@ -52,4 +55,5 @@ from ._client import (
     GatewayTimeoutError,
 )
 from ._dataframe import to_pandas, to_polars
+from ._concurrency import run_concurrently, run_concurrently_async, run_sync
 from .models import Row
