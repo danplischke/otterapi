@@ -631,7 +631,9 @@ class TestCsvWriterExtended:
 
     def test_batch_size_one_produces_correct_output(self, exported_runtime, tmp_path):
         path = tmp_path / 'batched.csv'
-        written = exported_runtime.to_csv(_sample_users(3), path, model=User, batch_size=1)
+        written = exported_runtime.to_csv(
+            _sample_users(3), path, model=User, batch_size=1
+        )
         assert written == 3
         with open(path, newline='', encoding='utf-8') as fh:
             records = list(csv.DictReader(fh))
@@ -639,7 +641,9 @@ class TestCsvWriterExtended:
 
     def test_list_field_json_encoded(self, exported_runtime, tmp_path):
         path = tmp_path / 'lists.csv'
-        exported_runtime.to_csv([User(id=1, name='a', tags=['x', 'y'])], path, model=User)
+        exported_runtime.to_csv(
+            [User(id=1, name='a', tags=['x', 'y'])], path, model=User
+        )
         with open(path, newline='', encoding='utf-8') as fh:
             rows = list(csv.DictReader(fh))
         assert rows[0]['tags'] == '["x","y"]'
@@ -675,7 +679,9 @@ class TestJsonlWriterExtended:
             model=User,
         )
         assert written == 2
-        records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+        records = [
+            json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()
+        ]
         assert records[0]['id'] == 1
         assert records[1]['name'] == 'bob'
 
@@ -695,7 +701,9 @@ class TestJsonlWriterExtended:
 
     def test_batch_size_one(self, exported_runtime, tmp_path):
         path = tmp_path / 'batched.jsonl'
-        written = exported_runtime.to_jsonl(_sample_users(4), path, model=User, batch_size=1)
+        written = exported_runtime.to_jsonl(
+            _sample_users(4), path, model=User, batch_size=1
+        )
         assert written == 4
         assert len(path.read_text(encoding='utf-8').splitlines()) == 4
 
@@ -716,7 +724,9 @@ class TestParquetWriterExtended:
 
         path = tmp_path / 'uuids.parquet'
         u = UUID('12345678-1234-5678-1234-567812345678')
-        exported_runtime.to_parquet([UUIDModel(id=u, name='test')], path, model=UUIDModel)
+        exported_runtime.to_parquet(
+            [UUIDModel(id=u, name='test')], path, model=UUIDModel
+        )
         table = pq.read_table(path)
         assert str(table.schema.field('id').type) == 'string'
         assert table.column('id')[0].as_py() == str(u)
@@ -800,7 +810,9 @@ class TestParquetWriterExtended:
         pq = pytest.importorskip('pyarrow.parquet')
 
         path = tmp_path / 'uncompressed.parquet'
-        exported_runtime.to_parquet(_sample_users(2), path, model=User, compression=None)
+        exported_runtime.to_parquet(
+            _sample_users(2), path, model=User, compression=None
+        )
         assert pq.read_table(path).num_rows == 2
 
     def test_bool_field_round_trip(self, exported_runtime, tmp_path):

@@ -132,7 +132,9 @@ class TestRetryBehavior:
             return httpx.Response(404, json={'detail': 'nope'})
 
         with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-            client = Client(http_client=http, max_retries=2, retry_statuses=frozenset({404}))
+            client = Client(
+                http_client=http, max_retries=2, retry_statuses=frozenset({404})
+            )
             with patch.object(retry_pkg._client, '_backoff_sleep'):
                 with pytest.raises(Exception):
                     retry_pkg.list_users(client=client)

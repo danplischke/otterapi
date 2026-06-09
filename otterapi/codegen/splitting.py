@@ -345,6 +345,7 @@ class ModuleMapResolver:
     def __init__(self, config: ModuleSplitConfig):
         """Initialize the resolver with configuration."""
         self.config = config
+
     def resolve(
         self,
         path: str,
@@ -1551,4 +1552,3 @@ class SplitModuleEmitter:
             for type_ in self._typegen_types.values()
             if type_.name and type_.implementation_ast
         ]
-

@@ -256,4 +256,3 @@ class ImportCollector:
     def clear(self) -> None:
         """Clear all collected imports."""
         self._imports.clear()
-

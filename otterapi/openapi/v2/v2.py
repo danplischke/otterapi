@@ -710,24 +710,32 @@ class Swagger(BaseModelWithVendorExtensions):
         # Convert paths - returns dict for Paths RootModel
         paths_dict = self._convert_paths(warning_collector)
 
-        tags = [
-            openapi_v3.Tag(
-                name=tag.name,
-                description=tag.description,
-                externalDocs=openapi_v3.ExternalDocumentation(
-                    url=str(tag.external_docs.url),
-                    description=tag.external_docs.description,
+        tags = (
+            [
+                openapi_v3.Tag(
+                    name=tag.name,
+                    description=tag.description,
+                    externalDocs=openapi_v3.ExternalDocumentation(
+                        url=str(tag.external_docs.url),
+                        description=tag.external_docs.description,
+                    )
+                    if tag.external_docs
+                    else None,
                 )
-                if tag.external_docs
-                else None,
-            )
-            for tag in self.tags
-        ] if self.tags else None
+                for tag in self.tags
+            ]
+            if self.tags
+            else None
+        )
 
-        external_docs = openapi_v3.ExternalDocumentation(
-            url=str(self.external_docs.url),
-            description=self.external_docs.description,
-        ) if self.external_docs else None
+        external_docs = (
+            openapi_v3.ExternalDocumentation(
+                url=str(self.external_docs.url),
+                description=self.external_docs.description,
+            )
+            if self.external_docs
+            else None
+        )
 
         result = OpenAPI(
             openapi='3.0.3',
@@ -1078,9 +1086,7 @@ class Swagger(BaseModelWithVendorExtensions):
         """Convert formData parameters to requestBody."""
         # Determine media type
         has_file = any(p.type == PrimitiveType.FILE for p in params)
-        form_media_type = (
-            MediaType.MULTIPART if has_file else MediaType.FORM_URLENCODED
-        )
+        form_media_type = MediaType.MULTIPART if has_file else MediaType.FORM_URLENCODED
 
         # Check if consumes specifies something different
         if consumes and form_media_type not in consumes:
@@ -1103,11 +1109,11 @@ class Swagger(BaseModelWithVendorExtensions):
             required=required if required else None,
         )
 
-        content = {
-            form_media_type: openapi_v3.MediaType(schema_=form_schema)
-        }
+        content = {form_media_type: openapi_v3.MediaType(schema_=form_schema)}
 
-        description = params[0].description if params and params[0].description else None
+        description = (
+            params[0].description if params and params[0].description else None
+        )
 
         return openapi_v3.RequestBody(
             content=content,
@@ -1252,7 +1258,9 @@ class Swagger(BaseModelWithVendorExtensions):
             if status_code.startswith('x-'):
                 result[status_code] = response
             elif isinstance(response, JsonReference):
-                result[status_code] = openapi_v3.Reference(root={'$ref': self._update_ref(response.ref)})
+                result[status_code] = openapi_v3.Reference(
+                    root={'$ref': self._update_ref(response.ref)}
+                )
             elif isinstance(response, Response):
                 result[status_code] = self._convert_response_to_dict(
                     response, produces, warnings
@@ -1272,7 +1280,10 @@ class Swagger(BaseModelWithVendorExtensions):
             if not response_obj.content:
                 continue
             for media_type_obj in response_obj.content.values():
-                if isinstance(media_type_obj, openapi_v3.MediaType) and media_type_obj.schema_:
+                if (
+                    isinstance(media_type_obj, openapi_v3.MediaType)
+                    and media_type_obj.schema_
+                ):
                     return True
         return False
 
@@ -1344,7 +1355,9 @@ class Swagger(BaseModelWithVendorExtensions):
         schema = openapi_v3.Schema(
             type=openapi_v3.Type(header.type.value),
             format=header.format if header.format else None,
-            items=self._convert_primitives_items(header.items) if header.items else None,
+            items=self._convert_primitives_items(header.items)
+            if header.items
+            else None,
             default=header.default,
             maximum=header.maximum,
             minimum=header.minimum,
@@ -1421,9 +1434,7 @@ class Swagger(BaseModelWithVendorExtensions):
         # Discriminator: convert from string to Discriminator object
         discriminator = None
         if schema.discriminator:
-            discriminator = openapi_v3.Discriminator(
-                propertyName=schema.discriminator
-            )
+            discriminator = openapi_v3.Discriminator(propertyName=schema.discriminator)
 
         # XML
         xml = self._build_schema_xml_dict(schema.xml) if schema.xml else None
@@ -1512,9 +1523,7 @@ class Swagger(BaseModelWithVendorExtensions):
             for media_type in produces:
                 # Build media type with schema and possibly an example
                 example_val = (
-                    response.examples.get(media_type)
-                    if response.examples
-                    else None
+                    response.examples.get(media_type) if response.examples else None
                 )
                 content[media_type] = openapi_v3.MediaType(
                     schema_=schema_obj,
@@ -1539,11 +1548,13 @@ class Swagger(BaseModelWithVendorExtensions):
     def _build_basic_auth_scheme_dict(
         scheme: BasicAuthenticationSecurity,
     ) -> openapi_v3.SecurityScheme:
-        return openapi_v3.SecurityScheme(root=openapi_v3.HTTPSecurityScheme(
-            type=openapi_v3.SecuritySchemeType.http,
-            scheme='basic',
-            description=scheme.description if scheme.description else None,
-        ))
+        return openapi_v3.SecurityScheme(
+            root=openapi_v3.HTTPSecurityScheme(
+                type=openapi_v3.SecuritySchemeType.http,
+                scheme='basic',
+                description=scheme.description if scheme.description else None,
+            )
+        )
 
     @staticmethod
     def _build_api_key_scheme_dict(scheme: ApiKeySecurity) -> openapi_v3.SecurityScheme:
@@ -1634,7 +1645,10 @@ class Swagger(BaseModelWithVendorExtensions):
         """Apply vendor-extension/warning steps shared by every scheme."""
         # Apply vendor extensions to the inner scheme object if it supports extras
         inner = obj.root
-        if hasattr(inner, '__pydantic_extra__') and inner.__pydantic_extra__ is not None:
+        if (
+            hasattr(inner, '__pydantic_extra__')
+            and inner.__pydantic_extra__ is not None
+        ):
             inner.__pydantic_extra__.update(self._extract_vendor_extensions(scheme))
         if warning_key:
             warnings.add(warning_key)

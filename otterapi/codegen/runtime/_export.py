@@ -118,9 +118,7 @@ def _chunks(iterable: Iterable[Row], size: int) -> Iterator[list[Row]]:
         yield batch
 
 
-async def _achunks(
-    iterable: AsyncIterable[Row], size: int
-) -> AsyncIterable[list[Row]]:
+async def _achunks(iterable: AsyncIterable[Row], size: int) -> AsyncIterable[list[Row]]:
     batch: list[Row] = []
     async for item in iterable:
         batch.append(item)

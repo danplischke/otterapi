@@ -142,4 +142,10 @@ class RetryFeature(FeatureModule):
 
 def all_features() -> list[FeatureModule]:
     """Canonical ordered list of every runtime-helper feature."""
-    return [PaginationFeature(), DataFrameFeature(), ExportFeature(), ConcurrencyFeature(), RetryFeature()]
+    return [
+        PaginationFeature(),
+        DataFrameFeature(),
+        ExportFeature(),
+        ConcurrencyFeature(),
+        RetryFeature(),
+    ]

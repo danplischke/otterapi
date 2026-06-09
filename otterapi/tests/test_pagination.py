@@ -438,7 +438,12 @@ class TestPaginationModuleGeneration:
 
     def test_pagination_module_content_is_valid_python(self):
         from importlib.resources import files
-        source = files('otterapi.codegen.runtime').joinpath('_pagination.py').read_text('utf-8')
+
+        source = (
+            files('otterapi.codegen.runtime')
+            .joinpath('_pagination.py')
+            .read_text('utf-8')
+        )
         ast.parse(source)
 
 

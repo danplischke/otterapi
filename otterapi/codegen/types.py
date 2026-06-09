@@ -47,7 +47,7 @@ _PRIMITIVE_TYPE_MAP = {
     ('string', 'time'): time,
     ('string', 'duration'): timedelta,
     ('string', 'uuid'): UUID,
-    ('string', 'byte'): bytes,    # base64-encoded
+    ('string', 'byte'): bytes,  # base64-encoded
     ('string', 'binary'): bytes,  # raw binary
     # unknown/semantic string formats that are still strings at runtime
     ('string', 'email'): str,
@@ -236,7 +236,6 @@ class ResponseInfo:
     def is_text(self) -> bool:
         """Check if this is a plain text response."""
         return self.content_type.startswith('text/') and not self.is_json
-
 
 
 @dataclasses.dataclass

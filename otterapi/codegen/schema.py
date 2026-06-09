@@ -525,4 +525,3 @@ class SchemaResolver:
         from otterapi.codegen.utils import sanitize_identifier
 
         return sanitize_identifier(name)
-

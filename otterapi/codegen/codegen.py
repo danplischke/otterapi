@@ -1347,7 +1347,10 @@ class Codegen(OpenAPIProcessor):
                 if isinstance(impl, ast.ClassDef):
                     impl = ast.ClassDef(
                         name=impl.name,
-                        bases=[ast.Name(id='_HtmlReprMixin', ctx=ast.Load()), *impl.bases],
+                        bases=[
+                            ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
+                            *impl.bases,
+                        ],
                         keywords=impl.keywords,
                         body=impl.body,
                         decorator_list=impl.decorator_list,
@@ -1412,7 +1415,12 @@ class Codegen(OpenAPIProcessor):
             RetryFeature,
         )
 
-        for feature in (PaginationFeature(), ExportFeature(), ConcurrencyFeature(), RetryFeature()):
+        for feature in (
+            PaginationFeature(),
+            ExportFeature(),
+            ConcurrencyFeature(),
+            RetryFeature(),
+        ):
             if feature.is_enabled(self.config):
                 feature.write(directory)
                 generated_files.append(f'{output_name}/{feature.module_filename}')

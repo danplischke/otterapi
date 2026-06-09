@@ -159,7 +159,6 @@ class FunctionSignature:
     imports: ImportDict = field(default_factory=dict)
 
 
-
 class FunctionSignatureBuilder:
     """Builder for function signatures from endpoint parameters.
 
@@ -1616,9 +1615,7 @@ def _build_response_validation_body() -> list[ast.stmt]:
                                 op=ast.Or(),
                                 values=[
                                     ast.Compare(
-                                        left=ast.Constant(
-                                            value=MediaType.OCTET_STREAM
-                                        ),
+                                        left=ast.Constant(value=MediaType.OCTET_STREAM),
                                         ops=[ast.In()],
                                         comparators=[_name('content_type')],
                                     ),

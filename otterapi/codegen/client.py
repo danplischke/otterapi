@@ -781,7 +781,9 @@ def _build_init_method(
         # self.headers = headers or {}
         _assign(
             _attr('self', 'headers'),
-            ast.BoolOp(op=ast.Or(), values=[_name('headers'), ast.Dict(keys=[], values=[])]),
+            ast.BoolOp(
+                op=ast.Or(), values=[_name('headers'), ast.Dict(keys=[], values=[])]
+            ),
         ),
         # self.max_retries = max_retries
         _assign(_attr('self', 'max_retries'), _name('max_retries')),
@@ -801,7 +803,9 @@ def _build_init_method(
         # self._sync_client = http_client or Client()
         _assign(
             _attr('self', '_sync_client'),
-            ast.BoolOp(op=ast.Or(), values=[_name('http_client'), _call(_name('Client'))]),
+            ast.BoolOp(
+                op=ast.Or(), values=[_name('http_client'), _call(_name('Client'))]
+            ),
         ),
         # self._async_client = async_http_client
         _assign(_attr('self', '_async_client'), _name('async_http_client')),
@@ -817,10 +821,14 @@ def _build_init_method(
                 _argument('timeout', _name('float')),
                 _argument(
                     'headers',
-                    _union_expr([
-                        _subscript('dict', ast.Tuple(elts=[_name('str'), _name('str')])),
-                        ast.Constant(value=None),
-                    ]),
+                    _union_expr(
+                        [
+                            _subscript(
+                                'dict', ast.Tuple(elts=[_name('str'), _name('str')])
+                            ),
+                            ast.Constant(value=None),
+                        ]
+                    ),
                 ),
                 _argument(
                     'http_client',
@@ -860,7 +868,9 @@ def _build_init_method(
 def _build_lifecycle_methods() -> list[ast.stmt]:
     """Build close/aclose/__enter__/__exit__/__aenter__/__aexit__ methods."""
 
-    def _simple_method(name: str, body: list[ast.stmt], is_async: bool = False) -> ast.stmt:
+    def _simple_method(
+        name: str, body: list[ast.stmt], is_async: bool = False
+    ) -> ast.stmt:
         cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
         return cls(
             name=name,
@@ -877,7 +887,12 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
             returns=ast.Constant(value=None),
         )
 
-    def _ctx_method(name: str, body: list[ast.stmt], extra_args: list | None = None, is_async: bool = False) -> ast.stmt:
+    def _ctx_method(
+        name: str,
+        body: list[ast.stmt],
+        extra_args: list | None = None,
+        is_async: bool = False,
+    ) -> ast.stmt:
         cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
         args_list = [_argument('self')] + (extra_args or [])
         return cls(
@@ -919,7 +934,9 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
                 ),
                 body=[
                     ast.Expr(
-                        ast.Await(_call(_attr(_attr('self', '_async_client'), 'aclose')))
+                        ast.Await(
+                            _call(_attr(_attr('self', '_async_client'), 'aclose'))
+                        )
                     )
                 ],
                 orelse=[],
@@ -936,22 +953,39 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
     exit_method = _ctx_method(
         '__exit__',
         [ast.Expr(_call(_attr('self', 'close')))],
-        extra_args=[_argument('exc_type', _name('Any')), _argument('exc_val', _name('Any')), _argument('exc_tb', _name('Any'))],
+        extra_args=[
+            _argument('exc_type', _name('Any')),
+            _argument('exc_val', _name('Any')),
+            _argument('exc_tb', _name('Any')),
+        ],
     )
 
     # __aenter__(self): return self  (no return annotation — inferred from body)
-    aenter_method = _ctx_method('__aenter__', [ast.Return(_name('self'))], is_async=True)
+    aenter_method = _ctx_method(
+        '__aenter__', [ast.Return(_name('self'))], is_async=True
+    )
     aenter_method.returns = None  # type: ignore[assignment]
 
     # __aexit__(self, *args): await self.aclose()
     aexit_method = _ctx_method(
         '__aexit__',
         [ast.Expr(ast.Await(_call(_attr('self', 'aclose'))))],
-        extra_args=[_argument('exc_type', _name('Any')), _argument('exc_val', _name('Any')), _argument('exc_tb', _name('Any'))],
+        extra_args=[
+            _argument('exc_type', _name('Any')),
+            _argument('exc_val', _name('Any')),
+            _argument('exc_tb', _name('Any')),
+        ],
         is_async=True,
     )
 
-    return [close_method, aclose_method, enter_method, exit_method, aenter_method, aexit_method]
+    return [
+        close_method,
+        aclose_method,
+        enter_method,
+        exit_method,
+        aenter_method,
+        aexit_method,
+    ]
 
 
 def _build_validate_response_method() -> ast.FunctionDef:
@@ -1390,7 +1424,11 @@ def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandl
     """Build: except TransportError: retry or re-raise."""
     backoff_call = _call(
         _name(backoff_fn),
-        args=[_name('attempt'), _attr('self', 'backoff_factor'), ast.Constant(value=None)],
+        args=[
+            _name('attempt'),
+            _attr('self', 'backoff_factor'),
+            ast.Constant(value=None),
+        ],
     )
     if is_async:
         backoff_stmt = ast.Expr(ast.Await(backoff_call))
@@ -1418,7 +1456,9 @@ def _build_sync_request_body(
     url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
 ) -> list[ast.stmt]:
     """Build the body for sync _request method with retry loop."""
-    filtered_params_stmt = _assign(_name('filtered_params'), _build_filtered_params_expr())
+    filtered_params_stmt = _assign(
+        _name('filtered_params'), _build_filtered_params_expr()
+    )
 
     request_stmt = _assign(
         _name('response'),
@@ -1439,7 +1479,13 @@ def _build_sync_request_body(
         target=ast.Name(id='attempt', ctx=ast.Store()),
         iter=_call(
             _name('range'),
-            [ast.BinOp(left=_attr('self', 'max_retries'), op=ast.Add(), right=ast.Constant(value=1))],
+            [
+                ast.BinOp(
+                    left=_attr('self', 'max_retries'),
+                    op=ast.Add(),
+                    right=ast.Constant(value=1),
+                )
+            ],
         ),
         body=[
             ast.Try(
@@ -1464,7 +1510,9 @@ def _build_async_request_body(
     tests), otherwise creates a per-call AsyncClient to avoid event-loop binding
     issues when coroutines are dispatched to a thread via run_sync / run_concurrently.
     """
-    filtered_params_stmt = _assign(_name('filtered_params'), _build_filtered_params_expr())
+    filtered_params_stmt = _assign(
+        _name('filtered_params'), _build_filtered_params_expr()
+    )
 
     def _request_call(client_expr: ast.expr) -> ast.stmt:
         return _assign(
@@ -1513,12 +1561,20 @@ def _build_async_request_body(
         target=ast.Name(id='attempt', ctx=ast.Store()),
         iter=_call(
             _name('range'),
-            [ast.BinOp(left=_attr('self', 'max_retries'), op=ast.Add(), right=ast.Constant(value=1))],
+            [
+                ast.BinOp(
+                    left=_attr('self', 'max_retries'),
+                    op=ast.Add(),
+                    right=ast.Constant(value=1),
+                )
+            ],
         ),
         body=[
             ast.Try(
                 body=try_body,
-                handlers=[_build_transport_handler('_backoff_sleep_async', is_async=True)],
+                handlers=[
+                    _build_transport_handler('_backoff_sleep_async', is_async=True)
+                ],
                 orelse=[],
                 finalbody=[],
             )
@@ -1551,8 +1607,7 @@ def generate_client_stub(
     all_names = sorted([class_name, 'Client', 'APIError', 'Error'])
     all_repr = '[' + ', '.join(f'"{n}"' for n in all_names) + ']'
     return (
-        template
-        .replace('__CLASS_NAME__', class_name)
+        template.replace('__CLASS_NAME__', class_name)
         .replace('__BASE_CLASS_NAME__', base_class_name)
         .replace('__MODULE_NAME__', module_name)
         .replace('__ALL__', all_repr)

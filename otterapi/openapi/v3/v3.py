@@ -986,12 +986,14 @@ class OpenAPI(BaseModel):
     def _build_http_security_scheme_3_1(
         sec_scheme: HTTPSecurityScheme,
     ) -> openapi_v3_1.SecurityScheme:
-        return openapi_v3_1.SecurityScheme(root=openapi_v3_1.HTTPSecurityScheme(
-            type=openapi_v3_1.SecuritySchemeType.http,
-            scheme=sec_scheme.scheme,
-            bearerFormat=sec_scheme.bearerFormat,
-            description=sec_scheme.description,
-        ))
+        return openapi_v3_1.SecurityScheme(
+            root=openapi_v3_1.HTTPSecurityScheme(
+                type=openapi_v3_1.SecuritySchemeType.http,
+                scheme=sec_scheme.scheme,
+                bearerFormat=sec_scheme.bearerFormat,
+                description=sec_scheme.description,
+            )
+        )
 
     @staticmethod
     def _build_oauth_flows_3_1(flows: OAuthFlows) -> openapi_v3_1.OAuthFlows:
@@ -1094,9 +1096,7 @@ class OpenAPI(BaseModel):
                 paths_dict[path] = path_item
             else:
                 # Convert PathItem
-                paths_dict[path] = self._convert_path_item_to_3_1(
-                    path_item, warnings
-                )
+                paths_dict[path] = self._convert_path_item_to_3_1(path_item, warnings)
 
         return openapi_v3_1.Paths(root=paths_dict)
 

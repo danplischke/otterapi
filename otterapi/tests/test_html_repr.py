@@ -10,7 +10,12 @@ import pytest
 from pydantic import BaseModel
 
 FIXTURE_MODELS = (
-    Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'expected' / 'models.py'
+    Path(__file__).parent
+    / 'fixtures'
+    / 'golden'
+    / 'constraints'
+    / 'expected'
+    / 'models.py'
 )
 
 
