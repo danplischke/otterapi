@@ -24,7 +24,6 @@ from otterapi.codegen.ast_utils import (
     _union_expr,
 )
 from otterapi.codegen.client import (
-    EndpointInfo,
     _exported_error_names,
     generate_api_error_hierarchy,
     generate_base_client_class,
@@ -1614,40 +1613,6 @@ class Codegen(OpenAPIProcessor):
 
         return 'APIClient'
 
-    def _client_has_dataframe_methods(
-        self, endpoints: list[Endpoint], endpoint_infos: list[EndpointInfo]
-    ) -> bool:
-        """Check whether any endpoint will emit DataFrame methods.
-
-        Covers both the standard per-endpoint DataFrame config and paginated
-        endpoints, which always get DataFrame methods when DataFrame support
-        is enabled (regardless of whether the response type is a list).
-        """
-        if any(
-            info.dataframe_config.generate_pandas
-            or info.dataframe_config.generate_polars
-            for info in endpoint_infos
-        ):
-            return True
-
-        if not (
-            self.config.pagination.enabled
-            and self.config.dataframe.enabled
-            and (self.config.dataframe.pandas or self.config.dataframe.polars)
-        ):
-            return False
-
-        for endpoint in endpoints:
-            if not self._get_pagination_config(endpoint):
-                continue
-            endpoint_df_config = self.config.dataframe.endpoints.get(
-                endpoint.sync_fn_name
-            )
-            if not (endpoint_df_config and endpoint_df_config.enabled is False):
-                return True
-
-        return False
-
     def _generate_client_file(
         self,
         directory: UPath,
@@ -1734,28 +1699,6 @@ class Codegen(OpenAPIProcessor):
             generated_files.append(f'{output_name}/client.py')
 
         return generated_files
-
-    def _endpoints_to_info(self, endpoints: list[Endpoint]) -> list[EndpointInfo]:
-        """Convert Endpoint objects to EndpointInfo for client generation."""
-        infos = []
-        for ep in endpoints:
-            # Determine DataFrame configuration for this endpoint
-            dataframe_config = self._get_dataframe_config(ep)
-
-            info = EndpointInfo(
-                name=ep.sync_fn_name,
-                async_name=ep.async_fn_name,
-                method=ep.method,
-                path=ep.path,
-                parameters=ep.parameters,
-                request_body=ep.request_body,
-                response_type=ep.response_type,
-                response_infos=ep.response_infos,
-                description=ep.description,
-                dataframe_config=dataframe_config,
-            )
-            infos.append(info)
-        return infos
 
     def _get_dataframe_config(self, endpoint: Endpoint) -> DataFrameMethodConfig:
         """Get the DataFrame method configuration for an endpoint.

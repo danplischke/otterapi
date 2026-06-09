@@ -1,4 +1,5 @@
 import ast
+import keyword
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -32,8 +33,6 @@ def remove_accents(input_str):
 
 
 def sanitize_name_python_keywords(name: str) -> str:
-    import keyword
-
     if name in keyword.kwlist:
         return f'{name}_'
     return name
