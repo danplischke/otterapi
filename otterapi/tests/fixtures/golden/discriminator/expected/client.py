@@ -95,4 +95,4 @@ class APIError(BaseAPIError):
 Client = DiscriminatorAPIClient
 Error = APIError
 
-__all__ = ["DiscriminatorAPIClient", "Client", "APIError", "Error"]
+__all__ = ["APIError", "Client", "DiscriminatorAPIClient", "Error"]

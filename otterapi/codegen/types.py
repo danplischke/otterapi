@@ -10,7 +10,8 @@ This module provides:
 import ast
 import dataclasses
 from collections.abc import Iterable, Iterator
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
@@ -39,19 +40,51 @@ __all__ = [
 ]
 
 _PRIMITIVE_TYPE_MAP = {
+    # string formats
     ('string', None): str,
     ('string', 'date-time'): datetime,
-    ('string', 'date'): datetime,
+    ('string', 'date'): date,
+    ('string', 'time'): time,
+    ('string', 'duration'): timedelta,
     ('string', 'uuid'): UUID,
+    ('string', 'byte'): bytes,    # base64-encoded
+    ('string', 'binary'): bytes,  # raw binary
+    # unknown/semantic string formats that are still strings at runtime
+    ('string', 'email'): str,
+    ('string', 'idn-email'): str,
+    ('string', 'uri'): str,
+    ('string', 'uri-reference'): str,
+    ('string', 'uri-template'): str,
+    ('string', 'url'): str,
+    ('string', 'hostname'): str,
+    ('string', 'idn-hostname'): str,
+    ('string', 'ipv4'): str,
+    ('string', 'ipv6'): str,
+    ('string', 'password'): str,
+    # integer formats
     ('integer', None): int,
     ('integer', 'int32'): int,
     ('integer', 'int64'): int,
+    ('integer', 'uint32'): int,
+    ('integer', 'uint64'): int,
+    # number formats
     ('number', None): float,
     ('number', 'float'): float,
     ('number', 'double'): float,
+    ('number', 'decimal'): Decimal,
+    # misc
     ('boolean', None): bool,
     ('null', None): None,
     (None, None): None,
+}
+
+# Base-type fallbacks for known OpenAPI types with unrecognised formats.
+# Keeps generated code typed rather than falling back to Any.
+_TYPE_FALLBACK = {
+    'string': str,
+    'integer': int,
+    'number': float,
+    'boolean': bool,
 }
 
 
@@ -204,10 +237,6 @@ class ResponseInfo:
         """Check if this is a plain text response."""
         return self.content_type.startswith('text/') and not self.is_json
 
-    @property
-    def is_raw(self) -> bool:
-        """Check if this is an unknown content type that should return the raw httpx.Response."""
-        return not (self.is_json or self.is_binary or self.is_text)
 
 
 @dataclasses.dataclass
@@ -690,7 +719,10 @@ class TypeGenerator(OpenAPIProcessor):
         # Fix: schema.type is a Type enum, need to use .value for string lookup
         type_value = actual_type.value if actual_type else None
         key = (type_value, schema.format or None)
-        mapped = _PRIMITIVE_TYPE_MAP.get(key, Any)
+        mapped = _PRIMITIVE_TYPE_MAP.get(
+            key,
+            _TYPE_FALLBACK.get(type_value, Any),  # unknown format → base type, not Any
+        )
 
         type_ = Type(
             None,
@@ -787,47 +819,6 @@ class TypeGenerator(OpenAPIProcessor):
             isinstance(elt, ast.Constant) and elt.value is None
             for elt in annotation.slice.elts
         )
-
-    def _create_pydantic_root_model(
-        self,
-        schema: Schema,
-        item_type: Type | None = None,
-        name: str | None = None,
-        base_name: str | None = None,
-    ) -> Type:
-        name = (
-            name
-            or base_name
-            or (sanitize_identifier(schema.title) if schema.title else None)
-        )
-        if not name:
-            raise ValueError('Root model must have a name')
-
-        model = ast.ClassDef(
-            name=name,
-            bases=[_subscript(RootModel.__name__, item_type.annotation_ast)],
-            keywords=[],
-            body=[ast.Pass()],
-            decorator_list=[],
-            type_params=[],
-        )
-
-        type_ = Type(
-            reference=None,
-            name=name,
-            annotation_ast=_name(name),
-            implementation_ast=model,
-            type='root',
-        )
-        type_.add_implementation_import(
-            module=RootModel.__module__, name=RootModel.__name__
-        )
-        type_.copy_imports_from_sub_types([item_type] if item_type else [])
-        if item_type is not None:
-            type_.add_dependency(item_type)
-        type_ = self.add_type(type_, base_name=base_name)
-
-        return type_
 
     def _build_allof_base_types(
         self, schema: Schema, base_name: str | None
@@ -1252,7 +1243,6 @@ class TypeRegistry:
         """Initialize an empty type registry."""
         self._types: dict[str, TypeInfo] = {}
         self._by_reference: dict[str, str] = {}
-        self._primitive_types: set[str] = {'str', 'int', 'float', 'bool', 'None'}
 
     def register(
         self,
@@ -1295,117 +1285,11 @@ class TypeRegistry:
 
         return type_info
 
-    def register_or_get(
-        self,
-        type_obj: 'Type',
-        name: str,
-        reference: str | None = None,
-        dependencies: set[str] | None = None,
-        is_root_model: bool = False,
-    ) -> TypeInfo:
-        """Register a type if not exists, otherwise return the existing one.
-
-        Args:
-            type_obj: The Type object containing the type information.
-            name: The Python name for this type.
-            reference: The OpenAPI reference string, if applicable.
-            dependencies: Set of type names this type depends on.
-            is_root_model: Whether this is a Pydantic RootModel.
-
-        Returns:
-            The TypeInfo object (existing or newly registered).
-        """
-        if name in self._types:
-            return self._types[name]
-        return self.register(type_obj, name, reference, dependencies, is_root_model)
-
-    def has_type(self, name: str) -> bool:
-        """Check if a type is registered."""
-        return name in self._types
-
-    def has_reference(self, reference: str) -> bool:
-        """Check if a reference has been registered."""
-        return reference in self._by_reference
-
-    def get_type(self, name: str) -> TypeInfo | None:
-        """Get a registered type by name."""
-        return self._types.get(name)
-
-    def get_type_by_reference(self, reference: str) -> TypeInfo | None:
-        """Get a registered type by its OpenAPI reference."""
-        name = self._by_reference.get(reference)
-        if name:
-            return self._types.get(name)
-        return None
-
-    def get_name_for_reference(self, reference: str) -> str | None:
-        """Get the registered name for an OpenAPI reference."""
-        return self._by_reference.get(reference)
-
-    def get_all_types(self) -> dict[str, TypeInfo]:
-        """Get all registered types."""
-        return dict(self._types)
-
-    def get_type_names(self) -> list[str]:
-        """Get all registered type names, sorted alphabetically."""
-        return sorted(self._types.keys())
-
     def add_dependency(self, type_name: str, depends_on: str) -> None:
         """Add a dependency relationship between types."""
         if type_name not in self._types:
             raise KeyError(f"Type '{type_name}' is not registered")
         self._types[type_name].dependencies.add(depends_on)
-
-    def get_dependencies(self, type_name: str) -> set[str]:
-        """Get all dependencies for a type."""
-        if type_name not in self._types:
-            raise KeyError(f"Type '{type_name}' is not registered")
-        return self._types[type_name].dependencies.copy()
-
-    def get_types_in_dependency_order(self) -> list[TypeInfo]:
-        """Get all types sorted in dependency order.
-
-        Types are sorted so that dependencies come before the types that
-        depend on them.
-        """
-        result: list[TypeInfo] = []
-        visited: set[str] = set()
-        visiting: set[str] = set()
-
-        def visit(name: str) -> None:
-            if name in visited:
-                return
-            if name in visiting:
-                return
-            if name in self._primitive_types:
-                return
-            if name not in self._types:
-                return
-
-            visiting.add(name)
-            type_info = self._types[name]
-
-            for dep in type_info.dependencies:
-                visit(dep)
-
-            visiting.remove(name)
-            visited.add(name)
-            result.append(type_info)
-
-        for name in sorted(self._types.keys()):
-            visit(name)
-
-        return result
-
-    def mark_generated(self, name: str) -> None:
-        """Mark a type as having its AST generated."""
-        if name not in self._types:
-            raise KeyError(f"Type '{name}' is not registered")
-        self._types[name].is_generated = True
-
-    def get_ungenerated_types(self) -> list[TypeInfo]:
-        """Get all types that haven't been generated yet."""
-        return [t for t in self._types.values() if not t.is_generated]
 
     def clear(self) -> None:
         """Clear all registered types."""
@@ -1423,22 +1307,6 @@ class TypeRegistry:
     def __contains__(self, name: str) -> bool:
         """Check if a type name is registered."""
         return name in self._types
-
-    def get_root_models(self) -> list[TypeInfo]:
-        """Get all registered root models."""
-        return [t for t in self._types.values() if t.is_root_model]
-
-    def get_regular_models(self) -> list[TypeInfo]:
-        """Get all registered non-root models."""
-        return [t for t in self._types.values() if not t.is_root_model]
-
-    def merge(self, other: 'TypeRegistry') -> None:
-        """Merge another registry into this one."""
-        for type_info in other:
-            if type_info.name not in self._types:
-                self._types[type_info.name] = type_info
-                if type_info.reference:
-                    self._by_reference[type_info.reference] = type_info.name
 
 
 # =============================================================================

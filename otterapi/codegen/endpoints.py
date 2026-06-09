@@ -158,26 +158,6 @@ class FunctionSignature:
     kw_defaults: list[ast.expr] = field(default_factory=list)
     imports: ImportDict = field(default_factory=dict)
 
-    def to_ast_arguments(
-        self,
-        kwargs: ast.arg | None = None,
-    ) -> ast.arguments:
-        """Convert to an ast.arguments node.
-
-        Args:
-            kwargs: Optional **kwargs argument to include.
-
-        Returns:
-            An ast.arguments node ready for use in a FunctionDef.
-        """
-        return ast.arguments(
-            posonlyargs=[],
-            args=self.args,
-            kwonlyargs=self.kwonlyargs,
-            kw_defaults=self.kw_defaults,
-            kwarg=kwargs,
-            defaults=[],
-        )
 
 
 class FunctionSignatureBuilder:
@@ -334,17 +314,6 @@ class FunctionSignatureBuilder:
 
         return self
 
-    def add_self_parameter(self) -> Self:
-        """Add 'self' as the first positional argument.
-
-        Used when building method signatures for classes.
-
-        Returns:
-            Self for method chaining.
-        """
-        self._args.insert(0, _argument('self'))
-        return self
-
     def add_custom_kwarg(
         self,
         name: str,
@@ -383,18 +352,6 @@ class FunctionSignatureBuilder:
             kw_defaults=self._kw_defaults.copy(),
             imports=self._imports.copy(),
         )
-
-    def reset(self) -> Self:
-        """Reset the builder to empty state.
-
-        Returns:
-            Self for method chaining.
-        """
-        self._args = []
-        self._kwonlyargs = []
-        self._kw_defaults = []
-        self._imports = {}
-        return self
 
 
 # =============================================================================

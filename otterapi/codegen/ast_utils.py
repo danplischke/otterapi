@@ -5,11 +5,8 @@ and utilities for collecting and organizing imports during code generation.
 """
 
 import ast
-import keyword
 import sys
 from collections.abc import Iterable
-
-PYTHON_KEYWORDS = set(keyword.kwlist)
 
 __all__ = [
     # AST helpers
@@ -198,17 +195,6 @@ class ImportCollector:
                 self._imports[module] = set()
             self._imports[module].update(names)
 
-    def add_import(self, module: str, name: str) -> None:
-        """Add a single import.
-
-        Args:
-            module: The module to import from (e.g., 'typing', 'pydantic').
-            name: The name to import (e.g., 'List', 'BaseModel').
-        """
-        if module not in self._imports:
-            self._imports[module] = set()
-        self._imports[module].add(name)
-
     def _get_import_category(self, module: str) -> int:
         """Get the sort category for a module.
 
@@ -267,22 +253,7 @@ class ImportCollector:
             import_stmts.append(import_stmt)
         return import_stmts
 
-    def has_imports(self) -> bool:
-        """Check if any imports have been collected.
-
-        Returns:
-            True if imports exist, False otherwise.
-        """
-        return bool(self._imports)
-
     def clear(self) -> None:
         """Clear all collected imports."""
         self._imports.clear()
 
-    def get_modules(self) -> set[str]:
-        """Get the set of all modules that have been imported.
-
-        Returns:
-            Set of module names.
-        """
-        return set(self._imports.keys())

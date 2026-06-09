@@ -9,7 +9,6 @@ Main Components:
     - SchemaLoader: Loads OpenAPI schemas from URLs or files
     - SchemaResolver: Resolves $ref references in schemas
     - TypeRegistry: Manages generated types and their dependencies
-    - CodeEmitter: Handles output of generated code
 
 Example:
     >>> from otterapi.codegen import Codegen

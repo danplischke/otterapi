@@ -769,24 +769,6 @@ class Codegen(OpenAPIProcessor):
         """
         return collect_used_model_names(endpoints, self.typegen.types)
 
-    def _create_model_import(
-        self, models_file: UPath, model_names: set[str]
-    ) -> ast.ImportFrom:
-        """Create an import statement for models.
-
-        Args:
-            models_file: Path to the models file.
-            model_names: Set of model names to import.
-
-        Returns:
-            AST ImportFrom statement for the models.
-        """
-        return ast.ImportFrom(
-            module=self.config.models_import_path or models_file.stem,
-            names=[ast.alias(name=name, asname=None) for name in sorted(model_names)],
-            level=1 if not self.config.models_import_path else 0,  # relative import
-        )
-
     def _build_endpoint_file_body(
         self, endpoints: list[Endpoint]
     ) -> tuple[list[ast.stmt], ImportCollector, set[str]]:
@@ -1791,7 +1773,7 @@ class Codegen(OpenAPIProcessor):
 
         # Add __all__ export (include the full per-status error hierarchy
         # so users can ``from .<pkg>._client import NotFoundError`` etc.).
-        body.append(_all([base_client_name, *_exported_error_names()]))
+        body.append(_all(sorted([base_client_name, *_exported_error_names()])))
 
         # Add the BaseAPIError + per-status subclass hierarchy.
         body.extend(generate_api_error_hierarchy())
@@ -1855,20 +1837,6 @@ class Codegen(OpenAPIProcessor):
             This method delegates to get_dataframe_config_for_endpoint() from dataframe_utils.
         """
         return get_dataframe_config_for_endpoint(endpoint, self.config.dataframe)
-
-    def _endpoint_returns_list(self, endpoint: Endpoint) -> bool:
-        """Check if an endpoint returns a list type.
-
-        Args:
-            endpoint: The endpoint to check.
-
-        Returns:
-            True if the endpoint returns a list, False otherwise.
-
-        Note:
-            This method delegates to endpoint_returns_list() from dataframe_utils.
-        """
-        return endpoint_returns_list(endpoint)
 
     def _get_pagination_config(
         self, endpoint: Endpoint

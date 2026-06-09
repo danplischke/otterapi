@@ -345,8 +345,6 @@ class ModuleMapResolver:
     def __init__(self, config: ModuleSplitConfig):
         """Initialize the resolver with configuration."""
         self.config = config
-        self._compiled_patterns: dict[str, list[re.Pattern]] = {}
-
     def resolve(
         self,
         path: str,
@@ -633,7 +631,6 @@ class SplitModuleEmitter:
         self.response_unwrap_config = response_unwrap_config
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
-        self._is_flat: bool = False  # Track if we're emitting flat structure
 
     def emit(
         self,
@@ -653,10 +650,8 @@ class SplitModuleEmitter:
         self._typegen_types = typegen_types or {}
 
         if self.config.flat_structure:
-            self._is_flat = True
             self._emit_flat(tree)
         else:
-            self._is_flat = False
             self._emit_nested(tree)
 
         return self._emitted_modules
@@ -1379,71 +1374,11 @@ class SplitModuleEmitter:
             return None, {}
         return annotation, self._collect_model_imports_from_ast(annotation)
 
-    def _create_client_import(
-        self, module_path: list[str] | None = None
-    ) -> ast.ImportFrom:
-        """Create import statement for the Client class.
-
-        For flat structure, all files are in the same directory as client.py,
-        so we always use level=1 (single dot relative import).
-
-        For nested structure, we need to go up the directory tree based on
-        the actual file location:
-        - module_path=['loot'] -> file at output_dir/loot.py -> level=1
-        - module_path=['api', 'users'] -> file at output_dir/api/users.py -> level=2
-        """
-        if self._is_flat:
-            # Flat structure: all files in same directory as client.py
-            level = 1
-        else:
-            # Nested structure: actual directory depth is len(module_path) - 1
-            # because the last element is the filename, not a directory
-            # e.g., ['loot'] -> depth 0 -> level 1
-            # e.g., ['api', 'users'] -> depth 1 -> level 2
-            depth = len(module_path) - 1 if module_path and len(module_path) > 1 else 0
-            level = depth + 1
-
-        return ast.ImportFrom(
-            module='client',
-            names=[ast.alias(name='Client', asname=None)],
-            level=level,
-        )
-
     def _collect_used_model_names(self, endpoints: list[Endpoint]) -> set[str]:
         """Collect model names used in the given endpoints."""
         from otterapi.codegen.types import collect_used_model_names
 
         return collect_used_model_names(endpoints, self._typegen_types)
-
-    def _create_model_import(
-        self, model_names: set[str], module_path: list[str] | None = None
-    ) -> ast.ImportFrom:
-        """Create import statement for models.
-
-        For flat structure, all files are in the same directory as models.py,
-        so we always use level=1 (single dot relative import).
-
-        For nested structure, we need to go up the directory tree based on
-        the actual file location:
-        - module_path=['loot'] -> file at output_dir/loot.py -> level=1
-        - module_path=['api', 'users'] -> file at output_dir/api/users.py -> level=2
-        """
-        if self._is_flat:
-            # Flat structure: all files in same directory as models.py
-            level = 1
-        else:
-            # Nested structure: actual directory depth is len(module_path) - 1
-            # because the last element is the filename, not a directory
-            # e.g., ['loot'] -> depth 0 -> level 1
-            # e.g., ['api', 'users'] -> depth 1 -> level 2
-            depth = len(module_path) - 1 if module_path and len(module_path) > 1 else 0
-            level = depth + 1
-
-        return ast.ImportFrom(
-            module='models',
-            names=[ast.alias(name=name, asname=None) for name in sorted(model_names)],
-            level=level,
-        )
 
     def _emit_flat_init(self, all_exports: dict[str, list[str]]) -> None:
         """Emit __init__.py for flat structure."""
@@ -1617,6 +1552,3 @@ class SplitModuleEmitter:
             if type_.name and type_.implementation_ast
         ]
 
-    def get_emitted_modules(self) -> list[EmittedModule]:
-        """Get list of all emitted modules."""
-        return self._emitted_modules.copy()

@@ -7,6 +7,7 @@ HTTP client injection support.
 
 import ast
 from dataclasses import dataclass, field
+from importlib.resources import files
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
@@ -18,7 +19,6 @@ from otterapi.codegen.ast_utils import (
     _subscript,
     _union_expr,
 )
-
 from otterapi.codegen.dataframes import DataFrameMethodConfig
 from otterapi.codegen.endpoints import ParameterASTBuilder
 
@@ -1348,48 +1348,6 @@ def _build_async_request_body(
     ]
 
 
-def _build_path_expr(path: str, parameters: list['Parameter'] | None) -> ast.expr:
-    """Build the path expression with parameter substitution.
-
-    Note:
-        This function delegates to ParameterASTBuilder.build_path_expr().
-    """
-    return ParameterASTBuilder.build_path_expr(path, parameters or [])
-
-
-def _build_query_params(parameters: list['Parameter'] | None) -> ast.Dict | None:
-    """Build query parameters dict.
-
-    Note:
-        This function delegates to ParameterASTBuilder.build_query_params().
-    """
-    if not parameters:
-        return None
-    return ParameterASTBuilder.build_query_params(parameters)
-
-
-def _build_header_params(parameters: list['Parameter'] | None) -> ast.Dict | None:
-    """Build header parameters dict.
-
-    Note:
-        This function delegates to ParameterASTBuilder.build_header_params().
-    """
-    if not parameters:
-        return None
-    return ParameterASTBuilder.build_header_params(parameters)
-
-
-def _build_body_expr(
-    request_body: 'RequestBodyInfo',
-) -> tuple[ast.expr | None, str | None]:
-    """Build the body expression for the request.
-
-    Note:
-        This function delegates to ParameterASTBuilder.build_body_expr().
-    """
-    return ParameterASTBuilder.build_body_expr(request_body)
-
-
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:
     """Merge source imports into target imports."""
     for module, names in source.items():
@@ -1403,112 +1361,18 @@ def generate_client_stub(
     base_class_name: str,
     module_name: str = '_client',
 ) -> str:
-    """Generate the user-customizable client.py stub content.
-
-    Args:
-        class_name: Name for the client class (e.g., 'PetStoreClient').
-        base_class_name: Name of the base class to inherit from.
-        module_name: Module name where base class is defined.
-
-    Returns:
-        String content for client.py file.
-    """
-    return f'''"""API Client.
-
-This file is generated once and will NOT be overwritten on regeneration.
-You can safely customize this file to add authentication, logging,
-error handling, or other client-specific functionality.
-"""
-
-from .{module_name} import {base_class_name}, BaseAPIError
-
-
-class {class_name}({base_class_name}):
-    """API client with customizable configuration.
-
-    This class inherits from the generated {base_class_name} and can be
-    customized without being overwritten on code regeneration.
-
-    Example:
-        >>> client = {class_name}()
-        >>> # Use default base URL from OpenAPI spec
-
-        >>> client = {class_name}(base_url="https://staging.api.example.com")
-        >>> # Override base URL
-
-        >>> client = {class_name}(timeout=60.0, headers={{"Authorization": "Bearer token"}})
-        >>> # Custom timeout and headers
-
-        >>> import httpx
-        >>> with httpx.Client() as http_client:
-        ...     client = {class_name}(http_client=http_client)
-        ...     # Use custom HTTP client (useful for testing/mocking)
-    """
-
-    pass
-
-    # Add custom methods or override base class methods below.
-    #
-    # Example - adding authentication:
-    #
-    # def __init__(self, api_key: str | None = None, **kwargs):
-    #     super().__init__(**kwargs)
-    #     if api_key:
-    #         self.headers["Authorization"] = f"Bearer {{api_key}}"
-    #
-    # Example - validating API responses (e.g., checking for errors in wrapper objects):
-    #
-    # def _validate_response(self, response, validated):
-    #     \"\"\"Check for API-level errors in response wrapper.\"\"\"
-    #     if hasattr(validated, 'error') and validated.error is not None:
-    #         raise APIError(
-    #             status_code=response.status_code,
-    #             response=response,
-    #             detail=validated.error,
-    #         )
-
-
-class APIError(BaseAPIError):
-    """Customizable API error class.
-
-    Override the from_response() classmethod to customize how error details
-    are extracted from API responses. The default implementation looks for
-    a 'detail' key in the JSON response body.
-
-    Example - customizing error detail extraction:
-
-        class APIError(BaseAPIError):
-            @classmethod
-            def from_response(cls, response):
-                status_code = response.status_code
-                body = response.text
-                detail = None
-                try:
-                    json_body = response.json()
-                    # Custom keys for this API
-                    detail = (
-                        json_body.get('error')
-                        or json_body.get('message')
-                        or json_body.get('detail')
-                        or json_body
-                    )
-                except Exception:
-                    detail = body if body else None
-                return cls(
-                    f'HTTP {{status_code}} Error: {{detail}}',
-                    status_code=status_code,
-                    response=response,
-                    detail=detail,
-                    body=body,
-                )
-    """
-
-    pass
-
-
-# Convenience aliases for shorter imports
-Client = {class_name}
-Error = APIError
-
-__all__ = ["{class_name}", "Client", "APIError", "Error"]
-'''
+    """Generate the user-customizable client.py stub content."""
+    template = (
+        files('otterapi.codegen.runtime')
+        .joinpath('_client_stub.py.tpl')
+        .read_text('utf-8')
+    )
+    all_names = sorted([class_name, 'Client', 'APIError', 'Error'])
+    all_repr = '[' + ', '.join(f'"{n}"' for n in all_names) + ']'
+    return (
+        template
+        .replace('__CLASS_NAME__', class_name)
+        .replace('__BASE_CLASS_NAME__', base_class_name)
+        .replace('__MODULE_NAME__', module_name)
+        .replace('__ALL__', all_repr)
+    )

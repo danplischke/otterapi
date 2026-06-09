@@ -95,4 +95,4 @@ class APIError(BaseAPIError):
 Client = ConstraintsAPIClient
 Error = APIError
 
-__all__ = ["ConstraintsAPIClient", "Client", "APIError", "Error"]
+__all__ = ["APIError", "Client", "ConstraintsAPIClient", "Error"]

@@ -5,28 +5,28 @@ You can safely customize this file to add authentication, logging,
 error handling, or other client-specific functionality.
 """
 
-from ._client import BasePaginatedAPIClient, BaseAPIError
+from .__MODULE_NAME__ import __BASE_CLASS_NAME__, BaseAPIError
 
 
-class PaginatedAPIClient(BasePaginatedAPIClient):
+class __CLASS_NAME__(__BASE_CLASS_NAME__):
     """API client with customizable configuration.
 
-    This class inherits from the generated BasePaginatedAPIClient and can be
+    This class inherits from the generated __BASE_CLASS_NAME__ and can be
     customized without being overwritten on code regeneration.
 
     Example:
-        >>> client = PaginatedAPIClient()
+        >>> client = __CLASS_NAME__()
         >>> # Use default base URL from OpenAPI spec
 
-        >>> client = PaginatedAPIClient(base_url="https://staging.api.example.com")
+        >>> client = __CLASS_NAME__(base_url="https://staging.api.example.com")
         >>> # Override base URL
 
-        >>> client = PaginatedAPIClient(timeout=60.0, headers={"Authorization": "Bearer token"})
+        >>> client = __CLASS_NAME__(timeout=60.0, headers={"Authorization": "Bearer token"})
         >>> # Custom timeout and headers
 
         >>> import httpx
         >>> with httpx.Client() as http_client:
-        ...     client = PaginatedAPIClient(http_client=http_client)
+        ...     client = __CLASS_NAME__(http_client=http_client)
         ...     # Use custom HTTP client (useful for testing/mocking)
     """
 
@@ -92,7 +92,7 @@ class APIError(BaseAPIError):
 
 
 # Convenience aliases for shorter imports
-Client = PaginatedAPIClient
+Client = __CLASS_NAME__
 Error = APIError
 
-__all__ = ["APIError", "Client", "Error", "PaginatedAPIClient"]
+__all__ = __ALL__

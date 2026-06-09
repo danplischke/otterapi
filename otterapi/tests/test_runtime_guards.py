@@ -16,10 +16,6 @@ from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
 
 
-class _FakeSpec:
-    paths = None  # forces _generate_endpoints to bail before openapi access
-
-
 def test_generate_models_file_without_load_raises_runtime_error(tmp_path: Path):
     config = DocumentConfig(
         source='/dev/null',

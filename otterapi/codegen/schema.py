@@ -111,10 +111,8 @@ class SchemaLoader:
         try:
             if self._is_url(source):
                 content = self._load_from_url(source)
-                self._current_base_url = source.rsplit('/', 1)[0] + '/'
             else:
                 content = self._load_from_file(source)
-                self._current_base_url = None
                 source_path = Path(source)
                 if source_path.is_absolute():
                     self._base_path = source_path.parent
@@ -510,29 +508,6 @@ class SchemaResolver:
             return {}
         return dict(self.openapi.components.schemas)
 
-    def get_schema_names(self) -> list[str]:
-        """Get the names of all schemas in the document.
-
-        Returns:
-            List of schema names, sorted alphabetically.
-        """
-        return sorted(self.get_all_schemas().keys())
-
-    def has_schema(self, name: str) -> bool:
-        """Check if a schema exists in the document.
-
-        Args:
-            name: The schema name to check.
-
-        Returns:
-            True if the schema exists, False otherwise.
-        """
-        return name in self.get_all_schemas()
-
-    def clear_cache(self) -> None:
-        """Clear the reference resolution cache."""
-        self._cache.clear()
-
     @staticmethod
     def _sanitize_name(name: str | None) -> str | None:
         """Sanitize a name to be a valid Python identifier.
@@ -551,43 +526,3 @@ class SchemaResolver:
 
         return sanitize_identifier(name)
 
-    def resolve_all_refs_in_schema(self, schema: Schema | Reference) -> Schema:
-        """Recursively resolve all $ref references in a schema.
-
-        This is useful when you need a fully resolved schema without
-        any remaining references.
-
-        Args:
-            schema: The schema (potentially containing references) to resolve.
-
-        Returns:
-            The resolved schema with all references expanded.
-
-        Note:
-            This does not modify the original schema; references are
-            resolved on access. For deeply nested schemas, this may
-            result in multiple resolutions of the same reference.
-        """
-        if isinstance(schema, Reference):
-            resolved, _ = self.resolve_reference(schema)
-            return resolved
-        return schema
-
-    def get_reference_target(self, ref: str) -> str:
-        """Extract the target name from a $ref string.
-
-        Args:
-            ref: The $ref string (e.g., '#/components/schemas/Pet').
-
-        Returns:
-            The target name (e.g., 'Pet').
-
-        Raises:
-            SchemaReferenceError: If the reference format is invalid.
-        """
-        if not ref.startswith('#/components/schemas/'):
-            raise SchemaReferenceError(
-                ref,
-                'Can only extract target from #/components/schemas/ references',
-            )
-        return ref.split('/')[-1]

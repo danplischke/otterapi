@@ -5,21 +5,21 @@ from types import UnionType
 
 T = TypeVar('T')
 __all__ = (
-    'BaseDiscriminatorAPIClient',
-    'BaseAPIError',
-    'ClientError',
-    'ServerError',
-    'BadRequestError',
-    'UnauthorizedError',
-    'ForbiddenError',
-    'NotFoundError',
-    'ConflictError',
-    'UnprocessableEntityError',
-    'RateLimitError',
-    'InternalServerError',
     'BadGatewayError',
-    'ServiceUnavailableError',
+    'BadRequestError',
+    'BaseAPIError',
+    'BaseDiscriminatorAPIClient',
+    'ClientError',
+    'ConflictError',
+    'ForbiddenError',
     'GatewayTimeoutError',
+    'InternalServerError',
+    'NotFoundError',
+    'RateLimitError',
+    'ServerError',
+    'ServiceUnavailableError',
+    'UnauthorizedError',
+    'UnprocessableEntityError',
 )
 
 

@@ -55,6 +55,7 @@ otter = "otterapi.__main__:app"
 dev = [
     "ruff>=0.14.2",
     "twine>=6.2.0",
+    "vulture>=2.14",
 ]
 test = [
     "pytest>=8.0.0",
@@ -155,6 +156,11 @@ omit = [
     "*/__pycache__/*",
     "*/site-packages/*",
 ]
+
+[tool.vulture]
+min_confidence = 60
+paths = ["otterapi", "vulture_whitelist.py"]
+sort_by_size = true
 
 [tool.coverage.report]
 exclude_lines = [

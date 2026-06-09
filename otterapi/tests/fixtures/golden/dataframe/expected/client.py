@@ -95,4 +95,4 @@ class APIError(BaseAPIError):
 Client = DataFrameAPIClient
 Error = APIError
 
-__all__ = ["DataFrameAPIClient", "Client", "APIError", "Error"]
+__all__ = ["APIError", "Client", "DataFrameAPIClient", "Error"]

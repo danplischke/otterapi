@@ -1142,55 +1142,6 @@ class Swagger(BaseModelWithVendorExtensions):
         obj.__pydantic_extra__.update(self._extract_vendor_extensions(param))
         return obj
 
-    @staticmethod
-    def _apply_parameter_range_constraints(
-        param: NonBodyParameter, schema: dict[str, Any]
-    ) -> None:
-        """Copy default/min/max/length constraint fields into a parameter schema dict."""
-        if param.default is not None:
-            schema['default'] = param.default
-
-        if param.maximum is not None:
-            schema['maximum'] = param.maximum
-
-        if param.exclusive_maximum is not None:
-            schema['exclusiveMaximum'] = param.exclusive_maximum
-
-        if param.minimum is not None:
-            schema['minimum'] = param.minimum
-
-        if param.exclusive_minimum is not None:
-            schema['exclusiveMinimum'] = param.exclusive_minimum
-
-        if param.max_length is not None:
-            schema['maxLength'] = param.max_length
-
-        if param.min_length is not None:
-            schema['minLength'] = param.min_length
-
-    @staticmethod
-    def _apply_parameter_array_and_enum_constraints(
-        param: NonBodyParameter, schema: dict[str, Any]
-    ) -> None:
-        """Copy pattern/array/enum/multipleOf constraint fields into a parameter schema dict."""
-        if param.pattern:
-            schema['pattern'] = param.pattern
-
-        if param.max_items is not None:
-            schema['maxItems'] = param.max_items
-
-        if param.min_items is not None:
-            schema['minItems'] = param.min_items
-
-        if param.unique_items is not None:
-            schema['uniqueItems'] = param.unique_items
-
-        if param.enum:
-            schema['enum'] = param.enum
-
-        if param.multiple_of is not None:
-            schema['multipleOf'] = param.multiple_of
-
     def _convert_parameter_to_schema(
         self, param: NonBodyParameter, warnings: WarningCollector
     ) -> openapi_v3.Schema:
@@ -1415,98 +1366,6 @@ class Swagger(BaseModelWithVendorExtensions):
         return obj
 
     @staticmethod
-    def _apply_schema_scalar_fields(schema: Schema, result: dict[str, Any]) -> None:
-        """Copy simple scalar/constraint fields from a Schema into an OpenAPI 3.0 dict."""
-        if schema.type:
-            result['type'] = schema.type
-
-        if schema.format:
-            result['format'] = schema.format
-
-        if schema.title:
-            result['title'] = schema.title
-
-        if schema.description:
-            result['description'] = schema.description
-
-        if schema.default is not None:
-            result['default'] = schema.default
-
-        if schema.multiple_of is not None:
-            result['multipleOf'] = schema.multiple_of
-
-        if schema.maximum is not None:
-            result['maximum'] = schema.maximum
-
-        if schema.exclusive_maximum is not None:
-            result['exclusiveMaximum'] = schema.exclusive_maximum
-
-        if schema.minimum is not None:
-            result['minimum'] = schema.minimum
-
-        if schema.exclusive_minimum is not None:
-            result['exclusiveMinimum'] = schema.exclusive_minimum
-
-        if schema.max_length is not None:
-            result['maxLength'] = schema.max_length
-
-        if schema.min_length is not None:
-            result['minLength'] = schema.min_length
-
-        if schema.pattern:
-            result['pattern'] = schema.pattern
-
-        if schema.max_items is not None:
-            result['maxItems'] = schema.max_items
-
-        if schema.min_items is not None:
-            result['minItems'] = schema.min_items
-
-        if schema.unique_items is not None:
-            result['uniqueItems'] = schema.unique_items
-
-        if schema.max_properties is not None:
-            result['maxProperties'] = schema.max_properties
-
-        if schema.min_properties is not None:
-            result['minProperties'] = schema.min_properties
-
-        if schema.required:
-            result['required'] = schema.required
-
-        if schema.enum:
-            result['enum'] = schema.enum
-
-    def _apply_schema_composite_fields(
-        self, schema: Schema, result: dict[str, Any]
-    ) -> None:
-        """Recursively convert items/allOf/properties/additionalProperties sub-schemas."""
-        if schema.items:
-            if isinstance(schema.items, list):
-                result['items'] = [
-                    self._convert_schema_to_dict(item) for item in schema.items
-                ]
-            else:
-                result['items'] = self._convert_schema_to_dict(schema.items)
-
-        if schema.all_of:
-            result['allOf'] = [self._convert_schema_to_dict(s) for s in schema.all_of]
-
-        if schema.properties:
-            result['properties'] = {
-                name: self._convert_schema_to_dict(prop)
-                for name, prop in schema.properties.items()
-            }
-
-        if schema.additional_properties is not None:
-            if isinstance(schema.additional_properties, bool):
-                result['additionalProperties'] = schema.additional_properties
-            else:
-                result['additionalProperties'] = self._convert_schema_to_dict(
-                    schema.additional_properties
-                )
-
-    @staticmethod
     def _build_schema_xml_dict(xml: XML) -> openapi_v3.XML:
         """Build the OpenAPI 3.0 ``xml`` object from a Swagger 2.0 XML definition."""
         return openapi_v3.XML(
@@ -1516,29 +1375,6 @@ class Swagger(BaseModelWithVendorExtensions):
             attribute=True if xml.attribute else None,
             wrapped=True if xml.wrapped else None,
         )
-
-    def _apply_schema_metadata_fields(
-        self, schema: Schema, result: dict[str, Any]
-    ) -> None:
-        """Copy discriminator/readOnly/xml/externalDocs/example metadata fields."""
-        # Convert discriminator from string to object
-        if schema.discriminator:
-            result['discriminator'] = {'propertyName': schema.discriminator}
-
-        if schema.read_only:
-            result['readOnly'] = True
-
-        if schema.xml:
-            result['xml'] = self._build_schema_xml_dict(schema.xml)
-
-        if schema.external_docs:
-            result['externalDocs'] = {
-                'url': str(schema.external_docs.url),
-                'description': schema.external_docs.description,
-            }
-
-        if schema.example is not None:
-            result['example'] = schema.example
 
     def _convert_schema_to_dict(
         self, schema: Schema | FileSchema

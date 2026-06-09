@@ -11,7 +11,6 @@ from otterapi.codegen.endpoints import (
     build_standalone_paginated_iter_fn,
 )
 from otterapi.codegen.pagination import (
-    PAGINATION_MODULE_CONTENT,
     PaginationMethodConfig,
     endpoint_is_paginated,
     generate_pagination_module,
@@ -438,9 +437,9 @@ class TestPaginationModuleGeneration:
             assert 'extract_path' in content
 
     def test_pagination_module_content_is_valid_python(self):
-        """Test that the pagination module content is valid Python."""
-        # Should not raise SyntaxError
-        ast.parse(PAGINATION_MODULE_CONTENT)
+        from importlib.resources import files
+        source = files('otterapi.codegen.runtime').joinpath('_pagination.py').read_text('utf-8')
+        ast.parse(source)
 
 
 class TestPaginatedFunctionGeneration:

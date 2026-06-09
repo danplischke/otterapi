@@ -248,20 +248,6 @@ def write_mod(
         f.write(file_content)
 
 
-def write_init_file(directory: UPath | Path | str) -> None:
-    """Create an empty __init__.py file in the specified directory.
-
-    Args:
-        directory: Directory where __init__.py should be created.
-    """
-    directory = UPath(directory)
-    init_file = directory / '__init__.py'
-
-    if not init_file.exists():
-        directory.mkdir(parents=True, exist_ok=True)
-        init_file.touch()
-
-
 @dataclass
 class OpenAPIProcessor:
     openapi: OpenAPI | None = None

@@ -22,6 +22,7 @@ contract used by ``Codegen``.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,8 +38,8 @@ class FeatureModule(ABC):
     Concrete subclasses provide:
 
     - :pyattr:`module_filename` -- the file name written into the output dir
-      (e.g. ``"_pagination.py"``).
-    - :pyattr:`module_content` -- the static Python source to write.
+      (e.g. ``"_pagination.py"``). Must match the corresponding file in
+      ``otterapi.codegen.runtime``.
     - :pymeth:`is_enabled` -- whether the feature is turned on for a given
       :class:`~otterapi.config.DocumentConfig`.
     """
@@ -47,12 +48,21 @@ class FeatureModule(ABC):
     @abstractmethod
     def module_filename(self) -> str: ...
 
-    @property
-    @abstractmethod
-    def module_content(self) -> str: ...
-
     @abstractmethod
     def is_enabled(self, config: DocumentConfig) -> bool: ...
+
+    @property
+    def module_content(self) -> str:
+        """Read the runtime source from the ``otterapi.codegen.runtime`` package.
+
+        Subclasses may override this with a plain class attribute to supply
+        content directly (useful in tests or custom extensions).
+        """
+        return (
+            files('otterapi.codegen.runtime')
+            .joinpath(self.module_filename)
+            .read_text('utf-8')
+        )
 
     def write(self, output_dir: Path | UPath) -> Path | UPath:
         """Write :pyattr:`module_content` into ``output_dir``.
@@ -88,12 +98,6 @@ class PaginationFeature(FeatureModule):
 
     module_filename = '_pagination.py'
 
-    @property
-    def module_content(self) -> str:
-        from otterapi.codegen.pagination import PAGINATION_MODULE_CONTENT
-
-        return PAGINATION_MODULE_CONTENT
-
     def is_enabled(self, config: DocumentConfig) -> bool:
         return bool(config.pagination.enabled)
 
@@ -102,12 +106,6 @@ class DataFrameFeature(FeatureModule):
     """Emits ``_dataframe.py`` (pandas / polars converters)."""
 
     module_filename = '_dataframe.py'
-
-    @property
-    def module_content(self) -> str:
-        from otterapi.codegen.dataframes import DATAFRAME_MODULE_CONTENT
-
-        return DATAFRAME_MODULE_CONTENT
 
     def is_enabled(self, config: DocumentConfig) -> bool:
         return bool(config.dataframe.enabled) and (
@@ -119,12 +117,6 @@ class ExportFeature(FeatureModule):
     """Emits ``_export.py`` (streaming CSV / TSV / JSONL / Parquet writers)."""
 
     module_filename = '_export.py'
-
-    @property
-    def module_content(self) -> str:
-        from otterapi.codegen.export import EXPORT_MODULE_CONTENT
-
-        return EXPORT_MODULE_CONTENT
 
     def is_enabled(self, config: DocumentConfig) -> bool:
         return bool(config.export.enabled)
