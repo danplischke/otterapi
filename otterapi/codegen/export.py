@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from upath import UPath
 
 from otterapi.codegen.ast_utils import (
+    ImportDict,
     _argument,
     _assign,
     _async_func,
@@ -39,8 +40,6 @@ from otterapi.codegen.ast_utils import (
 if TYPE_CHECKING:
     from otterapi.codegen.types import Endpoint, Parameter, RequestBodyInfo, Type
     from otterapi.config import ExportConfig, ExportFormat
-
-ImportDict = dict[str, set[str]]
 
 __all__ = [
     'ExportMethodConfig',
@@ -117,7 +116,7 @@ def get_export_config_for_endpoint(
 
     returns_list = _returns_list(endpoint.response_type)
     should_generate, formats, path = export_config.should_generate_for_endpoint(
-        endpoint_name=endpoint.fn.name,
+        endpoint_name=endpoint.sync_fn_name,
         returns_list=returns_list,
     )
     return ExportMethodConfig(

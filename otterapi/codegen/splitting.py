@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import ImportCollector, _all, _name
+from otterapi.codegen.ast_utils import MODELS_MODULE, ImportCollector, _all, _name
 from otterapi.codegen.dataframes import get_dataframe_config_for_endpoint
 from otterapi.codegen.endpoints import (
     build_default_client_code,
@@ -56,10 +56,6 @@ __all__ = [
     'EmittedModule',
     'SplitModuleEmitter',
 ]
-
-# Relative import path for the generated models module
-MODELS_MODULE = '.models'
-
 
 # =============================================================================
 # Module Tree

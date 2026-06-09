@@ -8,7 +8,6 @@ This module provides utilities for:
 
 import ast
 from dataclasses import dataclass
-from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,8 +18,8 @@ if TYPE_CHECKING:
     from otterapi.config import DataFrameConfig
 
 __all__ = [
-    'DataFrameMethodConfig',
     'generate_dataframe_module',
+    'DataFrameMethodConfig',
     'get_dataframe_imports',
     'get_dataframe_type_checking_imports',
     'get_dataframe_config_for_endpoint',
@@ -30,29 +29,10 @@ __all__ = [
 ]
 
 
-# =============================================================================
-# DataFrame Module Generation
-# =============================================================================
-
-
 def generate_dataframe_module(output_dir: Path | UPath) -> Path | UPath:
-    """Generate the _dataframe.py utility module.
-
-    Args:
-        output_dir: The output directory where the module should be written.
-
-    Returns:
-        The path to the generated file.
-    """
-    output_dir = UPath(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    file_path = output_dir / '_dataframe.py'
-    file_path.write_text(
-        files('otterapi.codegen.runtime').joinpath('_dataframe.py').read_text('utf-8')
-    )
-
-    return file_path
+    """Write ``_dataframe.py`` into *output_dir* and return the written path."""
+    from otterapi.codegen._features import DataFrameFeature
+    return DataFrameFeature().write(output_dir)
 
 
 def get_dataframe_imports() -> dict[str, set[str]]:
@@ -174,7 +154,7 @@ def get_dataframe_config_for_endpoint(
     returns_list = endpoint_returns_list(endpoint)
 
     # Get the sync function name for config lookup
-    endpoint_name = endpoint.fn.name
+    endpoint_name = endpoint.sync_fn_name
 
     # Use the config method to determine what to generate
     gen_pandas, gen_polars, path = dataframe_config.should_generate_for_endpoint(

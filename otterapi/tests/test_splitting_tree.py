@@ -53,7 +53,6 @@ def make_endpoint(
         async_ast=async_ast,
         sync_fn_name=name,
         async_fn_name=f'a{name}',
-        name=name,
         method=method,
         path=path,
         tags=tags,

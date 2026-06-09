@@ -26,6 +26,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal, Self
 
 from otterapi.codegen.ast_utils import (
+    ImportDict,
     _argument,
     _assign,
     _async_func,
@@ -40,9 +41,6 @@ from otterapi.openapi.constants import MediaType
 
 if TYPE_CHECKING:
     from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type
-
-# Type alias for import dictionaries used throughout this module
-ImportDict = dict[str, set[str]]
 
 # String annotations for the optional dataframe-conversion return types
 _PANDAS_DATAFRAME_ANNOTATION = 'pd.DataFrame'

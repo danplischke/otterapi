@@ -5,13 +5,17 @@ of Python client code from OpenAPI specifications.
 """
 
 import ast
+import fnmatch
 import logging
 import os
+from importlib.resources import files
 from urllib.parse import urljoin, urlparse
 
 from upath import UPath
 
+from otterapi.codegen._features import all_features, write_enabled_features
 from otterapi.codegen.ast_utils import (
+    MODELS_MODULE,
     ImportCollector,
     _all,
     _assign,
@@ -28,7 +32,6 @@ from otterapi.codegen.client import (
 )
 from otterapi.codegen.dataframes import (
     DataFrameMethodConfig,
-    generate_dataframe_module,
     get_dataframe_config_for_endpoint,
 )
 from otterapi.codegen.endpoints import async_request_fn, request_fn
@@ -64,49 +67,15 @@ from otterapi.openapi.v3_2.v3_2 import (
     Response as OpenAPIResponse,
 )
 
-_HTML_REPR_SOURCE = '''\
-def _html_val(v):
-    if v is None:
-        return \'<em style="color:#aaa">None</em>\'
-    if isinstance(v, list):
-        n = len(v)
-        preview = ", ".join(str(x) for x in v[:3])
-        suffix = f", … ({n})" if n > 3 else ""
-        return f"[{preview}{suffix}]"
-    if hasattr(v, "_repr_html_"):
-        return v._repr_html_()
-    return str(v)
 
+def _load_models_mixin_source() -> str:
+    return (
+        files('otterapi.codegen.runtime').joinpath('_models_mixin.py').read_text('utf-8')
+    )
 
-class _HtmlReprMixin:
-    """Mixin that renders a Pydantic model as an HTML table in Jupyter notebooks."""
-
-    def _repr_html_(self) -> str:
-        fields = getattr(self.__class__, "model_fields", {})
-        rows = []
-        for i, name in enumerate(fields):
-            val = getattr(self, name, None)
-            bg = \' style="background:#f8f8f8"\' if i % 2 == 0 else ""
-            rows.append(
-                f\'<tr{bg}><td style="font-weight:bold;padding:2px 8px;\'
-                f\'white-space:nowrap;color:#444">{name}</td>\'
-                f\'<td style="padding:2px 8px">{_html_val(val)}</td></tr>\'
-            )
-        class_name = type(self).__name__
-        inner = "".join(rows)
-        return (
-            f\'<details open><summary style="font-weight:bold;cursor:pointer;\'
-            f\'font-family:monospace">{class_name}</summary>\'
-            f\'<table style="border-collapse:collapse;font-size:13px;\'
-            f\'font-family:monospace">{inner}</table></details>\'
-        )
-'''
 
 # Content types that should be treated as JSON
 JSON_CONTENT_TYPES = {MediaType.JSON, MediaType.TEXT_JSON}
-
-# Relative import path for the generated models module
-MODELS_MODULE = '.models'
 
 
 class Codegen(OpenAPIProcessor):
@@ -610,7 +579,6 @@ class Codegen(OpenAPIProcessor):
             sync_fn_name=fn_name,
             async_fn_name=async_fn_name,
             async_ast=async_fn,
-            name=fn_name,
             method=method,
             path=path,
             description=operation.description,
@@ -694,8 +662,6 @@ class Codegen(OpenAPIProcessor):
         Returns:
             True if the path should be included, False otherwise.
         """
-        import fnmatch
-
         # Check include_paths first (if specified, path must match at least one)
         if self.config.include_paths:
             included = any(
@@ -808,7 +774,7 @@ class Codegen(OpenAPIProcessor):
 
     def _build_endpoint_file_body(
         self, endpoints: list[Endpoint]
-    ) -> tuple[list[ast.stmt], ImportCollector, set[str]]:
+    ) -> tuple[list[ast.stmt], ImportCollector, set[str], ast.If | None]:
         """Build the body of the endpoints file with standalone functions.
 
         Generates standalone functions with full implementations that use the Client.
@@ -1284,44 +1250,36 @@ class Codegen(OpenAPIProcessor):
             import_collector.add_imports(imports)
         return True
 
-    def _generate_endpoint_file(self, path: UPath, endpoints: list[Endpoint]) -> None:
+    def _generate_endpoint_file(
+        self, path: UPath, endpoints: list[Endpoint]
+    ) -> set[str]:
         """Generate the endpoints Python file with delegating functions.
 
-        Args:
-            path: Path where the endpoints file should be written.
-            endpoints: List of Endpoint objects to include.
+        Returns the set of exported function names so callers can pass them
+        directly to ``_generate_init_file`` without recomputing.
         """
-        # Build file body and collect imports
         body, import_collector, endpoint_names, type_checking_block = (
             self._build_endpoint_file_body(endpoints)
         )
 
-        # Add Client import to collector
         import_collector.add_imports({'.client': {'Client'}})
 
-        # Add model imports only for models actually used in endpoints
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
             for name in model_names:
                 import_collector.add_imports({MODELS_MODULE: {name}})
 
-        # Build final body with imports in proper order
         final_body: list[ast.stmt] = []
-
-        # Add imports from collector (sorted: stdlib, third-party, local)
         final_body.extend(import_collector.to_ast())
 
-        # Add TYPE_CHECKING block after imports if needed
         if type_checking_block:
             final_body.append(type_checking_block)
 
-        # Add __all__ export
         final_body.append(_all(sorted(endpoint_names)))
-
-        # Add the rest of the body (functions)
         final_body.extend(body)
 
         write_mod(final_body, path)
+        return endpoint_names
 
     def _generate_models_file(self, path: UPath) -> None:
         """Generate the models Python file with Pydantic models.
@@ -1364,7 +1322,7 @@ class Codegen(OpenAPIProcessor):
                 import_collector.add_imports(type_.annotation_imports)
 
         # Prepend the _HtmlReprMixin helper (defines _repr_html_ for Jupyter)
-        body[0:0] = ast.parse(_HTML_REPR_SOURCE).body
+        body[0:0] = ast.parse(_load_models_mixin_source()).body
 
         # Add __all__ export
         body.insert(0, _all(sorted(all_names)))
@@ -1403,27 +1361,8 @@ class Codegen(OpenAPIProcessor):
 
         base_url = self._resolve_base_url()
 
-        # Emit each enabled runtime-helper module (_pagination.py /
-        # _export.py / _dataframe.py if the latter has paginated DF methods).
-        # Pagination + Export use the unified FeatureModule pipeline; the
-        # DataFrame module's emission stays gated by the per-endpoint pass
-        # below (only written when at least one endpoint actually uses it).
-        from otterapi.codegen._features import (
-            ConcurrencyFeature,
-            ExportFeature,
-            PaginationFeature,
-            RetryFeature,
-        )
-
-        for feature in (
-            PaginationFeature(),
-            ExportFeature(),
-            ConcurrencyFeature(),
-            RetryFeature(),
-        ):
-            if feature.is_enabled(self.config):
-                feature.write(directory)
-                generated_files.append(f'{output_name}/{feature.module_filename}')
+        for written in write_enabled_features(self.config, directory, all_features()):
+            generated_files.append(f'{output_name}/{written.name}')
 
         # Generate client class
         client_name = self._get_client_class_name()
@@ -1435,9 +1374,8 @@ class Codegen(OpenAPIProcessor):
             )
             generated_files.extend(split_files)
         else:
-            # Original single-file generation
             endpoints_file = directory / self.config.endpoints_file
-            self._generate_endpoint_file(endpoints_file, endpoints)
+            endpoint_names = self._generate_endpoint_file(endpoints_file, endpoints)
             generated_files.append(f'{output_name}/{self.config.endpoints_file}')
 
         client_files = self._generate_client_file(
@@ -1447,86 +1385,20 @@ class Codegen(OpenAPIProcessor):
 
         # Write __init__.py only if not using module splitting (splitting handles its own __init__.py)
         if not self.config.module_split.enabled:
-            self._generate_init_file(directory, endpoints, client_name)
+            self._generate_init_file(directory, endpoint_names, client_name)
             generated_files.append(f'{output_name}/__init__.py')
 
         return generated_files
 
-    def _collect_init_endpoint_names(self, endpoints: list[Endpoint]) -> list[str]:
-        """Collect every exported function name for the package ``__init__.py``.
-
-        Includes the base sync/async pair plus pagination iterator and
-        DataFrame variant names, depending on what's enabled in config.
-        """
-        endpoint_names = []
-        for endpoint in endpoints:
-            endpoint_names.append(endpoint.sync_fn_name)
-            endpoint_names.append(endpoint.async_fn_name)
-
-            pag_config = None
-            if self.config.pagination.enabled:
-                pag_config = self._get_pagination_config(endpoint)
-
-            if pag_config:
-                endpoint_names.append(f'{endpoint.sync_fn_name}_iter')
-                endpoint_names.append(f'{endpoint.async_fn_name}_iter')
-
-            if self.config.dataframe.enabled:
-                endpoint_names.extend(
-                    self._collect_init_dataframe_names(endpoint, pag_config)
-                )
-
-        return endpoint_names
-
-    def _collect_init_dataframe_names(
-        self, endpoint: Endpoint, pag_config
-    ) -> list[str]:
-        """Collect DataFrame method export names for a single endpoint.
-
-        Paginated endpoints always generate DataFrame methods unless explicitly
-        disabled per-endpoint; non-paginated endpoints use the standard
-        per-endpoint DataFrame config check.
-        """
-        if pag_config is not None:
-            endpoint_df_config = self.config.dataframe.endpoints.get(
-                endpoint.sync_fn_name
-            )
-            if endpoint_df_config and endpoint_df_config.enabled is False:
-                return []
-            generate_pandas = self.config.dataframe.pandas
-            generate_polars = self.config.dataframe.polars
-        else:
-            df_config = self._get_dataframe_config(endpoint)
-            generate_pandas = df_config.generate_pandas
-            generate_polars = df_config.generate_polars
-
-        names = []
-        if generate_pandas:
-            names.append(f'{endpoint.sync_fn_name}_df')
-            names.append(f'{endpoint.async_fn_name}_df')
-        if generate_polars:
-            names.append(f'{endpoint.sync_fn_name}_pl')
-            names.append(f'{endpoint.async_fn_name}_pl')
-        return names
-
     def _generate_init_file(
         self,
         directory: UPath,
-        endpoints: list[Endpoint],
+        endpoint_names: set[str],
         client_class_name: str,
     ) -> None:
-        """Generate __init__.py with all exports for non-split mode.
-
-        Args:
-            directory: Output directory.
-            endpoints: List of Endpoint objects.
-            client_class_name: Name of the client class.
-        """
+        """Generate __init__.py with all exports for non-split mode."""
         body: list[ast.stmt] = []
         all_names: list[str] = []
-
-        # Get endpoint names (including DataFrame methods if configured)
-        endpoint_names = self._collect_init_endpoint_names(endpoints)
 
         # Import endpoints from endpoints.py
         endpoints_file_stem = self.config.endpoints_file.replace('.py', '')
@@ -1801,19 +1673,8 @@ class Codegen(OpenAPIProcessor):
         """
         base_client_name = f'Base{client_name}'
 
-        # Convert endpoints to EndpointInfo for client generation
-        endpoint_infos = self._endpoints_to_info(endpoints)
-        has_dataframe_methods = self._client_has_dataframe_methods(
-            endpoints, endpoint_infos
-        )
-
         output_name = self.config.output
         generated_files = []
-
-        # Generate _dataframe.py if needed
-        if has_dataframe_methods:
-            generate_dataframe_module(directory)
-            generated_files.append(f'{output_name}/_dataframe.py')
 
         # Generate base client class (infrastructure only, no endpoint methods)
         class_ast, client_imports = generate_base_client_class(
@@ -1882,8 +1743,8 @@ class Codegen(OpenAPIProcessor):
             dataframe_config = self._get_dataframe_config(ep)
 
             info = EndpointInfo(
-                name=ep.fn.name,
-                async_name=ep.async_fn.name,
+                name=ep.sync_fn_name,
+                async_name=ep.async_fn_name,
                 method=ep.method,
                 path=ep.path,
                 parameters=ep.parameters,

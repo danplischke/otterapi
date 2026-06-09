@@ -1,7 +1,5 @@
 import ast
-import py_compile
 import re
-import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,19 +127,7 @@ def validate_python_syntax(content: str) -> None:
     Raises:
         SyntaxError: If the code is not valid Python.
     """
-    with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.py', delete=False, encoding='utf-8'
-    ) as f:
-        f.write(content)
-        f.flush()
-        temp_path = f.name
-
-    try:
-        # Compile to check for syntax errors
-        py_compile.compile(temp_path, doraise=True)
-    finally:
-        # Clean up temp file
-        Path(temp_path).unlink(missing_ok=True)
+    compile(content, '<generated>', 'exec')
 
 
 def _add_blank_lines(source: str) -> str:

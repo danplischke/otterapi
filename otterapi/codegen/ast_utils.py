@@ -24,7 +24,16 @@ __all__ = [
     '_all',
     # Import collection
     'ImportCollector',
+    # Shared constants / type aliases
+    'MODELS_MODULE',
+    'ImportDict',
 ]
+
+# Relative import path for the generated models module — single source of truth.
+MODELS_MODULE = '.models'
+
+# Type alias for import dictionaries used throughout codegen.
+ImportDict = dict[str, set[str]]
 
 
 def _name(name: str) -> ast.Name:

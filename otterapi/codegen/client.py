@@ -11,6 +11,7 @@ from importlib.resources import files
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
+    ImportDict,
     _argument,
     _assign,
     _attr,
@@ -23,9 +24,6 @@ from otterapi.codegen.dataframes import DataFrameMethodConfig
 
 if TYPE_CHECKING:
     from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type
-
-# Type alias for import dictionaries
-ImportDict = dict[str, set[str]]
 
 # Prefix used when building `f'HTTP {status_code} ...'` error messages in generated code
 _HTTP_ERROR_PREFIX = 'HTTP '

@@ -88,6 +88,17 @@ def write_enabled_features(
     ]
 
 
+def all_features() -> list[FeatureModule]:
+    """Ordered list of every runtime-helper feature."""
+    return [
+        PaginationFeature(),
+        DataFrameFeature(),
+        ExportFeature(),
+        ConcurrencyFeature(),
+        RetryFeature(),
+    ]
+
+
 # =============================================================================
 # Concrete features
 # =============================================================================
@@ -140,12 +151,3 @@ class RetryFeature(FeatureModule):
         return True
 
 
-def all_features() -> list[FeatureModule]:
-    """Canonical ordered list of every runtime-helper feature."""
-    return [
-        PaginationFeature(),
-        DataFrameFeature(),
-        ExportFeature(),
-        ConcurrencyFeature(),
-        RetryFeature(),
-    ]

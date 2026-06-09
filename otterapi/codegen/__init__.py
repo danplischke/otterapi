@@ -8,7 +8,6 @@ Main Components:
     - TypeGenerator: Generates Pydantic models from OpenAPI schemas
     - SchemaLoader: Loads OpenAPI schemas from URLs or files
     - SchemaResolver: Resolves $ref references in schemas
-    - TypeRegistry: Manages generated types and their dependencies
 
 Example:
     >>> from otterapi.codegen import Codegen

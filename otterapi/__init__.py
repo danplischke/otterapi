@@ -25,7 +25,7 @@ https://github.com/yourusername/otterapi
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.codegen.schema import SchemaLoader, SchemaResolver
-from otterapi.codegen.types import TypeGenerator, TypeRegistry
+from otterapi.codegen.types import TypeGenerator
 from otterapi.config import CodegenConfig, DocumentConfig, get_config
 from otterapi.exceptions import (
     CodeGenerationError,
@@ -46,7 +46,6 @@ __all__ = [
     'Codegen',
     'SchemaLoader',
     'SchemaResolver',
-    'TypeRegistry',
     'TypeGenerator',
     # Configuration
     'CodegenConfig',
