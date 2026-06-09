@@ -67,15 +67,14 @@ def extract_path(data: dict | list, path: str | None) -> Any:
             if key not in current:
                 raise KeyError(
                     f"Key '{key}' not found in response. "
-                    f"Available keys: {list(current.keys())}. Full path: {path}"
+                    f'Available keys: {list(current.keys())}. Full path: {path}'
                 )
             current = current[key]
         elif isinstance(current, list) and key.isdigit():
             current = current[int(key)]
         else:
             raise KeyError(
-                f"Cannot access '{key}' on {type(current).__name__}. "
-                f"Full path: {path}"
+                f"Cannot access '{key}' on {type(current).__name__}. Full path: {path}"
             )
 
     return current
