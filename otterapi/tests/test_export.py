@@ -8,9 +8,8 @@ import csv
 import importlib.util
 import json
 import sys
-from datetime import datetime, date, time
+from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Union
 from enum import Enum
 from pathlib import Path
 from uuid import UUID
@@ -306,7 +305,7 @@ class TestParquetTypeHandlingRegression:
         pq = pytest.importorskip('pyarrow.parquet')
 
         class FlexModel(BaseModel):
-            value: Union[int, str]
+            value: int | str
 
         path = tmp_path / 'union.parquet'
         exported_runtime.to_parquet(
@@ -676,7 +675,7 @@ class TestJsonlWriterExtended:
             model=User,
         )
         assert written == 2
-        records = [json.loads(l) for l in path.read_text(encoding='utf-8').splitlines()]
+        records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
         assert records[0]['id'] == 1
         assert records[1]['name'] == 'bob'
 

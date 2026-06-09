@@ -6,7 +6,6 @@ This module provides utilities for:
 - Building paginated endpoint functions
 """
 
-import ast
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -15,7 +14,6 @@ from typing import TYPE_CHECKING
 from upath import UPath
 
 if TYPE_CHECKING:
-    from otterapi.codegen.types import Type
     from otterapi.config import PaginationConfig
 
 __all__ = [

@@ -20,7 +20,6 @@ from otterapi.codegen.ast_utils import (
     _union_expr,
 )
 from otterapi.codegen.dataframes import DataFrameMethodConfig
-from otterapi.codegen.endpoints import ParameterASTBuilder
 
 if TYPE_CHECKING:
     from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type

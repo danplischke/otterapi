@@ -513,7 +513,7 @@ class Header(BaseModel):
     required: bool | None = False
     deprecated: bool | None = False
     allowEmptyValue: bool | None = False
-    style: ParameterStyle | None = ParameterStyle.simple
+    style: ParameterStyle | str | None = ParameterStyle.simple
     explode: bool | None = None
     allowReserved: bool | None = False
     schema_: Schema | Reference | None = Field(None, alias='schema')

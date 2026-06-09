@@ -19,6 +19,50 @@ from otterapi.codegen.ast_utils import (
     _name,
     _union_expr,
 )
+from otterapi.codegen.client import (
+    EndpointInfo,
+    _exported_error_names,
+    generate_api_error_hierarchy,
+    generate_base_client_class,
+    generate_client_stub,
+)
+from otterapi.codegen.dataframes import (
+    DataFrameMethodConfig,
+    generate_dataframe_module,
+    get_dataframe_config_for_endpoint,
+)
+from otterapi.codegen.endpoints import async_request_fn, request_fn
+from otterapi.codegen.pagination import (
+    PaginationMethodConfig,
+    get_pagination_config_for_endpoint,
+)
+from otterapi.codegen.schema import SchemaLoader
+from otterapi.codegen.types import (
+    Endpoint,
+    Parameter,
+    RequestBodyInfo,
+    ResponseInfo,
+    Type,
+    TypeGenerator,
+    collect_used_model_names,
+)
+from otterapi.codegen.utils import (
+    OpenAPIProcessor,
+    sanitize_identifier,
+    sanitize_parameter_field_name,
+    to_snake_case,
+    write_mod,
+)
+from otterapi.config import DocumentConfig
+from otterapi.openapi.constants import HTTP_METHODS, MediaType
+from otterapi.openapi.v3_2.v3_2 import (
+    OpenAPI as OpenAPIv3_2,
+    Operation,
+    Parameter as OpenAPIParameter,
+    Reference,
+    RequestBody as OpenAPIRequestBody,
+    Response as OpenAPIResponse,
+)
 
 _HTML_REPR_SOURCE = '''\
 def _html_val(v):
@@ -57,51 +101,6 @@ class _HtmlReprMixin:
             f\'font-family:monospace">{inner}</table></details>\'
         )
 '''
-from otterapi.codegen.client import (
-    EndpointInfo,
-    _exported_error_names,
-    generate_api_error_hierarchy,
-    generate_base_client_class,
-    generate_client_stub,
-)
-from otterapi.codegen.dataframes import (
-    DataFrameMethodConfig,
-    endpoint_returns_list,
-    generate_dataframe_module,
-    get_dataframe_config_for_endpoint,
-)
-from otterapi.codegen.endpoints import async_request_fn, request_fn
-from otterapi.codegen.pagination import (
-    PaginationMethodConfig,
-    get_pagination_config_for_endpoint,
-)
-from otterapi.codegen.schema import SchemaLoader
-from otterapi.codegen.types import (
-    Endpoint,
-    Parameter,
-    RequestBodyInfo,
-    ResponseInfo,
-    Type,
-    TypeGenerator,
-    collect_used_model_names,
-)
-from otterapi.codegen.utils import (
-    OpenAPIProcessor,
-    sanitize_identifier,
-    sanitize_parameter_field_name,
-    to_snake_case,
-    write_mod,
-)
-from otterapi.config import DocumentConfig
-from otterapi.openapi.constants import HTTP_METHODS, MediaType
-from otterapi.openapi.v3_2.v3_2 import (
-    OpenAPI as OpenAPIv3_2,
-    Operation,
-    Parameter as OpenAPIParameter,
-    Reference,
-    RequestBody as OpenAPIRequestBody,
-    Response as OpenAPIResponse,
-)
 
 # Content types that should be treated as JSON
 JSON_CONTENT_TYPES = {MediaType.JSON, MediaType.TEXT_JSON}

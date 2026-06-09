@@ -129,7 +129,7 @@ def validate_python_syntax(content: str) -> None:
     Raises:
         SyntaxError: If the code is not valid Python.
     """
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
         f.write(content)
         f.flush()
         temp_path = f.name

@@ -7,7 +7,6 @@ import asyncio
 import pytest
 
 from otterapi.codegen.runtime._concurrency import (
-    _bounded_gather,
     run_concurrently,
     run_concurrently_async,
     run_sync,
@@ -76,7 +75,7 @@ class TestRunConcurrently:
         async def identity(x):
             return x
 
-        results = run_concurrently((identity(i) for i in range(3)))
+        results = run_concurrently(identity(i) for i in range(3))
         assert results == [0, 1, 2]
 
     def test_single_coroutine(self):

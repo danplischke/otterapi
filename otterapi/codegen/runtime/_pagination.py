@@ -1,9 +1,9 @@
 """Pagination utilities for OtterAPI generated clients."""
 
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Generator, TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar('T')
 PageT = TypeVar('PageT')

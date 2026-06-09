@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field
 
 from otterapi.codegen.ast_utils import _call, _name, _subscript, _union_expr
 from otterapi.codegen.utils import (
