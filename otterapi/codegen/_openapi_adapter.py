@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from otterapi.openapi.constants import HTTP_METHODS
+
 if TYPE_CHECKING:
     from otterapi.openapi.v3_2.v3_2 import (
         OpenAPI as OpenAPIv3_2,
@@ -79,16 +81,7 @@ class OpenAPIAdapter:
         elsewhere in codegen.
         """
         for path, item in self.paths().items():
-            for method in (
-                'get',
-                'post',
-                'put',
-                'patch',
-                'delete',
-                'head',
-                'options',
-                'trace',
-            ):
+            for method in HTTP_METHODS:
                 op = getattr(item, method, None)
                 if op is not None:
                     yield path, method, op

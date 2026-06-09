@@ -19,6 +19,14 @@ from pydantic_settings import BaseSettings
 
 DEFAULT_FILENAMES = ['otter.yaml', 'otter.yml', 'otter.json']
 
+# Default generated file names, also used as field descriptions/defaults below
+DEFAULT_MODELS_FILENAME = 'models.py'
+DEFAULT_ENDPOINTS_FILENAME = 'endpoints.py'
+
+# Shared Field descriptions reused across top-level and per-endpoint override configs
+_JSON_PATH_DESCRIPTION = 'JSON path to extract data from response.'
+_PER_ENDPOINT_OVERRIDES_DESCRIPTION = 'Per-endpoint configuration overrides.'
+
 
 def _expand_env_vars(value: str) -> str:
     """Expand environment variables in a string.
@@ -90,7 +98,7 @@ class EndpointDataFrameConfig(BaseModel):
 
     path: str | None = Field(
         default=None,
-        description='JSON path to extract data from response.',
+        description=_JSON_PATH_DESCRIPTION,
     )
 
     pandas: bool | None = Field(
@@ -311,59 +319,40 @@ class PaginationConfig(BaseModel):
             return PaginationStyle(v.lower())
         return v
 
-    def should_generate_for_endpoint(
-        self,
-        endpoint_name: str,
-        endpoint_parameters: list | None = None,
+    def _auto_detect_pagination(
+        self, endpoint_parameters: list | None
     ) -> tuple[bool, ResolvedPaginationConfig | None]:
-        """Determine if pagination methods should be generated for an endpoint.
-
-        Args:
-            endpoint_name: The name of the endpoint function.
-            endpoint_parameters: Optional list of endpoint parameters for auto-detection.
-
-        Returns:
-            A tuple of (should_generate, resolved_config) indicating
-            whether to generate and the resolved configuration.
-        """
-        if not self.enabled:
+        """Detect pagination style from endpoint parameters and resolve via defaults."""
+        if not self.auto_detect or endpoint_parameters is None:
             return False, None
 
-        # Check for endpoint-specific configuration
-        endpoint_config = self.endpoints.get(endpoint_name)
+        detected_style = self._detect_pagination_style(endpoint_parameters)
+        if detected_style is None:
+            return False, None
 
-        if endpoint_config is None:
-            # No explicit config - check if auto_detect is enabled
-            if not self.auto_detect or endpoint_parameters is None:
-                return False, None
+        resolved = ResolvedPaginationConfig(
+            style=detected_style,
+            offset_param=self.default_offset_param,
+            limit_param=self.default_limit_param,
+            cursor_param=self.default_cursor_param,
+            page_param=self.default_page_param,
+            per_page_param=self.default_per_page_param,
+            data_path=self.default_data_path,
+            total_path=self.default_total_path,
+            next_cursor_path=None,
+            total_pages_path=None,
+            default_page_size=self.default_page_size,
+            max_page_size=None,
+        )
+        return True, resolved
 
-            # Auto-detect pagination based on parameters
-            detected_style = self._detect_pagination_style(endpoint_parameters)
-            if detected_style is None:
-                return False, None
-
-            # Use defaults for auto-detected endpoints
-            resolved = ResolvedPaginationConfig(
-                style=detected_style,
-                offset_param=self.default_offset_param,
-                limit_param=self.default_limit_param,
-                cursor_param=self.default_cursor_param,
-                page_param=self.default_page_param,
-                per_page_param=self.default_per_page_param,
-                data_path=self.default_data_path,
-                total_path=self.default_total_path,
-                next_cursor_path=None,
-                total_pages_path=None,
-                default_page_size=self.default_page_size,
-                max_page_size=None,
-            )
-            return True, resolved
-
-        # Check if explicitly disabled
+    def _resolve_explicit_pagination(
+        self, endpoint_config: EndpointPaginationConfig
+    ) -> tuple[bool, ResolvedPaginationConfig | None]:
+        """Resolve an endpoint-specific pagination config, falling back to defaults."""
         if endpoint_config.enabled is False:
             return False, None
 
-        # Resolve the configuration with defaults
         style = endpoint_config.style or self.default_style
         if isinstance(style, str):
             style = PaginationStyle(style.lower())
@@ -384,8 +373,31 @@ class PaginationConfig(BaseModel):
             or self.default_page_size,
             max_page_size=endpoint_config.max_page_size,
         )
-
         return True, resolved
+
+    def should_generate_for_endpoint(
+        self,
+        endpoint_name: str,
+        endpoint_parameters: list | None = None,
+    ) -> tuple[bool, ResolvedPaginationConfig | None]:
+        """Determine if pagination methods should be generated for an endpoint.
+
+        Args:
+            endpoint_name: The name of the endpoint function.
+            endpoint_parameters: Optional list of endpoint parameters for auto-detection.
+
+        Returns:
+            A tuple of (should_generate, resolved_config) indicating
+            whether to generate and the resolved configuration.
+        """
+        if not self.enabled:
+            return False, None
+
+        endpoint_config = self.endpoints.get(endpoint_name)
+        if endpoint_config is None:
+            return self._auto_detect_pagination(endpoint_parameters)
+
+        return self._resolve_explicit_pagination(endpoint_config)
 
     def _detect_pagination_style(self, parameters: list) -> PaginationStyle | None:
         """Detect pagination style based on endpoint parameters.
@@ -487,10 +499,45 @@ class DataFrameConfig(BaseModel):
 
     endpoints: dict[str, EndpointDataFrameConfig] = Field(
         default_factory=dict,
-        description='Per-endpoint configuration overrides.',
+        description=_PER_ENDPOINT_OVERRIDES_DESCRIPTION,
     )
 
     model_config = {'extra': 'forbid'}
+
+    def _resolve_endpoint_dataframe_config(
+        self,
+        endpoint_config: EndpointDataFrameConfig,
+        returns_list: bool,
+    ) -> tuple[bool, bool, str | None]:
+        """Resolve generation flags/path for an endpoint with explicit DataFrame config."""
+        if endpoint_config.enabled is False:
+            return False, False, None
+
+        gen_pandas = (
+            endpoint_config.pandas
+            if endpoint_config.pandas is not None
+            else self.pandas
+        )
+        gen_polars = (
+            endpoint_config.polars
+            if endpoint_config.polars is not None
+            else self.polars
+        )
+        path = (
+            endpoint_config.path
+            if endpoint_config.path is not None
+            else self.default_path
+        )
+
+        # If endpoint is explicitly enabled, generate regardless of return type
+        if endpoint_config.enabled is True:
+            return gen_pandas, gen_polars, path
+
+        # Otherwise, respect include_all and returns_list
+        if self.include_all and returns_list:
+            return gen_pandas, gen_polars, path
+
+        return False, False, None
 
     def should_generate_for_endpoint(
         self,
@@ -510,50 +557,13 @@ class DataFrameConfig(BaseModel):
         if not self.enabled:
             return False, False, None
 
-        # Check for endpoint-specific override
         endpoint_config = self.endpoints.get(endpoint_name)
-
         if endpoint_config is not None:
-            # Endpoint has specific config
-            if endpoint_config.enabled is False:
-                return False, False, None
-
-            # Determine pandas generation
-            gen_pandas = (
-                endpoint_config.pandas
-                if endpoint_config.pandas is not None
-                else self.pandas
+            return self._resolve_endpoint_dataframe_config(
+                endpoint_config, returns_list
             )
 
-            # Determine polars generation
-            gen_polars = (
-                endpoint_config.polars
-                if endpoint_config.polars is not None
-                else self.polars
-            )
-
-            # Determine path
-            path = (
-                endpoint_config.path
-                if endpoint_config.path is not None
-                else self.default_path
-            )
-
-            # If endpoint is explicitly enabled, generate regardless of return type
-            if endpoint_config.enabled is True:
-                return gen_pandas, gen_polars, path
-
-            # Otherwise, respect include_all and returns_list
-            if self.include_all and returns_list:
-                return gen_pandas, gen_polars, path
-
-            return False, False, None
-
-        # No endpoint-specific config - use defaults
-        if not self.include_all:
-            return False, False, None
-
-        if not returns_list:
+        if not self.include_all or not returns_list:
             return False, False, None
 
         return self.pandas, self.polars, self.default_path
@@ -580,7 +590,7 @@ class EndpointExportConfig(BaseModel):
 
     path: str | None = Field(
         default=None,
-        description='JSON path to extract data from response.',
+        description=_JSON_PATH_DESCRIPTION,
     )
 
     formats: list[ExportFormat] | None = Field(
@@ -637,7 +647,7 @@ class ExportConfig(BaseModel):
 
     endpoints: dict[str, EndpointExportConfig] = Field(
         default_factory=dict,
-        description='Per-endpoint configuration overrides.',
+        description=_PER_ENDPOINT_OVERRIDES_DESCRIPTION,
     )
 
     model_config = {'extra': 'forbid'}
@@ -708,7 +718,7 @@ class EndpointResponseUnwrapConfig(BaseModel):
 
     data_path: str | None = Field(
         default=None,
-        description='JSON path to extract data from response.',
+        description=_JSON_PATH_DESCRIPTION,
     )
 
     model_config = {'extra': 'forbid'}
@@ -739,7 +749,7 @@ class ResponseUnwrapConfig(BaseModel):
 
     endpoints: dict[str, EndpointResponseUnwrapConfig] = Field(
         default_factory=dict,
-        description='Per-endpoint configuration overrides.',
+        description=_PER_ENDPOINT_OVERRIDES_DESCRIPTION,
     )
 
     model_config = {'extra': 'forbid'}
@@ -877,50 +887,53 @@ def _is_module_definition_dict(value: dict) -> bool:
     return bool(set(value.keys()) & known_keys)
 
 
+def _normalize_module_value(key: str, value: ModuleMapValue) -> ModuleDefinition:
+    """Normalize a single module_map entry into a ModuleDefinition."""
+    if isinstance(value, ModuleDefinition):
+        # Already a ModuleDefinition, but recursively normalize its modules
+        if value.modules:
+            return value.model_copy(
+                update={'modules': _normalize_module_map(value.modules)}
+            )
+        return value
+
+    if isinstance(value, str):
+        # Single path pattern string → ModuleDefinition with one path
+        return ModuleDefinition(paths=[value])
+
+    if isinstance(value, list):
+        # List of path patterns → ModuleDefinition with paths
+        return ModuleDefinition(paths=value)
+
+    if isinstance(value, dict):
+        # Dict that's not yet a ModuleDefinition - could be:
+        # 1. A dict that should be parsed as ModuleDefinition (has known keys)
+        # 2. A dict of nested modules (shorthand for modules={...})
+        if _is_module_definition_dict(value):
+            definition = ModuleDefinition.model_validate(value)
+            if definition.modules:
+                definition = definition.model_copy(
+                    update={'modules': _normalize_module_map(definition.modules)}
+                )
+            return definition
+
+        # Treat the dict as a nested module structure
+        # This handles cases like: {"identity": {"users": [...], "auth": [...]}}
+        return ModuleDefinition(modules=_normalize_module_map(value))
+
+    raise ValueError(
+        f"Invalid module_map value for '{key}': expected str, list, dict, "
+        f'or ModuleDefinition, got {type(value).__name__}'
+    )
+
+
 def _normalize_module_map(
     module_map: dict[str, ModuleMapValue],
 ) -> dict[str, ModuleDefinition]:
     """Recursively normalize module_map values to ModuleDefinition objects."""
-    normalized: dict[str, ModuleDefinition] = {}
-
-    for key, value in module_map.items():
-        if isinstance(value, ModuleDefinition):
-            # Already a ModuleDefinition, but recursively normalize its modules
-            if value.modules:
-                value = value.model_copy(
-                    update={'modules': _normalize_module_map(value.modules)}
-                )
-            normalized[key] = value
-        elif isinstance(value, str):
-            # Single path pattern string → ModuleDefinition with one path
-            normalized[key] = ModuleDefinition(paths=[value])
-        elif isinstance(value, list):
-            # List of path patterns → ModuleDefinition with paths
-            normalized[key] = ModuleDefinition(paths=value)
-        elif isinstance(value, dict):
-            # Dict that's not yet a ModuleDefinition - could be:
-            # 1. A dict that should be parsed as ModuleDefinition (has known keys)
-            # 2. A dict of nested modules (shorthand for modules={...})
-            if _is_module_definition_dict(value):
-                # Try to parse as ModuleDefinition
-                definition = ModuleDefinition.model_validate(value)
-                if definition.modules:
-                    definition = definition.model_copy(
-                        update={'modules': _normalize_module_map(definition.modules)}
-                    )
-                normalized[key] = definition
-            else:
-                # Treat the dict as a nested module structure
-                # This handles cases like: {"identity": {"users": [...], "auth": [...]}}
-                nested_modules = _normalize_module_map(value)
-                normalized[key] = ModuleDefinition(modules=nested_modules)
-        else:
-            raise ValueError(
-                f"Invalid module_map value for '{key}': expected str, list, dict, "
-                f'or ModuleDefinition, got {type(value).__name__}'
-            )
-
-    return normalized
+    return {
+        key: _normalize_module_value(key, value) for key, value in module_map.items()
+    }
 
 
 class DocumentConfig(BaseModel):
@@ -966,14 +979,16 @@ class DocumentConfig(BaseModel):
         ),
     )
 
-    models_file: str = Field('models.py', description='File name for generated models.')
+    models_file: str = Field(
+        DEFAULT_MODELS_FILENAME, description='File name for generated models.'
+    )
 
     models_import_path: str | None = Field(
         None, description='Optional import path for generated models.'
     )
 
     endpoints_file: str = Field(
-        'endpoints.py', description='File name for generated endpoints.'
+        DEFAULT_ENDPOINTS_FILENAME, description='File name for generated endpoints.'
     )
 
     generate_async: bool = Field(
@@ -1309,9 +1324,11 @@ def get_config(path: str | None = None) -> CodegenConfig:
                     source=env_source,
                     output=env_output,
                     base_url=os.environ.get('OTTER_BASE_URL'),
-                    models_file=os.environ.get('OTTER_MODELS_FILE', 'models.py'),
+                    models_file=os.environ.get(
+                        'OTTER_MODELS_FILE', DEFAULT_MODELS_FILENAME
+                    ),
                     endpoints_file=os.environ.get(
-                        'OTTER_ENDPOINTS_FILE', 'endpoints.py'
+                        'OTTER_ENDPOINTS_FILE', DEFAULT_ENDPOINTS_FILENAME
                     ),
                 )
             ]
@@ -1334,8 +1351,8 @@ def create_default_config() -> dict:
             {
                 'source': 'https://petstore3.swagger.io/api/v3/openapi.json',
                 'output': './client',
-                'models_file': 'models.py',
-                'endpoints_file': 'endpoints.py',
+                'models_file': DEFAULT_MODELS_FILENAME,
+                'endpoints_file': DEFAULT_ENDPOINTS_FILENAME,
                 'generate_async': True,
                 'generate_sync': True,
             }

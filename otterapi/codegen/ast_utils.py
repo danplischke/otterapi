@@ -227,7 +227,7 @@ class ImportCollector:
 
         return 1  # Third-party
 
-    def to_ast(self, reverse_sort: bool = True) -> list[ast.ImportFrom]:
+    def to_ast(self) -> list[ast.ImportFrom]:
         """Convert collected imports to AST ImportFrom statements.
 
         Imports are sorted according to Python conventions:
@@ -237,9 +237,6 @@ class ImportCollector:
 
         Within each category, imports are sorted alphabetically by module name.
         Names within each import are also sorted alphabetically.
-
-        Args:
-            reverse_sort: Deprecated, kept for backward compatibility but ignored.
 
         Returns:
             List of ast.ImportFrom statements, properly sorted.

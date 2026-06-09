@@ -390,14 +390,14 @@ class SchemaResolver:
             return self._resolve_local_reference(ref)
 
         # Handle external references (not yet supported)
-        if ref.startswith('http://') or ref.startswith('https://'):
+        if ref.startswith(('http://', 'https://')):
             raise SchemaReferenceError(
                 ref,
                 'External URL references are not yet supported. '
                 'Consider inlining the referenced schema.',
             )
 
-        if ref.startswith('./') or ref.startswith('../'):
+        if ref.startswith(('./', '../')):
             raise SchemaReferenceError(
                 ref,
                 'Relative file references are not yet supported. '

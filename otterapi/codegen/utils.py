@@ -53,7 +53,8 @@ def sanitize_parameter_field_name(name: str) -> str:
 
     sanitized = sanitize_name_python_keywords(name)
     sanitized = re.sub(r'[-\s]+', '_', remove_accents(sanitized))
-    sanitized = re.sub(r'[^A-Za-z0-9_]', '', sanitized)
+    # re.ASCII keeps \W equivalent to [^A-Za-z0-9_] (no Unicode letters)
+    sanitized = re.sub(r'\W', '', sanitized, flags=re.ASCII)
 
     if sanitized and sanitized[0].isdigit():
         sanitized = '_' + sanitized
@@ -108,8 +109,8 @@ def sanitize_identifier(name: str) -> str:
     else:
         sanitized = ''.join(capitalize(part) for part in parts if part)
 
-    # Remove any remaining invalid characters
-    sanitized = re.sub(r'[^A-Za-z0-9_]', '', sanitized)
+    # Remove any remaining invalid characters (re.ASCII keeps \W == [^A-Za-z0-9_])
+    sanitized = re.sub(r'\W', '', sanitized, flags=re.ASCII)
 
     # Ensure it doesn't start with a digit
     if sanitized and sanitized[0].isdigit():
@@ -156,7 +157,7 @@ def _add_blank_lines(source: str) -> str:
 
     # Add blank line after TYPE_CHECKING block before __all__
     source = re.sub(
-        r'(if TYPE_CHECKING:\n(?:    [^\n]+\n)+)(__all__)',
+        r'(if TYPE_CHECKING:\n(?: {4}[^\n]+\n)+)(__all__)',
         r'\1\n\2',
         source,
     )

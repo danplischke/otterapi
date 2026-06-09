@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AnyUrl,
@@ -16,57 +17,14 @@ from pydantic import (
 
 # Import OpenAPI 3.1 models for upgrade functionality
 from otterapi.openapi.v3_1 import v3_1 as openapi_v3_1
+from otterapi.openapi.warnings import WarningCollector
 
-
-class WarningCollector:
-    """Helper class to collect and deduplicate warnings during upgrade.
-
-    Instead of generating per-occurrence warnings that can flood output for large APIs,
-    this class tracks warning counts and generates summary messages.
-    """
-
-    def __init__(self) -> None:
-        self._counts: dict[str, int] = {}
-        self._unique_warnings: list[str] = []
-
-    def add(self, warning_key: str, count: int = 1) -> None:
-        """Add a warning that should be counted and summarized."""
-        self._counts[warning_key] = self._counts.get(warning_key, 0) + count
-
-    def add_unique(self, warning: str) -> None:
-        """Add a warning that should appear as-is (not deduplicated)."""
-        self._unique_warnings.append(warning)
-
-    def get_warnings(self) -> list[str]:
-        """Get the final list of deduplicated/summarized warnings."""
-        result: list[str] = []
-
-        # Add unique warnings first
-        result.extend(self._unique_warnings)
-
-        # Add summarized warnings
-        warning_templates = {
-            'nullable_to_type_array': 'Converting nullable field to type array for schema',
-            'nullable_without_type': 'Schema has nullable=true without type, converting to type: [null]',
-            'exclusive_maximum': 'Converting exclusiveMaximum from boolean to numeric',
-            'exclusive_minimum': 'Converting exclusiveMinimum from boolean to numeric',
-        }
-
-        for key, count in self._counts.items():
-            if key in warning_templates:
-                msg = warning_templates[key]
-                if count == 1:
-                    result.append(msg)
-                else:
-                    result.append(f'{msg} ({count} occurrences)')
-            else:
-                # Generic key not in templates
-                if count == 1:
-                    result.append(key)
-                else:
-                    result.append(f'{key} ({count} occurrences)')
-
-        return result
+_WARNING_TEMPLATES: dict[str, str] = {
+    'nullable_to_type_array': 'Converting nullable field to type array for schema',
+    'nullable_without_type': 'Schema has nullable=true without type, converting to type: [null]',
+    'exclusive_maximum': 'Converting exclusiveMaximum from boolean to numeric',
+    'exclusive_minimum': 'Converting exclusiveMinimum from boolean to numeric',
+}
 
 
 class Reference(
@@ -76,7 +34,7 @@ class Reference(
 
 
 class Contact(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     name: str | None = None
     url: str | None = None
@@ -84,7 +42,7 @@ class Contact(BaseModel):
 
 
 class License(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     name: str
     url: str | None = None
@@ -113,7 +71,7 @@ class Discriminator(BaseModel):
 
 
 class XML(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     name: str | None = None
     namespace: AnyUrl | None = None
@@ -131,155 +89,92 @@ class Example(BaseModel):
     externalValue: str | None = None
 
 
-class Style(Enum):
-    simple = 'simple'
-
-
 class SecurityRequirement(RootModel[dict[str, list[str]]]):
     pass
 
 
 class ExternalDocumentation(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     description: str | None = None
     url: str
 
 
-class ExampleXORExamples(RootModel[Any]):
-    root: Any = Field(..., description='Example and examples are mutually exclusive')
-
-
-class SchemaXORContent1(BaseModel):
-    pass
-
-
-class SchemaXORContent(RootModel[Any | SchemaXORContent1]):
-    root: Any | SchemaXORContent1 = Field(
-        ...,
-        description='Schema and content are mutually exclusive, at least one is required',
-    )
-
-
-class In(Enum):
+class ParameterLocation(Enum):
     path = 'path'
+    query = 'query'
+    header = 'header'
+    cookie = 'cookie'
 
 
-class Style1(Enum):
+class ParameterStyle(Enum):
     matrix = 'matrix'
     label = 'label'
     simple = 'simple'
-
-
-class Required(Enum):
-    bool_True = True
-
-
-class PathParameter(BaseModel):
-    in_: In | None = Field(None, alias='in')
-    style: Style1 | None = 'simple'
-    required: Required
-
-
-class In1(Enum):
-    query = 'query'
-
-
-class Style2(Enum):
     form = 'form'
     spaceDelimited = 'spaceDelimited'
     pipeDelimited = 'pipeDelimited'
     deepObject = 'deepObject'
 
 
-class QueryParameter(BaseModel):
-    in_: In1 | None = Field(None, alias='in')
-    style: Style2 | None = 'form'
-
-
-class In2(Enum):
-    header = 'header'
-
-
-class Style3(Enum):
-    simple = 'simple'
-
-
-class HeaderParameter(BaseModel):
-    in_: In2 | None = Field(None, alias='in')
-    style: Style3 | None = 'simple'
-
-
-class In3(Enum):
-    cookie = 'cookie'
-
-
-class Style4(Enum):
-    form = 'form'
-
-
-class CookieParameter(BaseModel):
-    in_: In3 | None = Field(None, alias='in')
-    style: Style4 | None = 'form'
-
-
-class Type1(Enum):
+class SecuritySchemeType(Enum):
     apiKey = 'apiKey'
-
-
-class In4(Enum):
-    header = 'header'
-    query = 'query'
-    cookie = 'cookie'
-
-
-class APIKeySecurityScheme(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    type: Type1
-    name: str
-    in_: In4 = Field(..., alias='in')
-    description: str | None = None
-
-
-class Type2(Enum):
     http = 'http'
-
-
-class HTTPSecurityScheme1(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    scheme: Annotated[str, StringConstraints(pattern=r'^[Bb][Ee][Aa][Rr][Ee][Rr]$')]
-    bearerFormat: str | None = None
-    description: str | None = None
-    type: Type2
-
-
-class HTTPSecurityScheme2(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    scheme: str
-    bearerFormat: str | None = None
-    description: str | None = None
-    type: Type2
-
-
-class HTTPSecurityScheme(RootModel[HTTPSecurityScheme1 | HTTPSecurityScheme2]):
-    pass
-
-
-class Type4(Enum):
     oauth2 = 'oauth2'
-
-
-class Type5(Enum):
     openIdConnect = 'openIdConnect'
 
 
-class OpenIdConnectSecurityScheme(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class PathParameter(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
 
-    type: Type5
+    in_: Literal['path'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.simple
+    required: Literal[True]
+
+
+class QueryParameter(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    in_: Literal['query'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.form
+
+
+class HeaderParameter(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    in_: Literal['header'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.simple
+
+
+class CookieParameter(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    in_: Literal['cookie'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.form
+
+
+class APIKeySecurityScheme(BaseModel):
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
+
+    type: SecuritySchemeType
+    name: str
+    in_: ParameterLocation = Field(..., alias='in')
+    description: str | None = None
+
+
+class HTTPSecurityScheme(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
+    type: SecuritySchemeType
+    scheme: str
+    bearerFormat: str | None = None
+    description: str | None = None
+
+
+class OpenIdConnectSecurityScheme(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
+    type: SecuritySchemeType
     openIdConnectUrl: str
     description: str | None = None
 
@@ -321,15 +216,8 @@ class Callback(RootModel[dict[Annotated[str, StringConstraints(pattern=r'^x-')],
     pass
 
 
-class Style5(Enum):
-    form = 'form'
-    spaceDelimited = 'spaceDelimited'
-    pipeDelimited = 'pipeDelimited'
-    deepObject = 'deepObject'
-
-
 class Info(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     title: str
     description: str | None = None
@@ -340,7 +228,7 @@ class Info(BaseModel):
 
 
 class Server(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     url: str
     description: str | None = None
@@ -348,7 +236,7 @@ class Server(BaseModel):
 
 
 class Schema(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
 
     title: str | None = None
     multipleOf: PositiveFloat | None = None
@@ -367,13 +255,13 @@ class Schema(BaseModel):
     required: list[str] | None = Field(None, min_length=1)
     enum: list | None = Field(None, min_length=1)
     type: Type | None = None
-    not_: Schema | Reference | None = Field(None, alias='not')
-    allOf: list[Schema | Reference] | None = None
-    oneOf: list[Schema | Reference] | None = None
-    anyOf: list[Schema | Reference] | None = None
-    items: Schema | Reference | None = None
-    properties: dict[str, Schema | Reference] | None = None
-    additionalProperties: Schema | Reference | bool | None = True
+    not_: Reference | Schema | None = Field(None, alias='not')
+    allOf: list[Reference | Schema] | None = None
+    oneOf: list[Reference | Schema] | None = None
+    anyOf: list[Reference | Schema] | None = None
+    items: Reference | Schema | None = None
+    properties: dict[str, Reference | Schema] | None = None
+    additionalProperties: Reference | Schema | bool | None = True
     description: str | None = None
     format: str | None = None
     default: Any | None = None
@@ -388,7 +276,7 @@ class Schema(BaseModel):
 
 
 class Tag(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     name: str
     description: str | None = None
@@ -416,9 +304,9 @@ class Link(BaseModel):
 
 
 class OAuth2SecurityScheme(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
-    type: Type4
+    type: SecuritySchemeType
     flows: OAuthFlows
     description: str | None = None
 
@@ -435,7 +323,7 @@ class SecurityScheme(
 
 
 class OpenAPI(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     openapi: Annotated[str, StringConstraints(pattern=r'^3\.0\.\d(-.+)?$')]
     info: Info
@@ -462,7 +350,7 @@ class OpenAPI(BaseModel):
         Warnings are deduplicated and summarized to avoid overwhelming output
         for large APIs.
         """
-        warning_collector = WarningCollector()
+        warning_collector = WarningCollector(_WARNING_TEMPLATES)
 
         # Convert basic metadata
         info = self._convert_info_to_3_1()
@@ -488,9 +376,7 @@ class OpenAPI(BaseModel):
         security = None
         if self.security:
             security = [
-                openapi_v3_1.SecurityRequirement(
-                    root={k: v for k, v in req.root.items()}
-                )
+                openapi_v3_1.SecurityRequirement(root=dict(req.root.items()))
                 for req in self.security
             ]
 
@@ -579,6 +465,16 @@ class OpenAPI(BaseModel):
             url=docs.url, description=docs.description
         )
 
+    @staticmethod
+    def _convert_component_map(
+        items: dict[str, Any] | None,
+        converter: Callable[[Any], Any],
+    ) -> dict[str, Any] | None:
+        """Convert each value in a components sub-map, or None if the map is absent."""
+        if not items:
+            return None
+        return {name: converter(value) for name, value in items.items()}
+
     def _convert_components_to_3_1(
         self, warnings: WarningCollector
     ) -> openapi_v3_1.Components:
@@ -586,78 +482,42 @@ class OpenAPI(BaseModel):
         if not self.components:
             return None
 
-        # Convert schemas
-        schemas = None
-        if self.components.schemas:
-            schemas = {}
-            for name, schema in self.components.schemas.items():
-                schemas[name] = self._convert_schema_or_ref_to_3_1(schema, warnings)
-
-        # Convert responses
-        responses = None
-        if self.components.responses:
-            responses = {}
-            for name, response in self.components.responses.items():
-                responses[name] = self._convert_response_or_ref_to_3_1(
-                    response, warnings
-                )
-
-        # Convert parameters
-        parameters = None
-        if self.components.parameters:
-            parameters = {}
-            for name, param in self.components.parameters.items():
-                parameters[name] = self._convert_parameter_or_ref_to_3_1(
-                    param, warnings
-                )
-
-        # Convert examples
-        examples = None
-        if self.components.examples:
-            examples = {}
-            for name, example in self.components.examples.items():
-                examples[name] = self._convert_example_or_ref_to_3_1(example)
-
-        # Convert request bodies
-        request_bodies = None
-        if self.components.requestBodies:
-            request_bodies = {}
-            for name, body in self.components.requestBodies.items():
-                request_bodies[name] = self._convert_request_body_or_ref_to_3_1(
-                    body, warnings
-                )
-
-        # Convert headers
-        headers = None
-        if self.components.headers:
-            headers = {}
-            for name, header in self.components.headers.items():
-                headers[name] = self._convert_header_or_ref_to_3_1(header, warnings)
-
-        # Convert security schemes
-        security_schemes = None
-        if self.components.securitySchemes:
-            security_schemes = {}
-            for name, scheme in self.components.securitySchemes.items():
-                security_schemes[name] = self._convert_security_scheme_or_ref_to_3_1(
-                    scheme
-                )
-
-        # Convert links
-        links = None
-        if self.components.links:
-            links = {}
-            for name, link in self.components.links.items():
-                links[name] = self._convert_link_or_ref_to_3_1(link)
-
-        # Convert callbacks
-        callbacks = None
-        if self.components.callbacks:
-            callbacks = {}
-            for name, callback in self.components.callbacks.items():
-                callbacks[name] = self._convert_callback_or_ref_to_3_1(
-                    callback, warnings
-                )
+        schemas = self._convert_component_map(
+            self.components.schemas,
+            lambda schema: self._convert_schema_or_ref_to_3_1(schema, warnings),
+        )
+        responses = self._convert_component_map(
+            self.components.responses,
+            lambda response: self._convert_response_or_ref_to_3_1(response, warnings),
+        )
+        parameters = self._convert_component_map(
+            self.components.parameters,
+            lambda param: self._convert_parameter_or_ref_to_3_1(param, warnings),
+        )
+        examples = self._convert_component_map(
+            self.components.examples,
+            self._convert_example_or_ref_to_3_1,
+        )
+        request_bodies = self._convert_component_map(
+            self.components.requestBodies,
+            lambda body: self._convert_request_body_or_ref_to_3_1(body, warnings),
+        )
+        headers = self._convert_component_map(
+            self.components.headers,
+            lambda header: self._convert_header_or_ref_to_3_1(header, warnings),
+        )
+        security_schemes = self._convert_component_map(
+            self.components.securitySchemes,
+            self._convert_security_scheme_or_ref_to_3_1,
+        )
+        links = self._convert_component_map(
+            self.components.links,
+            self._convert_link_or_ref_to_3_1,
+        )
+        callbacks = self._convert_component_map(
+            self.components.callbacks,
+            lambda callback: self._convert_callback_or_ref_to_3_1(callback, warnings),
+        )
 
         return openapi_v3_1.Components(
             schemas=schemas,
@@ -688,63 +548,70 @@ class OpenAPI(BaseModel):
             **{'$ref': ref_value, 'summary': None, 'description': None}
         )
 
-    def _convert_schema_to_3_1(
+    def _resolve_schema_type_for_3_1(
         self, schema: Schema, warnings: WarningCollector
-    ) -> openapi_v3_1.Schema:
-        """Convert a Schema from OpenAPI 3.0 to 3.1."""
-        # Handle nullable conversion
-        type_value = None
+    ) -> openapi_v3_1.Type | list[openapi_v3_1.Type] | None:
+        """Resolve the 3.1 ``type`` value, folding ``nullable: true`` into a type array."""
         if schema.type:
-            # Convert v3.Type enum to v3_1.Type enum
             type_3_1 = openapi_v3_1.Type(schema.type.value)
             if schema.nullable:
-                # Convert nullable: true to type array
                 warnings.add('nullable_to_type_array')
-                type_value = [type_3_1, openapi_v3_1.Type.null]
-            else:
-                type_value = type_3_1
-        elif schema.nullable:
-            # nullable without type - preserve nullable semantics for composition schemas
-            type_value = [openapi_v3_1.Type.null]
-            warnings.add('nullable_without_type')
+                return [type_3_1, openapi_v3_1.Type.null]
+            return type_3_1
 
-        # Handle exclusiveMaximum/exclusiveMinimum conversion
+        if schema.nullable:
+            # nullable without type - preserve nullable semantics for composition schemas
+            warnings.add('nullable_without_type')
+            return [openapi_v3_1.Type.null]
+
+        return None
+
+    @staticmethod
+    def _resolve_schema_exclusive_bounds_for_3_1(
+        schema: Schema, warnings: WarningCollector
+    ) -> tuple[Any, Any, Any, Any]:
+        """Split 3.0's boolean exclusiveMaximum/Minimum into 3.1's numeric bounds.
+
+        In OpenAPI 3.0, ``exclusiveMaximum``/``exclusiveMinimum`` are booleans
+        that modify ``maximum``/``minimum``; in 3.1 they are numeric bounds in
+        their own right. Returns ``(maximum, exclusive_maximum, minimum,
+        exclusive_minimum)`` for the 3.1 schema.
+        """
         exclusive_maximum = None
         if schema.exclusiveMaximum and schema.maximum is not None:
-            # In 3.0, exclusiveMaximum is boolean, in 3.1 it's numeric
             warnings.add('exclusive_maximum')
             exclusive_maximum = schema.maximum
-        elif not schema.exclusiveMaximum and schema.maximum is not None:
-            exclusive_maximum = None
 
         exclusive_minimum = None
         if schema.exclusiveMinimum and schema.minimum is not None:
             warnings.add('exclusive_minimum')
             exclusive_minimum = schema.minimum
-        elif not schema.exclusiveMinimum and schema.minimum is not None:
-            exclusive_minimum = None
 
-        # Use maximum/minimum only if not exclusive
         maximum = schema.maximum if not schema.exclusiveMaximum else None
         minimum = schema.minimum if not schema.exclusiveMinimum else None
 
-        # Convert nested schemas
+        return maximum, exclusive_maximum, minimum, exclusive_minimum
+
+    def _convert_schema_composition_to_3_1(
+        self, schema: Schema, warnings: WarningCollector
+    ) -> dict[str, Any]:
+        """Convert nested sub-schemas: not/allOf/oneOf/anyOf/items/properties/additionalProperties."""
         not_ = (
             self._convert_schema_or_ref_to_3_1(schema.not_, warnings)
             if schema.not_
             else None
         )
-        allOf = (
+        all_of = (
             [self._convert_schema_or_ref_to_3_1(s, warnings) for s in schema.allOf]
             if schema.allOf
             else None
         )
-        oneOf = (
+        one_of = (
             [self._convert_schema_or_ref_to_3_1(s, warnings) for s in schema.oneOf]
             if schema.oneOf
             else None
         )
-        anyOf = (
+        any_of = (
             [self._convert_schema_or_ref_to_3_1(s, warnings) for s in schema.anyOf]
             if schema.anyOf
             else None
@@ -771,26 +638,51 @@ class OpenAPI(BaseModel):
                     schema.additionalProperties, warnings
                 )
 
-        # Convert discriminator
-        discriminator = None
-        if schema.discriminator:
-            discriminator = openapi_v3_1.Discriminator(
-                propertyName=schema.discriminator.propertyName,
-                mapping=schema.discriminator.mapping,
-            )
+        return {
+            'not': not_,
+            'allOf': all_of,
+            'oneOf': one_of,
+            'anyOf': any_of,
+            'items': items,
+            'properties': properties,
+            'additionalProperties': additional_properties,
+        }
 
-        # Convert XML
-        xml = None
-        if schema.xml:
-            xml = openapi_v3_1.XML(
-                name=schema.xml.name,
-                namespace=schema.xml.namespace,
-                prefix=schema.xml.prefix,
-                attribute=schema.xml.attribute,
-                wrapped=schema.xml.wrapped,
-            )
+    @staticmethod
+    def _convert_schema_discriminator_to_3_1(
+        discriminator: Discriminator | None,
+    ) -> openapi_v3_1.Discriminator | None:
+        if not discriminator:
+            return None
+        return openapi_v3_1.Discriminator(
+            propertyName=discriminator.propertyName,
+            mapping=discriminator.mapping,
+        )
 
-        # Convert external docs
+    @staticmethod
+    def _convert_schema_xml_to_3_1(xml: XML | None) -> openapi_v3_1.XML | None:
+        if not xml:
+            return None
+        return openapi_v3_1.XML(
+            name=xml.name,
+            namespace=xml.namespace,
+            prefix=xml.prefix,
+            attribute=xml.attribute,
+            wrapped=xml.wrapped,
+        )
+
+    def _convert_schema_to_3_1(
+        self, schema: Schema, warnings: WarningCollector
+    ) -> openapi_v3_1.Schema:
+        """Convert a Schema from OpenAPI 3.0 to 3.1."""
+        type_value = self._resolve_schema_type_for_3_1(schema, warnings)
+        maximum, exclusive_maximum, minimum, exclusive_minimum = (
+            self._resolve_schema_exclusive_bounds_for_3_1(schema, warnings)
+        )
+        composition = self._convert_schema_composition_to_3_1(schema, warnings)
+        discriminator = self._convert_schema_discriminator_to_3_1(schema.discriminator)
+        xml = self._convert_schema_xml_to_3_1(schema.xml)
+
         external_docs = (
             self._convert_external_docs_to_3_1(schema.externalDocs)
             if schema.externalDocs
@@ -816,14 +708,7 @@ class OpenAPI(BaseModel):
             'required': schema.required,
             'enum': schema.enum,
             'type': type_value,
-            'not': not_,
-            'allOf': allOf,
-            'oneOf': oneOf,
-            'anyOf': anyOf,
-            'items': items,
             'prefixItems': None,
-            'properties': properties,
-            'additionalProperties': additional_properties,
             'patternProperties': None,
             'format': schema.format,
             'description': schema.description,
@@ -836,6 +721,7 @@ class OpenAPI(BaseModel):
             'externalDocs': external_docs,
             'deprecated': schema.deprecated,
             'xml': xml,
+            **composition,
         }
 
         # Remove None values to avoid extra_forbid issues
@@ -1082,6 +968,87 @@ class OpenAPI(BaseModel):
             server=server,
         )
 
+    @staticmethod
+    def _build_api_key_security_scheme_3_1(
+        sec_scheme: APIKeySecurityScheme,
+    ) -> openapi_v3_1.SecurityScheme:
+        inner = openapi_v3_1.APIKeySecurityScheme.model_validate(
+            {
+                'type': openapi_v3_1.SecuritySchemeType.apiKey,
+                'name': sec_scheme.name,
+                'in': sec_scheme.in_.value,
+                'description': sec_scheme.description,
+            }
+        )
+        return openapi_v3_1.SecurityScheme(root=inner)
+
+    @staticmethod
+    def _build_http_security_scheme_3_1(
+        sec_scheme: HTTPSecurityScheme,
+    ) -> openapi_v3_1.SecurityScheme:
+        return openapi_v3_1.SecurityScheme(root=openapi_v3_1.HTTPSecurityScheme(
+            type=openapi_v3_1.SecuritySchemeType.http,
+            scheme=sec_scheme.scheme,
+            bearerFormat=sec_scheme.bearerFormat,
+            description=sec_scheme.description,
+        ))
+
+    @staticmethod
+    def _build_oauth_flows_3_1(flows: OAuthFlows) -> openapi_v3_1.OAuthFlows:
+        """Convert each declared OAuth2 flow (implicit/password/clientCredentials/authorizationCode)."""
+        return openapi_v3_1.OAuthFlows(
+            implicit=openapi_v3_1.ImplicitOAuthFlow(
+                authorizationUrl=flows.implicit.authorizationUrl,
+                refreshUrl=flows.implicit.refreshUrl,
+                scopes=flows.implicit.scopes,
+            )
+            if flows.implicit
+            else None,
+            password=openapi_v3_1.PasswordOAuthFlow(
+                tokenUrl=flows.password.tokenUrl,
+                refreshUrl=flows.password.refreshUrl,
+                scopes=flows.password.scopes,
+            )
+            if flows.password
+            else None,
+            clientCredentials=openapi_v3_1.ClientCredentialsFlow(
+                tokenUrl=flows.clientCredentials.tokenUrl,
+                refreshUrl=flows.clientCredentials.refreshUrl,
+                scopes=flows.clientCredentials.scopes,
+            )
+            if flows.clientCredentials
+            else None,
+            authorizationCode=openapi_v3_1.AuthorizationCodeOAuthFlow(
+                authorizationUrl=flows.authorizationCode.authorizationUrl,
+                tokenUrl=flows.authorizationCode.tokenUrl,
+                refreshUrl=flows.authorizationCode.refreshUrl,
+                scopes=flows.authorizationCode.scopes,
+            )
+            if flows.authorizationCode
+            else None,
+        )
+
+    def _build_oauth2_security_scheme_3_1(
+        self, sec_scheme: OAuth2SecurityScheme
+    ) -> openapi_v3_1.SecurityScheme:
+        inner = openapi_v3_1.OAuth2SecurityScheme(
+            type=openapi_v3_1.SecuritySchemeType.oauth2,
+            flows=self._build_oauth_flows_3_1(sec_scheme.flows),
+            description=sec_scheme.description,
+        )
+        return openapi_v3_1.SecurityScheme(root=inner)
+
+    @staticmethod
+    def _build_openid_connect_security_scheme_3_1(
+        sec_scheme: OpenIdConnectSecurityScheme,
+    ) -> openapi_v3_1.SecurityScheme:
+        inner = openapi_v3_1.OpenIdConnectSecurityScheme(
+            type=openapi_v3_1.SecuritySchemeType.openIdConnect,
+            openIdConnectUrl=sec_scheme.openIdConnectUrl,
+            description=sec_scheme.description,
+        )
+        return openapi_v3_1.SecurityScheme(root=inner)
+
     def _convert_security_scheme_or_ref_to_3_1(
         self, scheme: SecurityScheme | Reference
     ) -> openapi_v3_1.SecurityScheme | openapi_v3_1.Reference:
@@ -1093,80 +1060,13 @@ class OpenAPI(BaseModel):
         sec_scheme = scheme.root
 
         if isinstance(sec_scheme, APIKeySecurityScheme):
-            inner = openapi_v3_1.APIKeySecurityScheme.model_validate(
-                {
-                    'type': openapi_v3_1.Type1.apiKey,
-                    'name': sec_scheme.name,
-                    'in': sec_scheme.in_.value,
-                    'description': sec_scheme.description,
-                }
-            )
-            return openapi_v3_1.SecurityScheme(root=inner)
-        elif isinstance(sec_scheme, HTTPSecurityScheme):
-            http_scheme = sec_scheme.root
-            # Determine if it's Bearer or non-Bearer based on scheme pattern
-            scheme_value = http_scheme.scheme
-            if scheme_value.lower() == 'bearer':
-                inner_http = openapi_v3_1.HTTPSecurityScheme1(
-                    type=openapi_v3_1.Type2.http,
-                    scheme=scheme_value,
-                    bearerFormat=http_scheme.bearerFormat,
-                    description=http_scheme.description,
-                )
-            else:
-                inner_http = openapi_v3_1.HTTPSecurityScheme2(
-                    type=openapi_v3_1.Type2.http,
-                    scheme=scheme_value,
-                    description=http_scheme.description,
-                )
-            inner = openapi_v3_1.HTTPSecurityScheme(root=inner_http)
-            return openapi_v3_1.SecurityScheme(root=inner)
-        elif isinstance(sec_scheme, OAuth2SecurityScheme):
-            flows = sec_scheme.flows
-            oauth_flows = openapi_v3_1.OAuthFlows(
-                implicit=openapi_v3_1.ImplicitOAuthFlow(
-                    authorizationUrl=flows.implicit.authorizationUrl,
-                    refreshUrl=flows.implicit.refreshUrl,
-                    scopes=flows.implicit.scopes,
-                )
-                if flows.implicit
-                else None,
-                password=openapi_v3_1.PasswordOAuthFlow(
-                    tokenUrl=flows.password.tokenUrl,
-                    refreshUrl=flows.password.refreshUrl,
-                    scopes=flows.password.scopes,
-                )
-                if flows.password
-                else None,
-                clientCredentials=openapi_v3_1.ClientCredentialsFlow(
-                    tokenUrl=flows.clientCredentials.tokenUrl,
-                    refreshUrl=flows.clientCredentials.refreshUrl,
-                    scopes=flows.clientCredentials.scopes,
-                )
-                if flows.clientCredentials
-                else None,
-                authorizationCode=openapi_v3_1.AuthorizationCodeOAuthFlow(
-                    authorizationUrl=flows.authorizationCode.authorizationUrl,
-                    tokenUrl=flows.authorizationCode.tokenUrl,
-                    refreshUrl=flows.authorizationCode.refreshUrl,
-                    scopes=flows.authorizationCode.scopes,
-                )
-                if flows.authorizationCode
-                else None,
-            )
-            inner = openapi_v3_1.OAuth2SecurityScheme(
-                type=openapi_v3_1.Type4.oauth2,
-                flows=oauth_flows,
-                description=sec_scheme.description,
-            )
-            return openapi_v3_1.SecurityScheme(root=inner)
-        elif isinstance(sec_scheme, OpenIdConnectSecurityScheme):
-            inner = openapi_v3_1.OpenIdConnectSecurityScheme(
-                type=openapi_v3_1.Type5.openIdConnect,
-                openIdConnectUrl=sec_scheme.openIdConnectUrl,
-                description=sec_scheme.description,
-            )
-            return openapi_v3_1.SecurityScheme(root=inner)
+            return self._build_api_key_security_scheme_3_1(sec_scheme)
+        if isinstance(sec_scheme, HTTPSecurityScheme):
+            return self._build_http_security_scheme_3_1(sec_scheme)
+        if isinstance(sec_scheme, OAuth2SecurityScheme):
+            return self._build_oauth2_security_scheme_3_1(sec_scheme)
+        if isinstance(sec_scheme, OpenIdConnectSecurityScheme):
+            return self._build_openid_connect_security_scheme_3_1(sec_scheme)
 
         raise ValueError(f'Unknown security scheme type: {type(sec_scheme)}')
 
@@ -1188,16 +1088,15 @@ class OpenAPI(BaseModel):
         # Paths is a RootModel containing a dict
         paths_dict = {}
 
-        if hasattr(self.paths, 'root') and isinstance(self.paths.root, dict):
-            for path, path_item in self.paths.root.items():
-                if path.startswith('x-'):
-                    # Vendor extension, pass through
-                    paths_dict[path] = path_item
-                else:
-                    # Convert PathItem
-                    paths_dict[path] = self._convert_path_item_to_3_1(
-                        path_item, warnings
-                    )
+        for path, path_item in self.paths.root.items():
+            if path.startswith('x-'):
+                # Vendor extension, pass through
+                paths_dict[path] = path_item
+            else:
+                # Convert PathItem
+                paths_dict[path] = self._convert_path_item_to_3_1(
+                    path_item, warnings
+                )
 
         return openapi_v3_1.Paths(root=paths_dict)
 
@@ -1319,9 +1218,7 @@ class OpenAPI(BaseModel):
         security = None
         if operation.security:
             security = [
-                openapi_v3_1.SecurityRequirement(
-                    root={k: v for k, v in req.root.items()}
-                )
+                openapi_v3_1.SecurityRequirement(root=dict(req.root.items()))
                 for req in operation.security
             ]
 
@@ -1357,12 +1254,12 @@ class OpenAPI(BaseModel):
 
 
 class Components(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     schemas: (
         dict[
             Annotated[str, StringConstraints(pattern=r'^[a-zA-Z0-9\.\-_]+$')],
-            Schema | Reference,
+            Reference | Schema,
         ]
         | None
     ) = None
@@ -1425,7 +1322,7 @@ class Components(BaseModel):
 
 
 class Response(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     description: str
     headers: dict[str, Header | Reference] | None = None
@@ -1434,25 +1331,25 @@ class Response(BaseModel):
 
 
 class MediaType(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
-    schema_: Schema | Reference | None = Field(None, alias='schema')
+    schema_: Reference | Schema | None = Field(None, alias='schema')
     example: Any | None = None
     examples: dict[str, Example | Reference] | None = None
     encoding: dict[str, Encoding] | None = None
 
 
 class Header(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
 
     description: str | None = None
     required: bool | None = False
     deprecated: bool | None = False
     allowEmptyValue: bool | None = False
-    style: Style | None = 'simple'
+    style: ParameterStyle | None = ParameterStyle.simple
     explode: bool | None = None
     allowReserved: bool | None = False
-    schema_: Schema | Reference | None = Field(None, alias='schema')
+    schema_: Reference | Schema | None = Field(None, alias='schema')
     content: dict[str, MediaType] | None = None
     example: Any | None = None
     examples: dict[str, Example | Reference] | None = None
@@ -1468,7 +1365,7 @@ class Paths(RootModel[dict[str, 'PathItem']]):
 
 
 class PathItem(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
 
     field_ref: str | None = Field(None, alias='$ref')
     summary: str | None = None
@@ -1486,7 +1383,7 @@ class PathItem(BaseModel):
 
 
 class Operation(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     tags: list[str] | None = None
     summary: str | None = None
@@ -1512,7 +1409,7 @@ class Responses(RootModel[dict[str, Response | Reference]]):
 
 
 class Parameter(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
 
     name: str
     in_: str = Field(..., alias='in')
@@ -1523,14 +1420,14 @@ class Parameter(BaseModel):
     style: str | None = None
     explode: bool | None = None
     allowReserved: bool | None = False
-    schema_: Schema | Reference | None = Field(None, alias='schema')
+    schema_: Reference | Schema | None = Field(None, alias='schema')
     content: dict[str, MediaType] | None = None
     example: Any | None = None
     examples: dict[str, Example | Reference] | None = None
 
 
 class RequestBody(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     description: str | None = None
     content: dict[str, MediaType]
@@ -1542,7 +1439,7 @@ class Encoding(BaseModel):
 
     contentType: str | None = None
     headers: dict[str, Header | Reference] | None = None
-    style: Style5 | None = None
+    style: ParameterStyle | None = None
     explode: bool | None = None
     allowReserved: bool | None = False
 

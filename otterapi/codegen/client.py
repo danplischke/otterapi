@@ -19,7 +19,6 @@ from otterapi.codegen.ast_utils import (
     _union_expr,
 )
 
-# Re-export DataFrameMethodConfig from dataframes for backward compatibility
 from otterapi.codegen.dataframes import DataFrameMethodConfig
 from otterapi.codegen.endpoints import ParameterASTBuilder
 
@@ -28,6 +27,9 @@ if TYPE_CHECKING:
 
 # Type alias for import dictionaries
 ImportDict = dict[str, set[str]]
+
+# Prefix used when building `f'HTTP {status_code} ...'` error messages in generated code
+_HTTP_ERROR_PREFIX = 'HTTP '
 
 
 @dataclass
@@ -165,7 +167,7 @@ def generate_api_error_class() -> ast.ClassDef:
             _name('message'),
             ast.JoinedStr(
                 values=[
-                    ast.Constant(value='HTTP '),
+                    ast.Constant(value=_HTTP_ERROR_PREFIX),
                     ast.FormattedValue(value=_name('status_code'), conversion=-1),
                     ast.Constant(value=' Error'),
                 ]
@@ -302,7 +304,7 @@ def generate_api_error_class() -> ast.ClassDef:
                                     ast.BinOp(
                                         left=ast.JoinedStr(
                                             values=[
-                                                ast.Constant(value='HTTP '),
+                                                ast.Constant(value=_HTTP_ERROR_PREFIX),
                                                 ast.FormattedValue(
                                                     value=_name('status_code'),
                                                     conversion=-1,
@@ -335,7 +337,7 @@ def generate_api_error_class() -> ast.ClassDef:
                                     _name('message'),
                                     ast.JoinedStr(
                                         values=[
-                                            ast.Constant(value='HTTP '),
+                                            ast.Constant(value=_HTTP_ERROR_PREFIX),
                                             ast.FormattedValue(
                                                 value=_name('status_code'),
                                                 conversion=-1,
@@ -353,7 +355,7 @@ def generate_api_error_class() -> ast.ClassDef:
                                     _name('message'),
                                     ast.JoinedStr(
                                         values=[
-                                            ast.Constant(value='HTTP '),
+                                            ast.Constant(value=_HTTP_ERROR_PREFIX),
                                             ast.FormattedValue(
                                                 value=_name('status_code'),
                                                 conversion=-1,
@@ -1386,44 +1388,6 @@ def _build_body_expr(
         This function delegates to ParameterASTBuilder.build_body_expr().
     """
     return ParameterASTBuilder.build_body_expr(request_body)
-
-
-def _build_response_processing(
-    response_type: 'Type', response_infos: list['ResponseInfo'] | None
-) -> list[ast.stmt]:
-    """Build statements for processing the response."""
-    stmts = []
-
-    # data = response.json()
-    stmts.append(_assign(_name('data'), _call(_attr('response', 'json'))))
-
-    # validated = TypeAdapter(response_type).validate_python(data)
-    stmts.append(
-        _assign(
-            _name('validated'),
-            _call(
-                _attr(
-                    _call(_name('TypeAdapter'), [response_type.annotation_ast]),
-                    'validate_python',
-                ),
-                [_name('data')],
-            ),
-        )
-    )
-
-    # if isinstance(validated, RootModel): return validated.root
-    stmts.append(
-        ast.If(
-            test=_call(_name('isinstance'), [_name('validated'), _name('RootModel')]),
-            body=[ast.Return(value=_attr('validated', 'root'))],
-            orelse=[],
-        )
-    )
-
-    # return validated
-    stmts.append(ast.Return(value=_name('validated')))
-
-    return stmts
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:

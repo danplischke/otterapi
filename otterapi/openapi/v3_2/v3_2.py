@@ -7,7 +7,7 @@ building on top of OpenAPI 3.1 with additional features.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Any, Union
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import (
     AnyUrl,
@@ -100,10 +100,21 @@ class Example(BaseModel):
     externalValue: str | None = None
 
 
-class Style(Enum):
-    """Parameter style for simple parameters."""
+class ParameterLocation(Enum):
+    path = 'path'
+    query = 'query'
+    header = 'header'
+    cookie = 'cookie'
 
+
+class ParameterStyle(Enum):
+    matrix = 'matrix'
+    label = 'label'
     simple = 'simple'
+    form = 'form'
+    spaceDelimited = 'spaceDelimited'
+    pipeDelimited = 'pipeDelimited'
+    deepObject = 'deepObject'
 
 
 class SecurityRequirement(RootModel[dict[str, list[str]]]):
@@ -121,127 +132,40 @@ class ExternalDocumentation(BaseModel):
     url: str
 
 
-class ExampleXORExamples(RootModel[Any]):
-    """Ensures example and examples are mutually exclusive."""
-
-    root: Any = Field(..., description='Example and examples are mutually exclusive')
-
-
-class SchemaXORContent1(BaseModel):
-    """Helper for schema/content mutual exclusion."""
-
-    pass
-
-
-class SchemaXORContent(RootModel[Any | SchemaXORContent1]):
-    """Ensures schema and content are mutually exclusive."""
-
-    root: Any | SchemaXORContent1 = Field(
-        ...,
-        description='Schema and content are mutually exclusive, at least one is required',
-    )
-
-
-class In(Enum):
-    """Path parameter location."""
-
-    path = 'path'
-
-
-class Style1(Enum):
-    """Path parameter styles."""
-
-    matrix = 'matrix'
-    label = 'label'
-    simple = 'simple'
-
-
-class Required(Enum):
-    """Required enum for path parameters."""
-
-    bool_True = True
-
-
 class PathParameter(BaseModel):
     """Path parameter definition."""
 
-    in_: In | None = Field(None, alias='in')
-    style: Style1 | None = 'simple'
-    required: Required
-
-
-class In1(Enum):
-    """Query parameter location."""
-
-    query = 'query'
-
-
-class Style2(Enum):
-    """Query parameter styles."""
-
-    form = 'form'
-    spaceDelimited = 'spaceDelimited'
-    pipeDelimited = 'pipeDelimited'
-    deepObject = 'deepObject'
+    in_: Literal['path'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.simple
+    required: Literal[True]
 
 
 class QueryParameter(BaseModel):
     """Query parameter definition."""
 
-    in_: In1 | None = Field(None, alias='in')
-    style: Style2 | None = 'form'
-
-
-class In2(Enum):
-    """Header parameter location."""
-
-    header = 'header'
-
-
-class Style3(Enum):
-    """Header parameter style."""
-
-    simple = 'simple'
+    in_: Literal['query'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.form
 
 
 class HeaderParameter(BaseModel):
     """Header parameter definition."""
 
-    in_: In2 | None = Field(None, alias='in')
-    style: Style3 | None = 'simple'
-
-
-class In3(Enum):
-    """Cookie parameter location."""
-
-    cookie = 'cookie'
-
-
-class Style4(Enum):
-    """Cookie parameter style."""
-
-    form = 'form'
+    in_: Literal['header'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.simple
 
 
 class CookieParameter(BaseModel):
     """Cookie parameter definition."""
 
-    in_: In3 | None = Field(None, alias='in')
-    style: Style4 | None = 'form'
+    in_: Literal['cookie'] | None = Field(None, alias='in')
+    style: ParameterStyle | None = ParameterStyle.form
 
 
-class Type1(Enum):
-    """API Key security type."""
-
+class SecuritySchemeType(Enum):
     apiKey = 'apiKey'
-
-
-class In4(Enum):
-    """API Key location."""
-
-    header = 'header'
-    query = 'query'
-    cookie = 'cookie'
+    http = 'http'
+    oauth2 = 'oauth2'
+    openIdConnect = 'openIdConnect'
 
 
 class APIKeySecurityScheme(BaseModel):
@@ -249,56 +173,21 @@ class APIKeySecurityScheme(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    type: Type1
+    type: SecuritySchemeType
     name: str
-    in_: In4 = Field(..., alias='in')
+    in_: ParameterLocation = Field(..., alias='in')
     description: str | None = None
 
 
-class Type2(Enum):
-    """HTTP security type."""
-
-    http = 'http'
-
-
-class HTTPSecurityScheme1(BaseModel):
-    """HTTP Bearer security scheme."""
+class HTTPSecurityScheme(BaseModel):
+    """HTTP security scheme."""
 
     model_config = ConfigDict(extra='forbid')
 
-    scheme: Annotated[str, StringConstraints(pattern=r'^[Bb][Ee][Aa][Rr][Ee][Rr]$')]
-    bearerFormat: str | None = None
-    description: str | None = None
-    type: Type2
-
-
-class HTTPSecurityScheme2(BaseModel):
-    """HTTP non-Bearer security scheme."""
-
-    model_config = ConfigDict(extra='forbid')
-
+    type: SecuritySchemeType
     scheme: str
     bearerFormat: str | None = None
     description: str | None = None
-    type: Type2
-
-
-class HTTPSecurityScheme(RootModel[HTTPSecurityScheme1 | HTTPSecurityScheme2]):
-    """HTTP security scheme union."""
-
-    root: HTTPSecurityScheme1 | HTTPSecurityScheme2
-
-
-class Type4(Enum):
-    """OAuth2 security type."""
-
-    oauth2 = 'oauth2'
-
-
-class Type5(Enum):
-    """OpenID Connect security type."""
-
-    openIdConnect = 'openIdConnect'
 
 
 class OpenIdConnectSecurityScheme(BaseModel):
@@ -306,7 +195,7 @@ class OpenIdConnectSecurityScheme(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    type: Type5
+    type: SecuritySchemeType
     openIdConnectUrl: str
     description: str | None = None
 
@@ -356,15 +245,6 @@ class Callback(RootModel[dict[Annotated[str, StringConstraints(pattern=r'^x-')],
     """Callback object."""
 
     root: dict[Annotated[str, StringConstraints(pattern=r'^x-')], Any]
-
-
-class Style5(Enum):
-    """Encoding styles."""
-
-    form = 'form'
-    spaceDelimited = 'spaceDelimited'
-    pipeDelimited = 'pipeDelimited'
-    deepObject = 'deepObject'
 
 
 class Info(BaseModel):
@@ -502,7 +382,7 @@ class OAuth2SecurityScheme(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    type: Type4
+    type: SecuritySchemeType
     flows: OAuthFlows
     description: str | None = None
 
@@ -633,7 +513,7 @@ class Header(BaseModel):
     required: bool | None = False
     deprecated: bool | None = False
     allowEmptyValue: bool | None = False
-    style: Style | None = 'simple'
+    style: ParameterStyle | None = ParameterStyle.simple
     explode: bool | None = None
     allowReserved: bool | None = False
     schema_: Schema | Reference | None = Field(None, alias='schema')
@@ -731,7 +611,7 @@ class Encoding(BaseModel):
 
     contentType: str | None = None
     headers: dict[str, Header | Reference] | None = None
-    style: Style5 | None = None
+    style: ParameterStyle | None = None
     explode: bool | None = None
     allowReserved: bool | None = False
 

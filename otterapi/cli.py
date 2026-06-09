@@ -23,6 +23,7 @@ from otterapi.codegen.codegen import Codegen
 from otterapi.codegen.schema import SchemaLoader
 from otterapi.config import CodegenConfig, DocumentConfig, get_config
 from otterapi.exceptions import OtterAPIError, SchemaLoadError, SchemaValidationError
+from otterapi.openapi.constants import HTTP_METHODS
 
 console = Console()
 error_console = Console(stderr=True)
@@ -136,6 +137,56 @@ def setup_logging(verbose: bool = False, debug: bool = False) -> None:
     )
 
 
+def _resolve_codegen_config(
+    config: str | None, source: str | None, output: str | None
+) -> CodegenConfig:
+    """Build a CodegenConfig from --source/--output or a config file."""
+    if source and output:
+        return CodegenConfig(documents=[DocumentConfig(source=source, output=output)])
+
+    if source or output:
+        error_console.print(
+            '[red]Error:[/red] Both --source and --output must be provided together'
+        )
+        raise typer.Exit(1)
+
+    try:
+        return get_config(config)
+    except FileNotFoundError as e:
+        error_console.print(f'[red]Error:[/red] {e}')
+        error_console.print(
+            '\n[dim]Hint: Run [bold]otterapi init[/bold] to create a configuration file,[/dim]'
+        )
+        error_console.print(
+            '[dim]or use [bold]--source[/bold] and [bold]--output[/bold] options.[/dim]'
+        )
+        raise typer.Exit(1)
+
+
+def _generate_document(document_config: DocumentConfig) -> None:
+    """Run code generation for a single document, with a progress spinner."""
+    with Progress(
+        SpinnerColumn(),
+        TextColumn('[progress.description]{task.description}'),
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            f'Generating code for {document_config.source}...',
+            total=None,
+        )
+
+        codegen = Codegen(document_config)
+        generated_files = codegen.generate()
+        progress.update(
+            task,
+            description=f'Code generation completed for {document_config.source}!',
+        )
+
+        console.print('[dim]Generated files:[/dim]')
+        for file_path in generated_files:
+            console.print(f'  - {file_path}')
+
+
 @app.command()
 def generate(
     config: Annotated[
@@ -174,51 +225,10 @@ def generate(
     setup_logging(verbose, debug)
 
     try:
-        # Build configuration from options or file
-        if source and output:
-            codegen_config = CodegenConfig(
-                documents=[DocumentConfig(source=source, output=output)]
-            )
-        elif source or output:
-            error_console.print(
-                '[red]Error:[/red] Both --source and --output must be provided together'
-            )
-            raise typer.Exit(1)
-        else:
-            try:
-                codegen_config = get_config(config)
-            except FileNotFoundError as e:
-                error_console.print(f'[red]Error:[/red] {e}')
-                error_console.print(
-                    '\n[dim]Hint: Run [bold]otterapi init[/bold] to create a configuration file,[/dim]'
-                )
-                error_console.print(
-                    '[dim]or use [bold]--source[/bold] and [bold]--output[/bold] options.[/dim]'
-                )
-                raise typer.Exit(1)
+        codegen_config = _resolve_codegen_config(config, source, output)
 
         for document_config in codegen_config.documents:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn('[progress.description]{task.description}'),
-                console=console,
-            ) as progress:
-                task = progress.add_task(
-                    f'Generating code for {document_config.source}...',
-                    total=None,
-                )
-
-                codegen = Codegen(document_config)
-
-                generated_files = codegen.generate()
-                progress.update(
-                    task,
-                    description=f'Code generation completed for {document_config.source}!',
-                )
-
-                console.print('[dim]Generated files:[/dim]')
-                for file_path in generated_files:
-                    console.print(f'  - {file_path}')
+            _generate_document(document_config)
 
         console.print('\n[green]✓[/green] Code generation completed!')
 
@@ -321,6 +331,102 @@ def init(
     )
 
 
+_WARNABLE_METHODS = ('get', 'post', 'put', 'patch', 'delete')
+
+
+def _count_operations(paths) -> int:
+    """Count HTTP operations defined across all paths in a schema."""
+    operations = 0
+    for path_item in paths.root.values():
+        for method in HTTP_METHODS:
+            if getattr(path_item, method, None):
+                operations += 1
+    return operations
+
+
+def _summarize_schema(schema) -> dict[str, any]:
+    """Collect descriptive info (title, counts, ...) about a loaded schema."""
+    info: dict[str, any] = {}
+
+    if schema.info:
+        info['title'] = schema.info.title
+        info['version'] = schema.info.version
+        if schema.info.description:
+            info['description'] = (
+                schema.info.description[:200] + '...'
+                if len(schema.info.description or '') > 200
+                else schema.info.description
+            )
+
+    if schema.paths:
+        info['paths'] = len(schema.paths.root)
+        info['operations'] = _count_operations(schema.paths)
+
+    if schema.components:
+        if schema.components.schemas:
+            info['schemas'] = len(schema.components.schemas)
+        if schema.components.securitySchemes:
+            info['security_schemes'] = len(schema.components.securitySchemes)
+
+    return info
+
+
+def _find_missing_operation_ids(paths) -> list[str]:
+    """Return warnings for operations that are missing an operationId."""
+    warnings: list[str] = []
+    for path, path_item in paths.root.items():
+        for method in _WARNABLE_METHODS:
+            operation = getattr(path_item, method, None)
+            if operation and not operation.operationId:
+                warnings.append(f'{method.upper()} {path}: Missing operationId')
+    return warnings
+
+
+def _load_schema_for_validation(source: str, progress, task):
+    """Load and validate a schema, exiting the CLI with a message on failure."""
+    try:
+        loader = SchemaLoader()
+        schema = loader.load(source)
+        progress.update(task, description='Validating schema...')
+        return schema
+    except SchemaLoadError as e:
+        progress.stop()
+        error_console.print(f'[red]✗ Failed to load schema:[/red] {e.message}')
+        raise typer.Exit(1)
+    except SchemaValidationError as e:
+        progress.stop()
+        error_console.print(f'[red]✗ Schema validation failed:[/red] {e.message}')
+        raise typer.Exit(1)
+    except Exception as e:
+        progress.stop()
+        error_console.print(f'[red]✗ Error:[/red] {str(e)}')
+        raise typer.Exit(1)
+
+
+def _print_validation_report(
+    source: str, info: dict[str, any], warnings: list[str], verbose: bool
+) -> None:
+    """Print the schema summary table and any operationId warnings."""
+    console.print(f'\n[green]✓[/green] Schema is valid: {source}\n')
+
+    if verbose or info:
+        table = Table(title='Schema Information')
+        table.add_column('Property', style='cyan')
+        table.add_column('Value')
+
+        for key, value in info.items():
+            table.add_row(key.replace('_', ' ').title(), str(value))
+
+        console.print(table)
+
+    if warnings:
+        console.print(f'\n[yellow]⚠ {len(warnings)} warning(s):[/yellow]')
+        for warning in warnings[:10]:  # Show first 10
+            console.print(f'  - {warning}')
+        if len(warnings) > 10:
+            console.print(f'  ... and {len(warnings) - 10} more')
+
+
 @app.command()
 def validate(
     source: Annotated[str, typer.Argument(help='Path or URL to OpenAPI specification')],
@@ -345,94 +451,14 @@ def validate(
     ) as progress:
         task = progress.add_task(f'Loading {source}...', total=None)
 
-        try:
-            loader = SchemaLoader()
-            schema = loader.load(source)
-            progress.update(task, description='Validating schema...')
+        schema = _load_schema_for_validation(source, progress, task)
 
-            # Collect validation info
-            warnings: list[str] = []
-            info: dict[str, any] = {}
+        info = _summarize_schema(schema)
+        warnings = _find_missing_operation_ids(schema.paths) if schema.paths else []
 
-            if schema.info:
-                info['title'] = schema.info.title
-                info['version'] = schema.info.version
-                if schema.info.description:
-                    info['description'] = (
-                        schema.info.description[:200] + '...'
-                        if len(schema.info.description or '') > 200
-                        else schema.info.description
-                    )
+        progress.update(task, description='Validation complete!')
 
-            if schema.paths:
-                info['paths'] = len(schema.paths.root)
-
-                # Count operations
-                operations = 0
-                for path_item in schema.paths.root.values():
-                    for method in [
-                        'get',
-                        'post',
-                        'put',
-                        'patch',
-                        'delete',
-                        'head',
-                        'options',
-                    ]:
-                        if getattr(path_item, method, None):
-                            operations += 1
-                info['operations'] = operations
-
-            if schema.components:
-                if schema.components.schemas:
-                    info['schemas'] = len(schema.components.schemas)
-                if schema.components.securitySchemes:
-                    info['security_schemes'] = len(schema.components.securitySchemes)
-
-            # Check for potential issues
-            if schema.paths:
-                for path, path_item in schema.paths.root.items():
-                    for method in ['get', 'post', 'put', 'patch', 'delete']:
-                        operation = getattr(path_item, method, None)
-                        if operation and not operation.operationId:
-                            warnings.append(
-                                f'{method.upper()} {path}: Missing operationId'
-                            )
-
-            progress.update(task, description='Validation complete!')
-
-        except SchemaLoadError as e:
-            progress.stop()
-            error_console.print(f'[red]✗ Failed to load schema:[/red] {e.message}')
-            raise typer.Exit(1)
-        except SchemaValidationError as e:
-            progress.stop()
-            error_console.print(f'[red]✗ Schema validation failed:[/red] {e.message}')
-            raise typer.Exit(1)
-        except Exception as e:
-            progress.stop()
-            error_console.print(f'[red]✗ Error:[/red] {str(e)}')
-            raise typer.Exit(1)
-
-    # Print results
-    console.print(f'\n[green]✓[/green] Schema is valid: {source}\n')
-
-    if verbose or info:
-        table = Table(title='Schema Information')
-        table.add_column('Property', style='cyan')
-        table.add_column('Value')
-
-        for key, value in info.items():
-            table.add_row(key.replace('_', ' ').title(), str(value))
-
-        console.print(table)
-
-    if warnings:
-        console.print(f'\n[yellow]⚠ {len(warnings)} warning(s):[/yellow]')
-        for warning in warnings[:10]:  # Show first 10
-            console.print(f'  - {warning}')
-        if len(warnings) > 10:
-            console.print(f'  ... and {len(warnings) - 10} more')
+    _print_validation_report(source, info, warnings, verbose)
 
 
 @app.command()
@@ -444,27 +470,6 @@ def version() -> None:
         console.print(f'otterapi version: [bold]{ver}[/bold]')
     except ImportError:
         console.print('otterapi version: [dim]unknown (development)[/dim]')
-
-    # Show dependency versions if verbose
-    console.print('\n[dim]Dependencies:[/dim]')
-    try:
-        import pydantic
-
-        console.print(f'  pydantic: {pydantic.__version__}')
-    except ImportError:
-        pass
-    try:
-        import httpx
-
-        console.print(f'  httpx: {httpx.__version__}')
-    except ImportError:
-        pass
-    try:
-        import typer
-
-        console.print(f'  typer: {typer.__version__}')
-    except ImportError:
-        pass
 
 
 if __name__ == '__main__':
