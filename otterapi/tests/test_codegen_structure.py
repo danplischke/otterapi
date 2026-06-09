@@ -96,8 +96,7 @@ def _annotated_fields(source: str, class_name: str) -> set[str]:
             return {
                 stmt.target.id
                 for stmt in node.body
-                if isinstance(stmt, ast.AnnAssign)
-                and isinstance(stmt.target, ast.Name)
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
             }
     return set()
 
@@ -180,7 +179,13 @@ class TestConstraintsStructure:
 
     def test_init_exports_public_api(self, constraints_gen):
         exports = _all_exports(constraints_gen['__init__.py'])
-        for name in ('User', 'Client', 'list_users', 'async_list_users', 'BaseAPIError'):
+        for name in (
+            'User',
+            'Client',
+            'list_users',
+            'async_list_users',
+            'BaseAPIError',
+        ):
             assert name in exports, f'__init__.__all__ missing {name!r}'
 
     def test_error_hierarchy_generated(self, constraints_gen):
