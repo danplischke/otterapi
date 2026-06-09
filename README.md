@@ -10,6 +10,10 @@
 - **Sync & Async Support** - Generate both synchronous and asynchronous API clients
 - **OpenAPI 3.x Support** - Full support for OpenAPI 3.0, 3.1, and 3.2 specifications
 - **Module Splitting** - Organize large APIs into multiple organized files
+- **Pagination** - Auto-detect or configure offset, cursor, page, and link-header pagination
+- **DataFrame Conversion** - Generate pandas/polars DataFrame methods for list endpoints
+- **File Export** - Generate CSV, TSV, JSONL, and Parquet streaming helpers
+- **Response Unwrapping** - Transparently unwrap envelope-style responses
 - **Customizable Client** - Generated client class with configurable base URL, timeout, and headers
 - **Environment Variable Support** - Use `${VAR}` or `${VAR:-default}` syntax in config files
 
@@ -50,49 +54,130 @@ import asyncio
 pet = asyncio.run(aget_pet_by_id(pet_id=123))
 ```
 
+---
+
 ## 📝 Configuration
 
-### Basic Configuration
+### Config File Locations
+
+OtterAPI looks for configuration in this order:
+
+1. Path passed via `otter generate -c <path>`
+2. `otter.yaml` or `otter.yml` in the current directory
+3. `otter.json` in the current directory
+4. `[tool.otterapi]` section in `pyproject.toml`
+5. `OTTER_SOURCE` and `OTTER_OUTPUT` environment variables
+
+### Config File Formats
+
+**YAML (recommended):**
 
 ```yaml
 documents:
-  - source: https://petstore3.swagger.io/api/v3/openapi.json
-    output: petstore_client
-
-  - source: ./local-api.json
-    output: local_client
-    base_url: https://api.example.com
+  - source: https://api.example.com/openapi.json
+    output: ./client
 ```
 
-### Full Configuration Options
+**pyproject.toml:**
+
+```toml
+[tool.otterapi]
+[[tool.otterapi.documents]]
+source = "https://api.example.com/openapi.json"
+output = "./client"
+```
+
+**JSON:**
+
+```json
+{
+  "documents": [
+    { "source": "https://api.example.com/openapi.json", "output": "./client" }
+  ]
+}
+```
+
+### Top-Level Options
+
+These sit at the root of your config file, outside of `documents:`.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `documents` | list | — | List of OpenAPI documents to process (required) |
+| `generate_endpoints` | bool | `true` | Whether to generate endpoint functions |
+| `format_output` | bool | `true` | Format generated code with ruff/black |
+| `validate_output` | bool | `true` | Validate generated code syntax after writing |
+| `create_py_typed` | bool | `true` | Create `py.typed` marker files |
+
+```yaml
+format_output: true
+validate_output: true
+create_py_typed: true
+
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+```
+
+### Document Options
+
+Each entry under `documents:` supports these fields:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `source` | string | — | URL or file path to the OpenAPI spec (required) |
+| `output` | string | — | Output directory for generated code (required) |
+| `base_url` | string | from spec | Override the base URL defined in the spec |
+| `models_file` | string | `models.py` | Filename for generated models |
+| `endpoints_file` | string | `endpoints.py` | Filename for generated endpoints (no-split mode) |
+| `models_import_path` | string | `null` | Override the import path used for models in endpoints |
+| `generate_async` | bool | `true` | Generate async endpoint functions |
+| `generate_sync` | bool | `true` | Generate sync endpoint functions |
+| `client_class_name` | string | from API title | Override the generated client class name |
+| `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
+| `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
+
+#### Path Filtering
 
 ```yaml
 documents:
-  - source: https://api.example.com/openapi.json  # URL or file path (required)
-    output: ./client                               # Output directory (required)
-    base_url: https://api.example.com              # Override base URL from spec
-    models_file: models.py                         # Models filename (default: models.py)
-    endpoints_file: endpoints.py                   # Endpoints filename (default: endpoints.py)
-    generate_async: true                           # Generate async functions (default: true)
-    generate_sync: true                            # Generate sync functions (default: true)
-    client_class_name: MyAPIClient                 # Client class name (default: from API title)
-    module_split:                                  # Module splitting configuration
-      enabled: false                               # Enable splitting (default: false)
-      # ... see Module Splitting section below
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    include_paths:
+      - /api/v2/**       # only v2 endpoints
+    exclude_paths:
+      - /internal/*      # skip internal endpoints
+      - /admin/**        # skip admin endpoints
 ```
+
+Patterns follow standard glob syntax (`*` = single segment, `**` = any depth).
+
+### Environment Variable Support
+
+Any string value in a config file can reference environment variables:
+
+```yaml
+documents:
+  - source: ${API_SPEC_URL}
+    output: ${OUTPUT_DIR:-./client}
+    base_url: ${BASE_URL:-https://api.example.com}
+```
+
+You can also configure a single document entirely via environment variables (no config file needed):
+
+| Variable | Description |
+|----------|-------------|
+| `OTTER_SOURCE` | Path or URL to the OpenAPI spec |
+| `OTTER_OUTPUT` | Output directory |
+| `OTTER_BASE_URL` | Base URL override |
+| `OTTER_MODELS_FILE` | Models filename |
+| `OTTER_ENDPOINTS_FILE` | Endpoints filename |
 
 ---
 
 ## 📦 Module Splitting
 
-For large APIs with many endpoints, OtterAPI can split the generated code into multiple organized modules instead of a single `endpoints.py` file.
-
-### Why Use Module Splitting?
-
-- **Better Organization** - Group related endpoints together
-- **Easier Navigation** - Find endpoints quickly in smaller files
-- **Improved IDE Performance** - Smaller files load faster
-- **Cleaner Imports** - Import only what you need from specific modules
+For large APIs, OtterAPI can split generated code into multiple organized modules.
 
 ### Enabling Module Splitting
 
@@ -107,9 +192,7 @@ documents:
 
 ### Splitting Strategies
 
-#### `tag` - Split by OpenAPI Tags
-
-Uses the first tag from each operation to determine the module:
+#### `tag` — Split by OpenAPI Tags
 
 ```yaml
 module_split:
@@ -118,27 +201,23 @@ module_split:
   min_endpoints: 1
 ```
 
-**Result:** Endpoints tagged with `["Users"]` go to `users.py`, `["Orders"]` go to `orders.py`, etc.
+Endpoints tagged `["Users"]` go to `users.py`, `["Orders"]` to `orders.py`, etc.
 
-#### `path` - Split by URL Path
-
-Uses the first segment(s) of the URL path:
+#### `path` — Split by URL Path
 
 ```yaml
 module_split:
   enabled: true
   strategy: path
-  path_depth: 1                    # Number of path segments to use
-  global_strip_prefixes:           # Remove these prefixes first
+  path_depth: 1
+  global_strip_prefixes:
     - /api/v1
     - /api/v2
 ```
 
-**Result:** `/api/v1/users/123` → `users.py`, `/api/v1/orders/456` → `orders.py`
+`/api/v1/users/123` → `users.py`, `/api/v1/orders/456` → `orders.py`.
 
-#### `custom` - Explicit Module Mapping
-
-Define exactly which paths go to which modules using glob patterns:
+#### `custom` — Explicit Module Mapping
 
 ```yaml
 module_split:
@@ -151,69 +230,57 @@ module_split:
       - /users/**
     orders:
       - /orders/*
-      - /orders/**
     health:
       - /health
       - /ready
-      - /live
 ```
 
-#### `hybrid` - Combined Strategy (Default)
+#### `hybrid` — Combined Strategy (Default)
 
-Tries custom module_map first, then falls back to tags, then path:
+Tries `module_map` first, then tags, then path:
 
 ```yaml
 module_split:
   enabled: true
   strategy: hybrid
   module_map:
-    health:                        # Custom mapping takes priority
+    health:
       - /health
       - /ready
-  # Remaining endpoints use tags if available, otherwise path
 ```
 
-#### `none` - All to Fallback
-
-All endpoints go to a single fallback module:
+#### `none` — All to Fallback
 
 ```yaml
 module_split:
   enabled: true
   strategy: none
-  fallback_module: api             # All endpoints go here
+  fallback_module: api
 ```
 
-### Pattern Syntax
+### Module Map Patterns
 
-The module map supports glob patterns:
-
-| Pattern | Matches | Example |
-|---------|---------|---------|
-| `/users` | Exact path | `/users` only |
-| `/users/*` | Single segment | `/users/123`, `/users/abc` |
-| `/users/**` | Any depth | `/users/123`, `/users/123/profile/settings` |
-| `/v?/users` | Single character | `/v1/users`, `/v2/users` |
+| Pattern | Matches |
+|---------|---------|
+| `/users` | Exact path only |
+| `/users/*` | One additional segment |
+| `/users/**` | Any depth below `/users` |
+| `/v?/users` | Single wildcard character |
 
 ### Nested Module Maps
-
-Create hierarchical module structures:
 
 ```yaml
 module_split:
   enabled: true
   strategy: custom
   module_map:
-    identity:                      # Parent module
-      users:                       # Child: identity/users.py
+    identity:
+      users:
         - /users/*
-        - /users/**
-      auth:                        # Child: identity/auth.py
+      auth:
         - /auth/*
         - /login
         - /logout
-      roles:                       # Child: identity/roles.py
-        - /roles/*
     billing:
       invoices:
         - /invoices/*
@@ -223,25 +290,21 @@ module_split:
 
 ### Advanced Module Definition
 
-Full control over each module:
-
 ```yaml
 module_split:
   enabled: true
   strategy: custom
   module_map:
     v2_api:
-      paths:                       # Explicit paths key
+      paths:
         - /v2/**
-      strip_prefix: /v2            # Strip this prefix from paths in this module
-      description: "API v2 endpoints (deprecated)"  # Module docstring
-      modules:                     # Nested submodules
+      strip_prefix: /v2
+      description: "API v2 endpoints"
+      file_name: v2.py          # override the generated filename
+      modules:
         users:
           paths:
             - /users/*
-        billing:
-          paths:
-            - /billing/*
 ```
 
 ### Module Split Options Reference
@@ -249,30 +312,32 @@ module_split:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable module splitting |
-| `strategy` | string | `hybrid` | Strategy: `none`, `path`, `tag`, `hybrid`, `custom` |
-| `fallback_module` | string | `common` | Module name for unmatched endpoints |
-| `min_endpoints` | int | `2` | Minimum endpoints per module (smaller modules get consolidated) |
-| `flat_structure` | bool | `false` | `true`: flat files, `false`: nested directories |
-| `path_depth` | int | `1` | Path segments to use for `path` strategy (1-5) |
-| `global_strip_prefixes` | list | common prefixes | Prefixes to strip from all paths before matching |
-| `module_map` | object | `{}` | Custom module mappings |
+| `strategy` | string | `hybrid` | `none`, `path`, `tag`, `hybrid`, `custom` |
+| `fallback_module` | string | `common` | Module for unmatched endpoints |
+| `min_endpoints` | int | `2` | Minimum endpoints per module before consolidating into fallback |
+| `flat_structure` | bool | `false` | Flat files instead of nested directories |
+| `path_depth` | int | `1` | Path segments used for `path` strategy (1–5) |
+| `global_strip_prefixes` | list | `/api`, `/api/v1`, `/api/v2`, `/api/v3` | Prefixes stripped from all paths before matching |
+| `module_map` | object | `{}` | Custom module-to-path mappings |
+| `split_models` | bool | `false` | Generate per-module model files instead of one shared `models.py` |
+| `shared_models_module` | string | `_models` | Module name for shared models when `split_models` is `true` |
 
-### Output Structure Examples
+### Output Structure
 
-**Flat Structure (default):**
+**Flat (`flat_structure: false`, default):**
 
 ```
 client/
-├── __init__.py          # Re-exports all endpoints
-├── models.py            # Pydantic models
-├── _client.py           # Base client class
-├── client.py            # User-customizable client
-├── users.py             # User endpoints
-├── orders.py            # Order endpoints
-└── health.py            # Health check endpoints
+├── __init__.py
+├── models.py
+├── _client.py
+├── client.py
+├── users.py
+├── orders.py
+└── health.py
 ```
 
-**Nested Structure** (`flat_structure: false` with nested module_map):
+**Nested (`flat_structure: false` with nested `module_map`):**
 
 ```
 client/
@@ -289,66 +354,113 @@ client/
     └── invoices.py
 ```
 
-### Complete Example
+---
+
+## 📄 Pagination
+
+OtterAPI generates iterator-based pagination methods alongside standard endpoint functions. Paginated endpoints get an `_iter` suffix variant that yields items one by one, handling page-fetching automatically.
+
+### Enabling Pagination
 
 ```yaml
 documents:
-  - source: https://api.mycompany.com/openapi.json
-    output: ./mycompany_client
-    module_split:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    pagination:
       enabled: true
-      strategy: custom
+```
 
-      # Strip API version prefixes
-      global_strip_prefixes:
-        - /api/v1
-        - /api/v2
-        - /api/v3
+### Auto-Detection
 
-      # Consolidate small modules (< 3 endpoints) into fallback
-      min_endpoints: 3
-      fallback_module: misc
+When `auto_detect: true` (the default), OtterAPI inspects each endpoint's parameters. If it finds a matching pair for any pagination style, it generates pagination methods automatically — no per-endpoint config needed.
 
-      # Custom module organization
-      module_map:
-        # Simple health checks
-        health:
-          - /health
-          - /ready
-          - /metrics
+```yaml
+pagination:
+  enabled: true
+  auto_detect: true           # default
+  default_style: offset       # default; used when auto-detected
+```
 
-        # User management
-        users:
-          - /users
-          - /users/*
-          - /users/**
+### Pagination Styles
 
-        # Authentication
-        auth:
-          - /auth/*
-          - /login
-          - /logout
-          - /refresh
+| Style | Required Parameters | Description |
+|-------|--------------------|-|
+| `offset` | `offset` + `limit` | Offset/limit (e.g. `?offset=0&limit=100`) |
+| `cursor` | `cursor` + `limit` | Cursor-based (e.g. `?cursor=abc&limit=100`) |
+| `page` | `page` + `per_page` | Page number (e.g. `?page=2&per_page=50`) |
+| `link` | — | RFC 5988 `Link` header |
 
-        # Nested billing module
-        billing:
-          paths:
-            - /billing/**
-          description: "Billing and payment endpoints"
-          modules:
-            invoices:
-              - /invoices/*
-            subscriptions:
-              - /subscriptions/*
-            payments:
-              - /payments/*
+### Global Pagination Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable pagination generation |
+| `auto_detect` | bool | `true` | Auto-detect pagination from parameter names |
+| `default_style` | string | `offset` | Fallback style when auto-detecting |
+| `default_page_size` | int | `100` | Default page size for iteration |
+| `default_data_path` | string | `null` | Default JSON path to items array in response |
+| `default_total_path` | string | `null` | Default JSON path to total count in response |
+| `default_offset_param` | string | `offset` | Param name used for offset detection |
+| `default_limit_param` | string | `limit` | Param name used for limit detection |
+| `default_cursor_param` | string | `cursor` | Param name used for cursor detection |
+| `default_page_param` | string | `page` | Param name used for page detection |
+| `default_per_page_param` | string | `per_page` | Param name used for per-page detection |
+| `endpoints` | object | `{}` | Per-endpoint overrides |
+
+### Per-Endpoint Pagination Options
+
+```yaml
+pagination:
+  enabled: true
+  endpoints:
+    list_users:
+      style: cursor
+      cursor_param: next_token
+      limit_param: max_results
+      data_path: data.users
+      total_path: meta.total
+      next_cursor_path: meta.next_token
+      default_page_size: 50
+      max_page_size: 200
+    get_orders:
+      enabled: false            # disable pagination for this endpoint
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool\|null | inherits | Override whether to generate pagination |
+| `style` | string | inherits | `offset`, `cursor`, `page`, `link` |
+| `offset_param` | string | inherits | Name of offset parameter |
+| `limit_param` | string | inherits | Name of limit parameter |
+| `cursor_param` | string | inherits | Name of cursor parameter |
+| `page_param` | string | inherits | Name of page parameter |
+| `per_page_param` | string | inherits | Name of per-page parameter |
+| `data_path` | string | inherits | JSON path to items array in response |
+| `total_path` | string | inherits | JSON path to total count |
+| `next_cursor_path` | string | `null` | JSON path to next cursor value |
+| `total_pages_path` | string | `null` | JSON path to total page count |
+| `default_page_size` | int | inherits | Default page size |
+| `max_page_size` | int | `null` | Maximum allowed page size |
+
+### Usage
+
+```python
+from client import list_users_iter, alist_users_iter
+
+# Iterate all users (handles pagination automatically)
+for user in list_users_iter():
+    print(user.name)
+
+# Async variant
+async for user in alist_users_iter():
+    print(user.name)
 ```
 
 ---
 
 ## 📊 DataFrame Conversion
 
-OtterAPI can generate additional methods that return pandas or polars DataFrames directly, making it easy to analyze API responses.
+When enabled, list-returning endpoints get additional methods that return pandas or polars DataFrames directly.
 
 ### Enabling DataFrame Methods
 
@@ -358,106 +470,175 @@ documents:
     output: ./client
     dataframe:
       enabled: true
-      pandas: true      # Generate _df methods (default: true when enabled)
-      polars: true      # Generate _pl methods (default: false)
+      pandas: true      # generate _df methods (default: true)
+      polars: true      # generate _pl methods (default: false)
 ```
 
 ### Generated Methods
 
-When enabled, endpoints that return lists get additional DataFrame methods:
-
-| Original Method | Pandas Method | Polars Method |
-|-----------------|---------------|---------------|
+| Original | Pandas | Polars |
+|----------|--------|--------|
 | `get_users()` | `get_users_df()` | `get_users_pl()` |
 | `aget_users()` | `aget_users_df()` | `aget_users_pl()` |
 
-### Basic Usage
+### Usage
 
 ```python
-from client import find_pets_by_status, find_pets_by_status_df, find_pets_by_status_pl
+from client import list_pets_df, list_pets_pl
 
-# Get as Pydantic models (existing behavior)
-pets = find_pets_by_status("available")
-for pet in pets:
-    print(f"{pet.id}: {pet.name}")
+pdf = list_pets_df("available")
+plf = list_pets_pl("available")
 
-# Get as pandas DataFrame
-pdf = find_pets_by_status_df("available")
-print(pdf.head())
-print(pdf.describe())
-
-# Get as polars DataFrame
-plf = find_pets_by_status_pl("available")
-print(plf.schema)
-print(plf.head())
+# Override the data extraction path at call time
+df = list_pets_df("available", path="response.data.pets")
 ```
 
-### Handling Nested Responses
-
-For APIs that return data nested under a key (e.g., `{"data": {"users": [...]}}`):
+### Nested Response Paths
 
 ```yaml
 dataframe:
   enabled: true
   pandas: true
-  polars: true
-  default_path: "data.items"      # Default path for all endpoints
+  default_path: data.items       # default for all endpoints
   endpoints:
     get_users:
-      path: "data.users"          # Override for specific endpoint
+      path: data.users           # override for this endpoint
     get_analytics:
-      path: "response.events"
-```
-
-You can also override the path at runtime:
-
-```python
-# Use configured path
-df = get_users_df()
-
-# Override path at call time
-df = get_users_df(path="response.data.users")
-```
-
-### Selective Generation
-
-Control which endpoints get DataFrame methods:
-
-```yaml
-dataframe:
-  enabled: true
-  pandas: true
-  polars: true
-  include_all: false              # Don't generate for all endpoints
-  endpoints:
-    list_users:
-      enabled: true               # Only generate for this endpoint
-    get_analytics:
-      enabled: true
-      path: "events"
+      path: response.events
       polars: true
-      pandas: false               # Only polars for this endpoint
+      pandas: false
 ```
 
-### DataFrame Configuration Options
+### DataFrame Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable DataFrame method generation |
-| `pandas` | bool | `true` | Generate `_df` methods (pandas) |
-| `polars` | bool | `false` | Generate `_pl` methods (polars) |
-| `default_path` | string | `null` | Default JSON path for extracting data |
+| `enabled` | bool | `false` | Enable DataFrame generation |
+| `pandas` | bool | `true` | Generate `_df` (pandas) methods |
+| `polars` | bool | `false` | Generate `_pl` (polars) methods |
+| `default_path` | string | `null` | Default JSON path to extract data |
 | `include_all` | bool | `true` | Generate for all list-returning endpoints |
-| `endpoints` | object | `{}` | Per-endpoint configuration overrides |
+| `endpoints` | object | `{}` | Per-endpoint overrides |
+
+### Per-Endpoint DataFrame Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool\|null | inherits | Override whether to generate methods |
+| `path` | string | inherits | JSON path to extract data |
+| `pandas` | bool\|null | inherits | Override pandas generation |
+| `polars` | bool\|null | inherits | Override polars generation |
+
+---
+
+## 💾 File Export
+
+When enabled, list-returning endpoints get streaming export helpers for writing responses directly to files (local or remote via UPath).
+
+### Enabling Export
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    export:
+      enabled: true
+      formats:
+        - csv
+        - jsonl
+```
+
+Parquet support requires the `pyarrow` extra:
+
+```bash
+pip install otterapi[parquet]
+```
+
+### Export Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable export helper generation |
+| `formats` | list | `[csv, jsonl]` | Default formats: `csv`, `tsv`, `jsonl`, `parquet` |
+| `default_path` | string | `null` | Default JSON path to extract list data |
+| `include_all` | bool | `true` | Generate helpers for all list-returning endpoints |
+| `batch_size` | int | `1000` | Batch size used when streaming pages to disk |
+| `endpoints` | object | `{}` | Per-endpoint overrides |
+
+### Per-Endpoint Export Options
+
+```yaml
+export:
+  enabled: true
+  formats: [csv, jsonl]
+  endpoints:
+    list_users:
+      formats: [parquet]        # only parquet for this endpoint
+      path: data.users
+    get_events:
+      enabled: false            # disable export for this endpoint
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool\|null | inherits | Override whether to generate helpers |
+| `path` | string | inherits | JSON path to extract data |
+| `formats` | list | inherits | Override formats for this endpoint |
+
+### Usage
+
+```python
+from client import export_list_users_csv, export_list_users_parquet
+
+# Export directly to a file
+export_list_users_csv("output/users.csv")
+export_list_users_parquet("s3://my-bucket/users.parquet")  # UPath remote targets work too
+```
+
+---
+
+## 🔓 Response Unwrapping
+
+For APIs that wrap all responses in an envelope (e.g. `{"data": {...}, "meta": {...}}`), response unwrapping makes endpoints return just the inner data automatically.
+
+### Enabling Response Unwrap
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    response_unwrap:
+      enabled: true
+      data_path: data          # default path (default: "data")
+```
+
+### Per-Endpoint Overrides
+
+```yaml
+response_unwrap:
+  enabled: true
+  data_path: data
+  endpoints:
+    get_user:
+      data_path: result.user   # this endpoint uses a different path
+    get_raw_data:
+      enabled: false           # don't unwrap this endpoint
+```
+
+### Response Unwrap Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable response unwrapping |
+| `data_path` | string | `data` | Default JSON path to extract from all responses |
+| `endpoints` | object | `{}` | Per-endpoint overrides |
 
 ### Per-Endpoint Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | bool | inherits | Override whether to generate methods |
-| `path` | string | inherits | JSON path to extract data |
-| `pandas` | bool | inherits | Override pandas generation |
-| `polars` | bool | inherits | Override polars generation |
+| `enabled` | bool\|null | inherits | Override whether to unwrap |
+| `data_path` | string | inherits | JSON path for this endpoint |
 
 ---
 
@@ -466,22 +647,19 @@ dataframe:
 ### Direct Function Imports
 
 ```python
-# Import specific endpoints
 from client import get_user, create_user, list_orders
 
 # Async versions are prefixed with 'a'
 from client import aget_user, acreate_user, alist_orders
 
-# Sync usage
+# Sync
 user = get_user(user_id=123)
-orders = list_orders(status="pending", limit=10)
 
-# Async usage
+# Async
 import asyncio
 
 async def main():
     user = await aget_user(user_id=123)
-    orders = await alist_orders(status="pending")
 
 asyncio.run(main())
 ```
@@ -489,10 +667,8 @@ asyncio.run(main())
 ### Module-Specific Imports (with splitting)
 
 ```python
-# Import from specific modules
 from client.users import get_user, create_user
 from client.orders import list_orders, get_order
-from client.auth import login, logout
 ```
 
 ### Using the Client Class
@@ -500,50 +676,26 @@ from client.auth import login, logout
 ```python
 from client import Client
 
-# Create client with default settings
-client = Client()
-
-# Or customize the client
 client = Client(
-    base_url="https://api.example.com",
+    base_url='https://api.example.com',
     timeout=30.0,
-    headers={
-        "Authorization": "Bearer your-token",
-        "X-Custom-Header": "value"
-    }
+    headers={'Authorization': 'Bearer your-token'},
 )
 
-# Use client methods (sync)
 user = client.get_user(user_id=123)
-orders = client.list_orders(status="pending")
-
-# Use async methods
-import asyncio
 
 async def main():
     user = await client.aget_user(user_id=123)
-
-asyncio.run(main())
 ```
 
 ### Working with Models
 
 ```python
-from client.models import User, Order, CreateUserRequest
+from client.models import User, CreateUserRequest
 
-# Models are Pydantic BaseModels
-new_user = CreateUserRequest(
-    name="John Doe",
-    email="john@example.com"
-)
-
-# Create user
+new_user = CreateUserRequest(name='John Doe', email='john@example.com')
 user = create_user(body=new_user)
-
-# Access typed response
-print(user.id)
-print(user.name)
-print(user.email)
+print(user.id, user.email)
 ```
 
 ---
@@ -568,36 +720,24 @@ otter validate
 
 ## 🐍 Programmatic API
 
-For scripts and CI pipelines you can drive code generation from Python
-instead of the CLI:
-
 ```python
 from otterapi.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.config import DocumentConfig, PaginationConfig, ExportConfig
 
 config = DocumentConfig(
     source='https://petstore3.swagger.io/api/v3/openapi.json',
     output='./client',
-    base_url='https://petstore3.swagger.io/api/v3',
-    # Any of the optional sections from otter.yml work here too:
-    # pagination=PaginationConfig(enabled=True),
-    # export=ExportConfig(enabled=True, formats=['parquet']),
+    pagination=PaginationConfig(enabled=True),
+    export=ExportConfig(enabled=True, formats=['csv', 'parquet']),
 )
 Codegen(config).generate()
 ```
-
-`Codegen.generate()` writes the same files the CLI would and raises
-`pydantic.ValidationError` (wrapped as `ConfigValidationError` when
-loading from YAML/JSON/TOML) on bad config -- friendly multi-line
-messages include the source path and the offending field path.
 
 ---
 
 ## ❗ Error Handling
 
-Generated clients raise a typed exception hierarchy rooted at
-`BaseAPIError` -- you no longer need to inspect `.status_code` to
-discriminate by error class:
+Generated clients raise a typed exception hierarchy rooted at `BaseAPIError`:
 
 ```python
 from my_client import (
@@ -605,70 +745,44 @@ from my_client import (
     BaseAPIError,        # catches every API error
     ClientError,         # all 4xx
     ServerError,         # all 5xx
-    NotFoundError,       # specific: HTTP 404
-    RateLimitError,      # specific: HTTP 429
+    NotFoundError,       # 404
+    RateLimitError,      # 429
 )
 
 try:
     users = list_users(client=Client())
 except NotFoundError as e:
-    log.warning("not found: %s", e.detail)
+    log.warning('not found: %s', e.detail)
 except RateLimitError:
     backoff_and_retry()
 except ServerError:
     page_oncall()
 except BaseAPIError as e:
-    log.error("unexpected API error %d: %s", e.status_code, e.detail)
+    log.error('unexpected %d: %s', e.status_code, e.detail)
 ```
 
-Mapped status codes get specific subclasses (400 / 401 / 403 / 404 /
-409 / 422 / 429 / 500 / 502 / 503 / 504); other 4xx / 5xx codes fall
-through to `ClientError` / `ServerError`. Subclass `BaseAPIError` in
-your generated `client.py` to customize how `from_response` parses
-detail payloads.
+Mapped status codes: 400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504. Other 4xx/5xx fall through to `ClientError`/`ServerError`. Subclass `BaseAPIError` in your `client.py` to customize error parsing.
 
 ---
 
 ## ♻️ Regenerating after spec changes
 
-OtterAPI is **idempotent** for the regenerated files:
+OtterAPI is **idempotent** for generated files:
 
-* `models.py`, `endpoints.py`, `_client.py`, `_pagination.py`,
-  `_export.py`, `_dataframe.py` are rewritten on every `otter generate`
-  -- never edit them by hand.
-* `client.py` is generated **once** and then left alone. This is your
-  customization seam (auth, retries, logging, custom error parsing).
-
-If a spec change renames a model or endpoint, the corresponding symbol
-in your generated package's `__init__.py` will move with it. Pin a
-version of OtterAPI in your dev/test deps if you want a guaranteed
-stable surface across regen runs.
+- `models.py`, `endpoints.py`, `_client.py`, `_pagination.py`, `_export.py`, `_dataframe.py` are **rewritten on every run** — never edit them by hand.
+- `client.py` is generated **once** and left alone — this is your customization seam.
 
 ---
 
 ## 🛠 Development
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/otterapi.git
+git clone https://github.com/danplischke/otterapi.git
 cd otterapi
-
-# Install dependencies with uv
 uv sync
-
-# Run tests
 uv run pytest
-
-# Run tests with coverage
 uv run pytest --cov=otterapi
-
-# Run the generator
-uv run python -m otterapi generate
-
-# Format code
 uv run ruff format .
-
-# Lint code
 uv run ruff check .
 ```
 
@@ -676,4 +790,4 @@ uv run ruff check .
 
 ## 📄 License
 
-MIT License - see LICENSE for details.
+MIT License — see LICENSE for details.
