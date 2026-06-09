@@ -69,7 +69,9 @@ from otterapi.openapi.v3_2.v3_2 import (
 
 def _load_models_mixin_source() -> str:
     return (
-        files('otterapi.codegen.runtime').joinpath('_models_mixin.py').read_text('utf-8')
+        files('otterapi.codegen.runtime')
+        .joinpath('_models_mixin.py')
+        .read_text('utf-8')
     )
 
 

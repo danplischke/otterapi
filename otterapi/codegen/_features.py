@@ -149,5 +149,3 @@ class RetryFeature(FeatureModule):
 
     def is_enabled(self, _config: DocumentConfig) -> bool:
         return True
-
-

@@ -791,7 +791,10 @@ class TypeGenerator(OpenAPIProcessor):
         annotation = type_.annotation_ast
         # Union[..., None] form
         if isinstance(annotation, ast.Subscript):
-            if isinstance(annotation.value, ast.Name) and annotation.value.id == 'Union':
+            if (
+                isinstance(annotation.value, ast.Name)
+                and annotation.value.id == 'Union'
+            ):
                 if isinstance(annotation.slice, ast.Tuple):
                     return any(
                         isinstance(elt, ast.Constant) and elt.value is None

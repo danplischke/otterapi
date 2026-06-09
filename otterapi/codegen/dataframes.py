@@ -32,6 +32,7 @@ __all__ = [
 def generate_dataframe_module(output_dir: Path | UPath) -> Path | UPath:
     """Write ``_dataframe.py`` into *output_dir* and return the written path."""
     from otterapi.codegen._features import DataFrameFeature
+
     return DataFrameFeature().write(output_dir)
 
 
