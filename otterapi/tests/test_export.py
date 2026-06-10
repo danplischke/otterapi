@@ -952,6 +952,10 @@ def _make_param(name: str, *, required: bool = False, location: str = 'query'):
     )
 
 
+def _arg_names(fn_ast):
+    return [a.arg for a in fn_ast.args.args]
+
+
 def _kwarg_names(fn_ast):
     return [a.arg for a in fn_ast.args.kwonlyargs]
 
@@ -977,7 +981,8 @@ class TestBuildStandaloneExportFn:
         assert fn_ast.returns.id == 'int'
 
         kwargs = _kwarg_names(fn_ast)
-        assert 'output_path' in kwargs
+        # output_path is the first positional argument, not a keyword-only arg.
+        assert 'output_path' in _arg_names(fn_ast)
         assert 'format' in kwargs
         assert 'batch_size' in kwargs
         # Mirrors the underlying optional parameter
@@ -1068,13 +1073,9 @@ class TestBuildStandalonePaginatedExportFn:
 
         assert isinstance(fn_ast, ast.FunctionDef)
         kwargs = _kwarg_names(fn_ast)
-        for expected in (
-            'output_path',
-            'format',
-            'batch_size',
-            'page_size',
-            'max_items',
-        ):
+        # output_path is the first positional argument, not a keyword-only arg.
+        assert 'output_path' in _arg_names(fn_ast)
+        for expected in ('format', 'batch_size', 'page_size', 'max_items'):
             assert expected in kwargs
 
         # Forwards page_size and max_items into the iter call.

@@ -227,10 +227,18 @@ class FunctionSignatureBuilder:
             if param.required:
                 self._args.append(arg)
             else:
-                # Wrap annotation in `| None` so the `= None` default is type-safe.
-                optional_annotation = _union_expr(
-                    [annotation, ast.Constant(value=None)]
-                )
+                # Wrap annotation in `| None` only if not already nullable.
+                # The OpenAPI schema may already encode nullability (nullable:true
+                # or type:[..., null]), in which case schema_to_type emits
+                # `T | None` and we must not add a second `| None`.
+                from otterapi.codegen.types import _binop_includes_none
+
+                if _binop_includes_none(annotation):
+                    optional_annotation = annotation
+                else:
+                    optional_annotation = _union_expr(
+                        [annotation, ast.Constant(value=None)]
+                    )
                 self._kwonlyargs.append(
                     _argument(param.name_sanitized, optional_annotation)
                 )

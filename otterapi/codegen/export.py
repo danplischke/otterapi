@@ -429,6 +429,7 @@ def build_standalone_paginated_export_fn(
     is_async: bool,
     default_format: str = 'csv',
     default_batch_size: int = 1000,
+    pagination_limit_param: str = 'limit',
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an export wrapper around a paginated endpoint's ``_iter`` variant.
 
@@ -436,11 +437,21 @@ def build_standalone_paginated_export_fn(
     ``page_size``/``max_items`` (forwarded to the iter function), drives the
     iterator, and pipes items into ``export(...)`` (sync) or
     ``export_async(...)`` (async). Memory stays bounded by ``batch_size``.
+
+    The raw OpenAPI ``limit`` parameter (or ``pagination_limit_param``) is
+    intentionally excluded: the ``_iter`` function manages page size
+    internally via ``page_size`` / ``max_items``.
     """
+    # Strip the raw pagination limit param — the _iter fn handles it internally.
+    filtered_parameters = (
+        [p for p in parameters if p.name != pagination_limit_param]
+        if parameters
+        else parameters
+    )
     return _build_export_function(
         fn_name=fn_name,
         target_fn_name=target_iter_fn_name,
-        parameters=parameters,
+        parameters=filtered_parameters,
         request_body_info=request_body_info,
         item_type_ast=item_type_ast,
         item_type_imports=item_type_imports or {},

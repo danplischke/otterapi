@@ -1159,6 +1159,7 @@ class Codegen(OpenAPIProcessor):
                 is_async=is_async,
                 default_format=default_format,
                 default_batch_size=self.config.export.batch_size,
+                pagination_limit_param=self.config.pagination.limit_param,
             )
             endpoint_names.add(fn_name)
             body.append(fn)
