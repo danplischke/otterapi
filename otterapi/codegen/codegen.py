@@ -158,7 +158,7 @@ class Codegen(OpenAPIProcessor):
             SchemaValidationError: If the schema is not valid OpenAPI.
         """
         self.openapi = self._schema_loader.load(self.config.source)
-        self.typegen = TypeGenerator(self.openapi)
+        self.typegen = TypeGenerator(self.openapi, pydantic_version=self.config.pydantic_version)
 
     def _extract_response_info(self, operation: Operation) -> dict[int, ResponseInfo]:
         """Extract response information including content type from an operation.
@@ -1652,6 +1652,7 @@ class Codegen(OpenAPIProcessor):
             class_name=base_client_name,
             default_base_url=base_url,
             default_timeout=30.0,
+            pydantic_version=self.config.pydantic_version,
         )
 
         # Build the _client.py file

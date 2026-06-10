@@ -64,16 +64,42 @@ class FeatureModule(ABC):
             .read_text('utf-8')
         )
 
-    def write(self, output_dir: Path | UPath) -> Path | UPath:
+    def transform_content(self, content: str, config: DocumentConfig) -> str:
+        """Optionally transform the module source before writing.
+
+        The default implementation returns *content* unchanged.  Subclasses
+        override this to perform pydantic-version-specific (or other
+        config-driven) rewrites of the static template source.
+
+        Args:
+            content: Raw source text read from ``otterapi.codegen.runtime``.
+            config: The active :class:`~otterapi.config.DocumentConfig`.
+
+        Returns:
+            The (possibly transformed) source text to write to disk.
+        """
+        return content
+
+    def write(self, output_dir: Path | UPath, config: DocumentConfig | None = None) -> Path | UPath:
         """Write :pyattr:`module_content` into ``output_dir``.
 
         Always opens with UTF-8 encoding; relying on the platform locale
         broke the export module on Windows in PR #2.
+
+        Args:
+            output_dir: Directory where the module file is written.
+            config: Optional :class:`~otterapi.config.DocumentConfig` passed to
+                :pymeth:`transform_content`.  When *None*, no transformation is
+                applied (backwards-compatible for callers that do not yet pass
+                config, e.g. ``generate_dataframe_module``).
         """
         output_dir = UPath(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        content = self.module_content
+        if config is not None:
+            content = self.transform_content(content, config)
         target = output_dir / self.module_filename
-        target.write_text(self.module_content, encoding='utf-8')
+        target.write_text(content, encoding='utf-8')
         return target
 
 
@@ -84,7 +110,9 @@ def write_enabled_features(
 ) -> list[Path | UPath]:
     """Write every enabled feature's runtime module. Returns the written paths."""
     return [
-        feature.write(output_dir) for feature in features if feature.is_enabled(config)
+        feature.write(output_dir, config)
+        for feature in features
+        if feature.is_enabled(config)
     ]
 
 
@@ -114,13 +142,49 @@ class PaginationFeature(FeatureModule):
 
 
 class DataFrameFeature(FeatureModule):
-    """Emits ``_dataframe.py`` (pandas / polars converters)."""
+    """Emits ``_dataframe.py`` (pandas / polars converters).
+
+    When ``config.pydantic_version == 1`` the emitted helper uses ``obj.dict()``
+    (the Pydantic v1 serialisation method).  For Pydantic v2 (the default) it
+    uses ``obj.model_dump()`` and removes the dead v1 fallback branch.
+    """
 
     module_filename = '_dataframe.py'
 
     def is_enabled(self, config: DocumentConfig) -> bool:
         return bool(config.dataframe.enabled) and (
             bool(config.dataframe.pandas) or bool(config.dataframe.polars)
+        )
+
+    def transform_content(self, content: str, config: DocumentConfig) -> str:
+        """Rewrite ``_to_dict`` and ``_normalize_data`` for the target Pydantic version."""
+        if config.pydantic_version == 1:
+            return content.replace(
+                # Remove model_dump branch and make dict() the only call path
+                'if hasattr(obj, \'model_dump\'):\n        return obj.model_dump()\n'
+                '    elif hasattr(obj, \'dict\'):\n        # Pydantic v1 compatibility\n'
+                '        return obj.dict()',
+                '# Pydantic v1\n    if hasattr(obj, \'dict\'):\n        return obj.dict()',
+            ).replace(
+                # _normalize_data: replace the model_dump / dict check with dict only
+                'if hasattr(first, \'model_dump\') or hasattr(first, \'dict\'):',
+                'if hasattr(first, \'dict\'):',
+            ).replace(
+                # single-item path
+                'if hasattr(data, \'model_dump\') or hasattr(data, \'dict\'):',
+                'if hasattr(data, \'dict\'):',
+            )
+        # pydantic_version == 2 (default): strip the dead v1 .dict() fallback branch
+        return content.replace(
+            '    elif hasattr(obj, \'dict\'):\n        # Pydantic v1 compatibility\n'
+            '        return obj.dict()\n',
+            '',
+        ).replace(
+            'if hasattr(first, \'model_dump\') or hasattr(first, \'dict\'):',
+            'if hasattr(first, \'model_dump\'):',
+        ).replace(
+            'if hasattr(data, \'model_dump\') or hasattr(data, \'dict\'):',
+            'if hasattr(data, \'model_dump\'):',
         )
 
 

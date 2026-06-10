@@ -652,6 +652,7 @@ def generate_base_client_class(
     class_name: str,
     default_base_url: str,
     default_timeout: float = 30.0,
+    pydantic_version: int = 2,
 ) -> tuple[ast.ClassDef, ImportDict]:
     """Generate a BaseClient class with only request infrastructure.
 
@@ -662,17 +663,28 @@ def generate_base_client_class(
         class_name: Name for the generated class (e.g., 'BasePetStoreClient').
         default_base_url: Default base URL from the OpenAPI spec.
         default_timeout: Default request timeout in seconds.
+        pydantic_version: Target Pydantic version (1 or 2).  Affects which
+            response-unwrapping pattern is emitted in ``_parse_response``.
 
     Returns:
         Tuple of (class AST node, required imports).
     """
-    imports: ImportDict = {
-        'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
-        'typing': {'Any'},
-        'types': {'UnionType'},
-        'pydantic': {'TypeAdapter', 'RootModel'},
-        '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
-    }
+    if pydantic_version == 1:
+        imports: ImportDict = {
+            'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
+            'typing': {'Any'},
+            'types': {'UnionType'},
+            'pydantic': {'TypeAdapter'},
+            '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+        }
+    else:
+        imports = {
+            'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
+            'typing': {'Any'},
+            'types': {'UnionType'},
+            'pydantic': {'TypeAdapter', 'RootModel'},
+            '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+        }
 
     # Build __init__ method
     init_method = _build_init_method(default_base_url, default_timeout)
@@ -696,10 +708,10 @@ def generate_base_client_class(
     validate_response_method = _build_validate_response_method()
 
     # Build _parse_response method (sync)
-    parse_response_method = _build_parse_response_method(is_async=False)
+    parse_response_method = _build_parse_response_method(is_async=False, pydantic_version=pydantic_version)
 
     # Build _parse_response_async method (async)
-    async_parse_response_method = _build_parse_response_method(is_async=True)
+    async_parse_response_method = _build_parse_response_method(is_async=True, pydantic_version=pydantic_version)
 
     # Build class body
     class_body: list[ast.stmt] = [
@@ -1049,10 +1061,19 @@ def _build_validate_response_method() -> ast.FunctionDef:
 
 def _build_parse_response_method(
     is_async: bool,
+    pydantic_version: int = 2,
 ) -> ast.FunctionDef | ast.AsyncFunctionDef:
     """Build the _parse_response or _parse_response_async method.
 
     This method handles JSON parsing and Pydantic validation of responses.
+
+    Args:
+        is_async: Whether to generate the async variant.
+        pydantic_version: Target Pydantic version (1 or 2).  For v2, the method
+            emits an ``isinstance(validated, RootModel)`` check and returns
+            ``validated.root``.  For v1, RootModel does not exist; instead the
+            method checks ``hasattr(validated, '__root__')`` and returns
+            ``validated.__root__``.
     """
     method_name = '_parse_response_async' if is_async else '_parse_response'
 
@@ -1073,14 +1094,8 @@ def _build_parse_response_method(
         defaults=[],
     )
 
-    # Build the method body:
-    # data = response.json()
-    # validated = TypeAdapter(response_type).validate_python(data)
-    # self._validate_response(response, validated)
-    # if isinstance(validated, RootModel):
-    #     return validated.root
-    # return validated
-    body: list[ast.stmt] = [
+    # Common statements: parse JSON, validate with TypeAdapter, call hook
+    common: list[ast.stmt] = [
         # data = response.json()
         _assign(
             _name('data'),
@@ -1107,15 +1122,33 @@ def _build_parse_response_method(
                 args=[_name('response'), _name('validated')],
             )
         ),
-        # if isinstance(validated, RootModel): return validated.root
-        ast.If(
+    ]
+
+    if pydantic_version == 1:
+        # Pydantic v1: RootModel does not exist; use hasattr(validated, '__root__')
+        # if hasattr(validated, '__root__'): return validated.__root__
+        unwrap_stmt = ast.If(
+            test=_call(
+                func=_name('hasattr'),
+                args=[_name('validated'), ast.Constant(value='__root__')],
+            ),
+            body=[ast.Return(value=_attr('validated', '__root__'))],
+            orelse=[],
+        )
+    else:
+        # Pydantic v2: if isinstance(validated, RootModel): return validated.root
+        unwrap_stmt = ast.If(
             test=_call(
                 func=_name('isinstance'),
                 args=[_name('validated'), _name('RootModel')],
             ),
             body=[ast.Return(value=_attr('validated', 'root'))],
             orelse=[],
-        ),
+        )
+
+    body: list[ast.stmt] = [
+        *common,
+        unwrap_stmt,
         # return validated
         ast.Return(value=_name('validated')),
     ]

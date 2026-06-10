@@ -1012,6 +1012,16 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    pydantic_version: Literal[1, 2] = Field(
+        default=2,
+        description=(
+            'Target Pydantic version (1 or 2). '
+            'Controls generated model syntax (model_config dict vs nested class Config, '
+            'model_dump() vs dict()), the RootModel / __root__ pattern in the '
+            'generated client, and the emitted _dataframe.py helper.'
+        ),
+    )
+
     module_split: ModuleSplitConfig = Field(
         default_factory=ModuleSplitConfig,
         description='Configuration for splitting endpoints into submodules.',

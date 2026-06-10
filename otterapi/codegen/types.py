@@ -402,6 +402,7 @@ def _binop_includes_none(node: ast.expr) -> bool:
 @dataclasses.dataclass
 class TypeGenerator(OpenAPIProcessor):
     types: dict[str, Type] = dataclasses.field(default_factory=dict)
+    pydantic_version: int = 2
 
     @staticmethod
     def _rename_type(type_: Type, new_name: str) -> None:
@@ -771,7 +772,7 @@ class TypeGenerator(OpenAPIProcessor):
             )
 
             field_type.add_implementation_import(
-                module=Field.__module__, name=Field.__name__
+                module='pydantic', name=Field.__name__
             )
 
         return ast.AnnAssign(
@@ -853,7 +854,7 @@ class TypeGenerator(OpenAPIProcessor):
                 ctx=ast.Load(),
             )
             extra_imports['typing'] = {'Annotated'}
-            extra_imports.setdefault(Field.__module__, set()).add(Field.__name__)
+            extra_imports.setdefault('pydantic', set()).add(Field.__name__)
         else:
             annotation_ast = union_ast
 
@@ -900,27 +901,42 @@ class TypeGenerator(OpenAPIProcessor):
             field_types.append(type_)
         return body, field_types
 
-    @staticmethod
     def _prepend_model_config_and_docstring(
-        body: list[ast.stmt], schema: Schema, name: str
+        self, body: list[ast.stmt], schema: Schema, name: str
     ) -> list[ast.stmt]:
         """Prepend ``model_config``/deprecation-docstring statements to a model body.
 
-        When the schema declares ``additionalProperties: false``, this mirrors
-        that constraint via Pydantic's ``model_config = {'extra': 'forbid'}`` so
-        generated models actually reject unexpected fields at runtime. The
-        deprecation docstring (if any) is prepended after ``model_config`` so it
-        stays the first statement in the class body.
+        For Pydantic v2 (default), mirrors ``additionalProperties: false`` via
+        ``model_config = {'extra': 'forbid'}``.  For Pydantic v1, emits the
+        equivalent nested ``class Config: extra = 'forbid'`` form instead.
         """
         if schema.additionalProperties is False:
-            model_config_assign = ast.Assign(
-                targets=[_name('model_config')],
-                value=ast.Dict(
-                    keys=[ast.Constant(value='extra')],
-                    values=[ast.Constant(value='forbid')],
-                ),
-            )
-            body = [model_config_assign] + body
+            if self.pydantic_version == 1:
+                # Pydantic v1: class Config: extra = 'forbid'
+                config_class = ast.ClassDef(
+                    name='Config',
+                    bases=[],
+                    keywords=[],
+                    body=[
+                        ast.Assign(
+                            targets=[_name('extra')],
+                            value=ast.Constant(value='forbid'),
+                        )
+                    ],
+                    decorator_list=[],
+                    type_params=[],
+                )
+                body = [config_class] + body
+            else:
+                # Pydantic v2: model_config = {'extra': 'forbid'}
+                model_config_assign = ast.Assign(
+                    targets=[_name('model_config')],
+                    value=ast.Dict(
+                        keys=[ast.Constant(value='extra')],
+                        values=[ast.Constant(value='forbid')],
+                    ),
+                )
+                body = [model_config_assign] + body
 
         if schema.deprecated:
             deprecation_doc = ast.Expr(
