@@ -607,6 +607,7 @@ class SplitModuleEmitter:
         pagination_config: PaginationConfig | None = None,
         response_unwrap_config: ResponseUnwrapConfig | None = None,
         export_config: ExportConfig | None = None,
+        reexport_models: bool = False,
     ):
         """Initialize the split module emitter.
 
@@ -620,6 +621,7 @@ class SplitModuleEmitter:
             pagination_config: Optional pagination configuration.
             response_unwrap_config: Optional response unwrap configuration.
             export_config: Optional export configuration.
+            reexport_models: Whether to include model names in __all__.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -630,6 +632,7 @@ class SplitModuleEmitter:
         self.pagination_config = pagination_config
         self.response_unwrap_config = response_unwrap_config
         self.export_config = export_config
+        self.reexport_models = reexport_models
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
 
@@ -1297,7 +1300,12 @@ class SplitModuleEmitter:
         if type_checking_block:
             final_body.append(type_checking_block)
 
-        final_body.append(_all(sorted(endpoint_names)))
+        all_names = list(endpoint_names)
+        if self.reexport_models:
+            model_names = sorted(import_collector._imports.get(MODELS_MODULE, set()))
+            all_names = sorted(set(all_names) | set(model_names))
+
+        final_body.append(_all(sorted(all_names)))
         final_body.extend(body)
 
         file_path = UPath(file_path)

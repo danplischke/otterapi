@@ -1276,7 +1276,10 @@ class Codegen(OpenAPIProcessor):
         if type_checking_block:
             final_body.append(type_checking_block)
 
-        final_body.append(_all(sorted(endpoint_names)))
+        all_names: set[str] = set(endpoint_names)
+        if self.config.reexport_models:
+            all_names |= import_collector._imports.get(MODELS_MODULE, set())
+        final_body.append(_all(sorted(all_names)))
         final_body.extend(body)
 
         write_mod(final_body, path)
@@ -1580,6 +1583,7 @@ class Codegen(OpenAPIProcessor):
             pagination_config=self.config.pagination,
             response_unwrap_config=self.config.response_unwrap,
             export_config=self.config.export,
+            reexport_models=self.config.reexport_models,
         )
 
         emitted = emitter.emit(

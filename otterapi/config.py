@@ -1003,6 +1003,15 @@ class DocumentConfig(BaseModel):
         None, description='Optional name for a generated client class.'
     )
 
+    reexport_models: bool = Field(
+        default=False,
+        description=(
+            'When True, all Pydantic models used in an endpoint module are '
+            "added to that module's ``__all__``, making them importable directly "
+            'from the endpoint module instead of only from the models module.'
+        ),
+    )
+
     module_split: ModuleSplitConfig = Field(
         default_factory=ModuleSplitConfig,
         description='Configuration for splitting endpoints into submodules.',
