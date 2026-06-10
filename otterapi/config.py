@@ -1012,6 +1012,16 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    reexport_model_exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Glob patterns of model names to exclude from re-export when '
+            '``reexport_models`` is True. For example, '
+            '``["*Envelope*", "*ErrorResponse"]`` hides pagination wrappers '
+            'and error response bodies from the public API surface.'
+        ),
+    )
+
     pydantic_version: Literal[1, 2] = Field(
         default=2,
         description=(

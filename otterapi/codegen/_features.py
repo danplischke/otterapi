@@ -80,7 +80,9 @@ class FeatureModule(ABC):
         """
         return content
 
-    def write(self, output_dir: Path | UPath, config: DocumentConfig | None = None) -> Path | UPath:
+    def write(
+        self, output_dir: Path | UPath, config: DocumentConfig | None = None
+    ) -> Path | UPath:
         """Write :pyattr:`module_content` into ``output_dir``.
 
         Always opens with UTF-8 encoding; relying on the platform locale
@@ -159,32 +161,40 @@ class DataFrameFeature(FeatureModule):
     def transform_content(self, content: str, config: DocumentConfig) -> str:
         """Rewrite ``_to_dict`` and ``_normalize_data`` for the target Pydantic version."""
         if config.pydantic_version == 1:
-            return content.replace(
-                # Remove model_dump branch and make dict() the only call path
-                'if hasattr(obj, \'model_dump\'):\n        return obj.model_dump()\n'
-                '    elif hasattr(obj, \'dict\'):\n        # Pydantic v1 compatibility\n'
-                '        return obj.dict()',
-                '# Pydantic v1\n    if hasattr(obj, \'dict\'):\n        return obj.dict()',
-            ).replace(
-                # _normalize_data: replace the model_dump / dict check with dict only
-                'if hasattr(first, \'model_dump\') or hasattr(first, \'dict\'):',
-                'if hasattr(first, \'dict\'):',
-            ).replace(
-                # single-item path
-                'if hasattr(data, \'model_dump\') or hasattr(data, \'dict\'):',
-                'if hasattr(data, \'dict\'):',
+            return (
+                content.replace(
+                    # Remove model_dump branch and make dict() the only call path
+                    "if hasattr(obj, 'model_dump'):\n        return obj.model_dump()\n"
+                    "    elif hasattr(obj, 'dict'):\n        # Pydantic v1 compatibility\n"
+                    '        return obj.dict()',
+                    "# Pydantic v1\n    if hasattr(obj, 'dict'):\n        return obj.dict()",
+                )
+                .replace(
+                    # _normalize_data: replace the model_dump / dict check with dict only
+                    "if hasattr(first, 'model_dump') or hasattr(first, 'dict'):",
+                    "if hasattr(first, 'dict'):",
+                )
+                .replace(
+                    # single-item path
+                    "if hasattr(data, 'model_dump') or hasattr(data, 'dict'):",
+                    "if hasattr(data, 'dict'):",
+                )
             )
         # pydantic_version == 2 (default): strip the dead v1 .dict() fallback branch
-        return content.replace(
-            '    elif hasattr(obj, \'dict\'):\n        # Pydantic v1 compatibility\n'
-            '        return obj.dict()\n',
-            '',
-        ).replace(
-            'if hasattr(first, \'model_dump\') or hasattr(first, \'dict\'):',
-            'if hasattr(first, \'model_dump\'):',
-        ).replace(
-            'if hasattr(data, \'model_dump\') or hasattr(data, \'dict\'):',
-            'if hasattr(data, \'model_dump\'):',
+        return (
+            content.replace(
+                "    elif hasattr(obj, 'dict'):\n        # Pydantic v1 compatibility\n"
+                '        return obj.dict()\n',
+                '',
+            )
+            .replace(
+                "if hasattr(first, 'model_dump') or hasattr(first, 'dict'):",
+                "if hasattr(first, 'model_dump'):",
+            )
+            .replace(
+                "if hasattr(data, 'model_dump') or hasattr(data, 'dict'):",
+                "if hasattr(data, 'model_dump'):",
+            )
         )
 
 

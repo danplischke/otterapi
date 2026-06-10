@@ -771,9 +771,7 @@ class TypeGenerator(OpenAPIProcessor):
                 keywords=field_keywords,
             )
 
-            field_type.add_implementation_import(
-                module='pydantic', name=Field.__name__
-            )
+            field_type.add_implementation_import(module='pydantic', name=Field.__name__)
 
         return ast.AnnAssign(
             target=_name(field_name),

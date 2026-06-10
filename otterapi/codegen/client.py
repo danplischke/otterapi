@@ -708,10 +708,14 @@ def generate_base_client_class(
     validate_response_method = _build_validate_response_method()
 
     # Build _parse_response method (sync)
-    parse_response_method = _build_parse_response_method(is_async=False, pydantic_version=pydantic_version)
+    parse_response_method = _build_parse_response_method(
+        is_async=False, pydantic_version=pydantic_version
+    )
 
     # Build _parse_response_async method (async)
-    async_parse_response_method = _build_parse_response_method(is_async=True, pydantic_version=pydantic_version)
+    async_parse_response_method = _build_parse_response_method(
+        is_async=True, pydantic_version=pydantic_version
+    )
 
     # Build class body
     class_body: list[ast.stmt] = [

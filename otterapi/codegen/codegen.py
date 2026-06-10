@@ -158,7 +158,9 @@ class Codegen(OpenAPIProcessor):
             SchemaValidationError: If the schema is not valid OpenAPI.
         """
         self.openapi = self._schema_loader.load(self.config.source)
-        self.typegen = TypeGenerator(self.openapi, pydantic_version=self.config.pydantic_version)
+        self.typegen = TypeGenerator(
+            self.openapi, pydantic_version=self.config.pydantic_version
+        )
 
     def _extract_response_info(self, operation: Operation) -> dict[int, ResponseInfo]:
         """Extract response information including content type from an operation.
@@ -1277,7 +1279,17 @@ class Codegen(OpenAPIProcessor):
 
         all_names: set[str] = set(endpoint_names)
         if self.config.reexport_models:
-            all_names |= import_collector._imports.get(MODELS_MODULE, set())
+            model_names = import_collector._imports.get(MODELS_MODULE, set())
+            if self.config.reexport_model_exclude_patterns:
+                model_names = {
+                    n
+                    for n in model_names
+                    if not any(
+                        fnmatch.fnmatch(n, pat)
+                        for pat in self.config.reexport_model_exclude_patterns
+                    )
+                }
+            all_names |= model_names
         final_body.append(_all(sorted(all_names)))
         final_body.extend(body)
 
@@ -1583,6 +1595,7 @@ class Codegen(OpenAPIProcessor):
             response_unwrap_config=self.config.response_unwrap,
             export_config=self.config.export,
             reexport_models=self.config.reexport_models,
+            reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
         )
 
         emitted = emitter.emit(

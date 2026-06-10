@@ -608,6 +608,7 @@ class SplitModuleEmitter:
         response_unwrap_config: ResponseUnwrapConfig | None = None,
         export_config: ExportConfig | None = None,
         reexport_models: bool = False,
+        reexport_model_exclude_patterns: list[str] | None = None,
     ):
         """Initialize the split module emitter.
 
@@ -622,6 +623,7 @@ class SplitModuleEmitter:
             response_unwrap_config: Optional response unwrap configuration.
             export_config: Optional export configuration.
             reexport_models: Whether to include model names in __all__.
+            reexport_model_exclude_patterns: Glob patterns of model names to exclude.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -633,6 +635,9 @@ class SplitModuleEmitter:
         self.response_unwrap_config = response_unwrap_config
         self.export_config = export_config
         self.reexport_models = reexport_models
+        self.reexport_model_exclude_patterns: list[str] = (
+            reexport_model_exclude_patterns or []
+        )
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
 
@@ -1302,8 +1307,17 @@ class SplitModuleEmitter:
 
         all_names = list(endpoint_names)
         if self.reexport_models:
-            model_names = sorted(import_collector._imports.get(MODELS_MODULE, set()))
-            all_names = sorted(set(all_names) | set(model_names))
+            model_names = import_collector._imports.get(MODELS_MODULE, set())
+            if self.reexport_model_exclude_patterns:
+                model_names = {
+                    n
+                    for n in model_names
+                    if not any(
+                        fnmatch.fnmatch(n, pat)
+                        for pat in self.reexport_model_exclude_patterns
+                    )
+                }
+            all_names = sorted(set(all_names) | model_names)
 
         final_body.append(_all(sorted(all_names)))
         final_body.extend(body)
