@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from otterapi.codegen.types import Endpoint, Type
     from otterapi.config import (
         DataFrameConfig,
+        ExportConfig,
         ModuleDefinition,
         ModuleSplitConfig,
         PaginationConfig,
@@ -605,6 +606,7 @@ class SplitModuleEmitter:
         dataframe_config: DataFrameConfig | None = None,
         pagination_config: PaginationConfig | None = None,
         response_unwrap_config: ResponseUnwrapConfig | None = None,
+        export_config: ExportConfig | None = None,
     ):
         """Initialize the split module emitter.
 
@@ -617,6 +619,7 @@ class SplitModuleEmitter:
             dataframe_config: Optional DataFrame configuration.
             pagination_config: Optional pagination configuration.
             response_unwrap_config: Optional response unwrap configuration.
+            export_config: Optional export configuration.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -626,6 +629,7 @@ class SplitModuleEmitter:
         self.dataframe_config = dataframe_config
         self.pagination_config = pagination_config
         self.response_unwrap_config = response_unwrap_config
+        self.export_config = export_config
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
 
@@ -1036,16 +1040,107 @@ class SplitModuleEmitter:
 
         return generated
 
+    def _emit_paginated_export_pair(
+        self,
+        endpoint: Endpoint,
+        item_type_ast: ast.expr | None,
+        item_type_imports: dict[str, set[str]],
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: list[str],
+    ) -> bool:
+        """Emit sync+async export wrappers around the paginated ``_iter`` fns."""
+        if not self.export_config or not self.export_config.enabled or item_type_ast is None:
+            return False
+        should_generate, formats, _path = (
+            self.export_config.should_generate_for_endpoint(
+                endpoint_name=endpoint.sync_fn_name,
+                returns_list=True,
+            )
+        )
+        if not should_generate:
+            return False
+
+        from otterapi.codegen.export import build_standalone_paginated_export_fn
+
+        default_format = formats[0] if formats else 'csv'
+        for fn_name, is_async in (
+            (f'{endpoint.sync_fn_name}_export', False),
+            (f'{endpoint.async_fn_name}_export', True),
+        ):
+            fn, imports = build_standalone_paginated_export_fn(
+                fn_name=fn_name,
+                target_iter_fn_name=f'{endpoint.sync_fn_name}_iter' if not is_async else f'{endpoint.async_fn_name}_iter',
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+                default_format=default_format,
+                default_batch_size=self.export_config.batch_size,
+            )
+            endpoint_names.append(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+        return True
+
+    def _emit_standalone_export_pair(
+        self,
+        endpoint: Endpoint,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: list[str],
+    ) -> bool:
+        """Emit sync+async export wrappers for a non-paginated list endpoint."""
+        if not self.export_config or not self.export_config.enabled:
+            return False
+        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint)
+        if item_type_ast is None:
+            return False
+        should_generate, formats, _path = (
+            self.export_config.should_generate_for_endpoint(
+                endpoint_name=endpoint.sync_fn_name,
+                returns_list=True,
+            )
+        )
+        if not should_generate:
+            return False
+
+        from otterapi.codegen.export import build_standalone_export_fn
+
+        default_format = formats[0] if formats else 'csv'
+        for fn_name, is_async in (
+            (f'{endpoint.sync_fn_name}_export', False),
+            (f'{endpoint.async_fn_name}_export', True),
+        ):
+            fn, imports = build_standalone_export_fn(
+                fn_name=fn_name,
+                target_fn_name=endpoint.sync_fn_name if not is_async else endpoint.async_fn_name,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+                default_format=default_format,
+                default_batch_size=self.export_config.batch_size,
+            )
+            endpoint_names.append(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+        return True
+
     def _emit_endpoint_functions(
         self,
         endpoint: Endpoint,
         body: list[ast.stmt],
         import_collector: ImportCollector,
         endpoint_names: list[str],
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, bool]:
         """Emit every function for a single endpoint.
 
-        Returns (has_dataframe_methods, has_pagination_methods) for this endpoint.
+        Returns (has_dataframe_methods, has_pagination_methods, has_export_methods) for this endpoint.
         """
         pag_config = None
         if self.pagination_config and self.pagination_config.enabled:
@@ -1053,14 +1148,27 @@ class SplitModuleEmitter:
                 endpoint.sync_fn_name, self.pagination_config, endpoint.parameters
             )
 
+        has_export_methods = False
         if pag_config:
             generated_paginated_df = self._emit_paginated_endpoint_methods(
                 endpoint, pag_config, body, import_collector, endpoint_names
+            )
+            # Export for paginated endpoints (wraps _iter functions)
+            item_type_ast, item_type_imports = self._get_item_type_ast(
+                endpoint, pag_config.data_path
+            )
+            has_export_methods = self._emit_paginated_export_pair(
+                endpoint, item_type_ast, item_type_imports,
+                body, import_collector, endpoint_names,
             )
         else:
             generated_paginated_df = False
             self._emit_standalone_endpoint_methods(
                 endpoint, body, import_collector, endpoint_names
+            )
+            # Export for non-paginated endpoints
+            has_export_methods = self._emit_standalone_export_pair(
+                endpoint, body, import_collector, endpoint_names,
             )
 
         has_dataframe_methods = generated_paginated_df
@@ -1070,7 +1178,7 @@ class SplitModuleEmitter:
             ):
                 has_dataframe_methods = True
 
-        return has_dataframe_methods, pag_config is not None
+        return has_dataframe_methods, pag_config is not None, has_export_methods
 
     def _collect_module_file_imports(
         self,
@@ -1078,6 +1186,7 @@ class SplitModuleEmitter:
         endpoints: list[Endpoint],
         has_dataframe_methods: bool,
         has_pagination_methods: bool,
+        has_export_methods: bool = False,
     ) -> ast.If | None:
         """Register Client/model/DataFrame/pagination imports; return the optional TYPE_CHECKING block."""
         import_collector.add_imports({'.client': {'Client'}})
@@ -1146,17 +1255,20 @@ class SplitModuleEmitter:
 
         has_dataframe_methods = False
         has_pagination_methods = False
+        has_export_methods = False
         endpoint_names: list[str] = []
 
         for endpoint in endpoints:
-            endpoint_has_df, endpoint_has_pagination = self._emit_endpoint_functions(
+            endpoint_has_df, endpoint_has_pagination, endpoint_has_export = self._emit_endpoint_functions(
                 endpoint, body, import_collector, endpoint_names
             )
             has_dataframe_methods = has_dataframe_methods or endpoint_has_df
             has_pagination_methods = has_pagination_methods or endpoint_has_pagination
+            has_export_methods = has_export_methods or endpoint_has_export
 
         type_checking_block = self._collect_module_file_imports(
-            import_collector, endpoints, has_dataframe_methods, has_pagination_methods
+            import_collector, endpoints, has_dataframe_methods, has_pagination_methods,
+            has_export_methods,
         )
 
         final_body: list[ast.stmt] = []

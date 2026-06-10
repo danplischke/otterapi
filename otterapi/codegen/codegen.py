@@ -1579,6 +1579,7 @@ class Codegen(OpenAPIProcessor):
             dataframe_config=self.config.dataframe,
             pagination_config=self.config.pagination,
             response_unwrap_config=self.config.response_unwrap,
+            export_config=self.config.export,
         )
 
         emitted = emitter.emit(
