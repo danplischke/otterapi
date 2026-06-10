@@ -19,7 +19,6 @@ from otterapi.codegen.ast_utils import (
     ImportCollector,
     _all,
     _assign,
-    _call,
     _name,
     _union_expr,
 )

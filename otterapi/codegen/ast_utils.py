@@ -77,7 +77,9 @@ def _argument(name: str, value: ast.expr | None = None) -> ast.arg:
     )
 
 
-def _ann_assign(target: ast.expr, annotation: ast.expr, value: ast.expr) -> ast.AnnAssign:
+def _ann_assign(
+    target: ast.expr, annotation: ast.expr, value: ast.expr
+) -> ast.AnnAssign:
     """Build ``target: annotation = value``."""
     if isinstance(target, ast.Name):
         target = ast.Name(id=target.id, ctx=ast.Store())
