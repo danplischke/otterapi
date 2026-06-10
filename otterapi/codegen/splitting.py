@@ -1050,7 +1050,11 @@ class SplitModuleEmitter:
         endpoint_names: list[str],
     ) -> bool:
         """Emit sync+async export wrappers around the paginated ``_iter`` fns."""
-        if not self.export_config or not self.export_config.enabled or item_type_ast is None:
+        if (
+            not self.export_config
+            or not self.export_config.enabled
+            or item_type_ast is None
+        ):
             return False
         should_generate, formats, _path = (
             self.export_config.should_generate_for_endpoint(
@@ -1070,7 +1074,9 @@ class SplitModuleEmitter:
         ):
             fn, imports = build_standalone_paginated_export_fn(
                 fn_name=fn_name,
-                target_iter_fn_name=f'{endpoint.sync_fn_name}_iter' if not is_async else f'{endpoint.async_fn_name}_iter',
+                target_iter_fn_name=f'{endpoint.sync_fn_name}_iter'
+                if not is_async
+                else f'{endpoint.async_fn_name}_iter',
                 parameters=endpoint.parameters,
                 request_body_info=endpoint.request_body,
                 item_type_ast=item_type_ast,
@@ -1116,7 +1122,9 @@ class SplitModuleEmitter:
         ):
             fn, imports = build_standalone_export_fn(
                 fn_name=fn_name,
-                target_fn_name=endpoint.sync_fn_name if not is_async else endpoint.async_fn_name,
+                target_fn_name=endpoint.sync_fn_name
+                if not is_async
+                else endpoint.async_fn_name,
                 parameters=endpoint.parameters,
                 request_body_info=endpoint.request_body,
                 item_type_ast=item_type_ast,
@@ -1158,8 +1166,12 @@ class SplitModuleEmitter:
                 endpoint, pag_config.data_path
             )
             has_export_methods = self._emit_paginated_export_pair(
-                endpoint, item_type_ast, item_type_imports,
-                body, import_collector, endpoint_names,
+                endpoint,
+                item_type_ast,
+                item_type_imports,
+                body,
+                import_collector,
+                endpoint_names,
             )
         else:
             generated_paginated_df = False
@@ -1168,7 +1180,10 @@ class SplitModuleEmitter:
             )
             # Export for non-paginated endpoints
             has_export_methods = self._emit_standalone_export_pair(
-                endpoint, body, import_collector, endpoint_names,
+                endpoint,
+                body,
+                import_collector,
+                endpoint_names,
             )
 
         has_dataframe_methods = generated_paginated_df
@@ -1259,15 +1274,20 @@ class SplitModuleEmitter:
         endpoint_names: list[str] = []
 
         for endpoint in endpoints:
-            endpoint_has_df, endpoint_has_pagination, endpoint_has_export = self._emit_endpoint_functions(
-                endpoint, body, import_collector, endpoint_names
+            endpoint_has_df, endpoint_has_pagination, endpoint_has_export = (
+                self._emit_endpoint_functions(
+                    endpoint, body, import_collector, endpoint_names
+                )
             )
             has_dataframe_methods = has_dataframe_methods or endpoint_has_df
             has_pagination_methods = has_pagination_methods or endpoint_has_pagination
             has_export_methods = has_export_methods or endpoint_has_export
 
         type_checking_block = self._collect_module_file_imports(
-            import_collector, endpoints, has_dataframe_methods, has_pagination_methods,
+            import_collector,
+            endpoints,
+            has_dataframe_methods,
+            has_pagination_methods,
             has_export_methods,
         )
 
