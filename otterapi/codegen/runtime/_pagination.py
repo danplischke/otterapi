@@ -125,7 +125,7 @@ def paginate_offset(
     start_offset: int = 0,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> list[T]:
     """Generic offset-based pagination that returns all items.
 
@@ -189,7 +189,7 @@ async def paginate_offset_async(
     start_offset: int = 0,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> list[T]:
     """Async version of paginate_offset."""
     all_items: list[T] = []
@@ -251,7 +251,7 @@ def iterate_offset(
     start_offset: int = 0,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> Iterator[T]:
     """Generic offset-based pagination iterator (streaming).
 
@@ -316,7 +316,7 @@ async def iterate_offset_async(
     start_offset: int = 0,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> AsyncIterator[T]:
     """Async version of iterate_offset."""
     current_offset = start_offset
@@ -383,7 +383,7 @@ def paginate_cursor(
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> list[T]:
     """Generic cursor-based pagination that returns all items.
 
@@ -438,7 +438,7 @@ async def paginate_cursor_async(
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> list[T]:
     """Async version of paginate_cursor."""
     all_items: list[T] = []
@@ -492,7 +492,7 @@ def iterate_cursor(
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> Iterator[T]:
     """Generic cursor-based pagination iterator (streaming).
 
@@ -544,7 +544,7 @@ async def iterate_cursor_async(
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> AsyncIterator[T]:
     """Async version of iterate_cursor."""
     current_cursor = start_cursor
@@ -601,7 +601,7 @@ def iterate_page(
     page_size: int = 100,
     max_items: int | None = None,
     max_pages: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> Iterator[T]:
     """Generic page-based pagination iterator (streaming).
 
@@ -668,7 +668,7 @@ async def iterate_page_async(
     page_size: int = 100,
     max_items: int | None = None,
     max_pages: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> AsyncIterator[T]:
     """Async version of iterate_page."""
     current_page = start_page
@@ -731,7 +731,7 @@ def paginate_page(
     page_size: int = 100,
     max_items: int | None = None,
     max_pages: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> list[T]:
     """Generic page-based pagination that returns all items.
 
@@ -796,7 +796,7 @@ async def paginate_page_async(
     page_size: int = 100,
     max_items: int | None = None,
     max_pages: int | None = None,
-    progress: bool | str = False,
+    progress: bool | str = True,
 ) -> list[T]:
     """Async version of paginate_page."""
     all_items: list[T] = []
