@@ -668,7 +668,7 @@ def generate_base_client_class(
     """
     imports: ImportDict = {
         'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
-        'typing': {'Any', 'TypeVar'},
+        'typing': {'Any'},
         'types': {'UnionType'},
         'pydantic': {'TypeAdapter', 'RootModel'},
         '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
@@ -1126,7 +1126,7 @@ def _build_parse_response_method(
             args=args,
             body=body,
             decorator_list=[],
-            returns=_name('T'),
+            returns=_name('Any'),
         )
     else:
         return ast.FunctionDef(
@@ -1134,7 +1134,7 @@ def _build_parse_response_method(
             args=args,
             body=body,
             decorator_list=[],
-            returns=_name('T'),
+            returns=_name('Any'),
         )
 
 

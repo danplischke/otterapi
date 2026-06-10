@@ -16,6 +16,7 @@ __all__ = [
     '_union_expr',
     '_optional_expr',
     '_argument',
+    '_ann_assign',
     '_assign',
     '_import',
     '_call',
@@ -74,6 +75,13 @@ def _argument(name: str, value: ast.expr | None = None) -> ast.arg:
         arg=name,
         annotation=value,
     )
+
+
+def _ann_assign(target: ast.expr, annotation: ast.expr, value: ast.expr) -> ast.AnnAssign:
+    """Build ``target: annotation = value``."""
+    if isinstance(target, ast.Name):
+        target = ast.Name(id=target.id, ctx=ast.Store())
+    return ast.AnnAssign(target=target, annotation=annotation, value=value, simple=1)
 
 
 def _assign(target: ast.expr, value: ast.expr) -> ast.Assign:

@@ -23,7 +23,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, TypeAlias, Union, get_args, get_origin
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -32,8 +32,8 @@ from upath import UPath
 if TYPE_CHECKING:
     import pyarrow as pa
 
-Row = BaseModel | dict
-PathLike = str | Path | UPath
+Row: TypeAlias = BaseModel | dict
+PathLike: TypeAlias = str | Path | UPath
 
 
 # -----------------------------------------------------------------------------
@@ -378,6 +378,7 @@ def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
     origin = get_origin(inner)
 
     if isinstance(inner, type) and issubclass(inner, BaseModel):
+        model_cls: type[BaseModel] = inner
         return pa.struct(
             [
                 pa.field(
@@ -385,7 +386,7 @@ def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
                     _python_type_to_arrow(field.annotation, pa),
                     nullable=_is_nullable(field.annotation),
                 )
-                for name, field in inner.model_fields.items()
+                for name, field in model_cls.model_fields.items()
             ]
         )
 

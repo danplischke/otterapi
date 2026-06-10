@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 T = TypeVar('T')
-PageT = TypeVar('PageT')
 
 
 @dataclass
@@ -118,9 +117,9 @@ def _progress_context(
 
 
 def paginate_offset(
-    fetch_page: Callable[[int, int], PageT],
-    extract_items: Callable[[PageT], list[T]],
-    get_total: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
     *,
     start_offset: int = 0,
     page_size: int = 100,
@@ -182,9 +181,9 @@ def paginate_offset(
 
 
 async def paginate_offset_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[PageT]
-    extract_items: Callable[[PageT], list[T]],
-    get_total: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
     *,
     start_offset: int = 0,
     page_size: int = 100,
@@ -244,9 +243,9 @@ async def paginate_offset_async(
 
 
 def iterate_offset(
-    fetch_page: Callable[[int, int], PageT],
-    extract_items: Callable[[PageT], list[T]],
-    get_total: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
     *,
     start_offset: int = 0,
     page_size: int = 100,
@@ -309,9 +308,9 @@ def iterate_offset(
 
 
 async def iterate_offset_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[PageT]
-    extract_items: Callable[[PageT], list[T]],
-    get_total: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
     *,
     start_offset: int = 0,
     page_size: int = 100,
@@ -376,9 +375,9 @@ async def iterate_offset_async(
 
 
 def paginate_cursor(
-    fetch_page: Callable[[str | None, int], PageT],
-    extract_items: Callable[[PageT], list[T]],
-    get_next_cursor: Callable[[PageT], str | None],
+    fetch_page: Callable[[str | None, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
     *,
     start_cursor: str | None = None,
     page_size: int = 100,
@@ -431,9 +430,9 @@ def paginate_cursor(
 
 
 async def paginate_cursor_async(
-    fetch_page: Callable[[str | None, int], Any],  # Returns Awaitable[PageT]
-    extract_items: Callable[[PageT], list[T]],
-    get_next_cursor: Callable[[PageT], str | None],
+    fetch_page: Callable[[str | None, int], Any],  # Returns Awaitable[Any]
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
     *,
     start_cursor: str | None = None,
     page_size: int = 100,
@@ -485,9 +484,9 @@ async def paginate_cursor_async(
 
 
 def iterate_cursor(
-    fetch_page: Callable[[str | None, int], PageT],
-    extract_items: Callable[[PageT], list[T]],
-    get_next_cursor: Callable[[PageT], str | None],
+    fetch_page: Callable[[str | None, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
     *,
     start_cursor: str | None = None,
     page_size: int = 100,
@@ -537,9 +536,9 @@ def iterate_cursor(
 
 
 async def iterate_cursor_async(
-    fetch_page: Callable[[str | None, int], Any],  # Returns Awaitable[PageT]
-    extract_items: Callable[[PageT], list[T]],
-    get_next_cursor: Callable[[PageT], str | None],
+    fetch_page: Callable[[str | None, int], Any],  # Returns Awaitable[Any]
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
     *,
     start_cursor: str | None = None,
     page_size: int = 100,
@@ -593,9 +592,9 @@ async def iterate_cursor_async(
 
 
 def iterate_page(
-    fetch_page: Callable[[int, int], PageT],
-    extract_items: Callable[[PageT], list[T]],
-    get_total_pages: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
     *,
     start_page: int = 1,
     page_size: int = 100,
@@ -660,9 +659,9 @@ def iterate_page(
 
 
 async def iterate_page_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[PageT]
-    extract_items: Callable[[PageT], list[T]],
-    get_total_pages: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
     *,
     start_page: int = 1,
     page_size: int = 100,
@@ -723,9 +722,9 @@ async def iterate_page_async(
 
 
 def paginate_page(
-    fetch_page: Callable[[int, int], PageT],
-    extract_items: Callable[[PageT], list[T]],
-    get_total_pages: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
     *,
     start_page: int = 1,
     page_size: int = 100,
@@ -788,9 +787,9 @@ def paginate_page(
 
 
 async def paginate_page_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[PageT]
-    extract_items: Callable[[PageT], list[T]],
-    get_total_pages: Callable[[PageT], int | None] | None = None,
+    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
     *,
     start_page: int = 1,
     page_size: int = 100,

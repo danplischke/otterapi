@@ -1666,16 +1666,6 @@ class Codegen(OpenAPIProcessor):
         for import_stmt in import_collector.to_ast():
             body.insert(0, import_stmt)
 
-        # Add TypeVar definition: T = TypeVar('T')
-        typevar_def = _assign(
-            _name('T'),
-            _call(
-                func=_name('TypeVar'),
-                args=[ast.Constant(value='T')],
-            ),
-        )
-        body.append(typevar_def)
-
         # Add __all__ export (include the full per-status error hierarchy
         # so users can ``from .<pkg>._client import NotFoundError`` etc.).
         body.append(_all(sorted([base_client_name, *_exported_error_names()])))

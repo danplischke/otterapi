@@ -188,8 +188,8 @@ def _format_literal_annotation() -> ast.expr:
 
 
 def _output_path_annotation() -> ast.expr:
-    """Build the AST for ``str | Path`` (the wrapper's path argument type)."""
-    return _union_expr([_name('str'), _name('Path')])
+    """Build the AST for ``str | Path | None`` (the wrapper's path argument type)."""
+    return _union_expr([_name('str'), _name('Path'), ast.Constant(value=None)])
 
 
 def _add_export_kwonly_args(

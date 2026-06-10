@@ -227,7 +227,9 @@ class FunctionSignatureBuilder:
             if param.required:
                 self._args.append(arg)
             else:
-                self._kwonlyargs.append(arg)
+                # Wrap annotation in `| None` so the `= None` default is type-safe.
+                optional_annotation = _union_expr([annotation, ast.Constant(value=None)])
+                self._kwonlyargs.append(_argument(param.name_sanitized, optional_annotation))
                 self._kw_defaults.append(ast.Constant(value=None))
 
         return self
@@ -262,7 +264,8 @@ class FunctionSignatureBuilder:
         if body.required:
             self._args.append(body_arg)
         else:
-            self._kwonlyargs.append(body_arg)
+            optional_body_annotation = _union_expr([body_annotation, ast.Constant(value=None)])
+            self._kwonlyargs.append(_argument('body', optional_body_annotation))
             self._kw_defaults.append(ast.Constant(value=None))
 
         return self

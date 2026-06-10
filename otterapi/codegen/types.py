@@ -983,10 +983,8 @@ class TypeGenerator(OpenAPIProcessor):
 
         self._attach_model_dependencies(type_, base_bases, field_types)
 
-        type_.add_implementation_import(
-            module=BaseModel.__module__, name=BaseModel.__name__
-        )
-        type_.add_implementation_import(module=Field.__module__, name=Field.__name__)
+        type_.add_implementation_import(module='pydantic', name=BaseModel.__name__)
+        type_.add_implementation_import(module='pydantic', name=Field.__name__)
         type_.copy_imports_from_sub_types(field_types)
 
         type_ = self.add_type(type_, base_name=base_name)
