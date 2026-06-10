@@ -188,8 +188,8 @@ def _format_literal_annotation() -> ast.expr:
 
 
 def _output_path_annotation() -> ast.expr:
-    """Build the AST for ``str | Path | None`` (the wrapper's path argument type)."""
-    return _union_expr([_name('str'), _name('Path'), ast.Constant(value=None)])
+    """Build the AST for ``str | Path | UPath`` (the wrapper's path argument type)."""
+    return _union_expr([_name('str'), _name('Path'), _name('UPath')])
 
 
 def _add_export_kwonly_args(
@@ -199,9 +199,6 @@ def _add_export_kwonly_args(
     default_batch_size: int,
 ) -> None:
     """Append the export-specific keyword-only args + defaults in place."""
-    kwonlyargs.append(_argument('output_path', _output_path_annotation()))
-    kw_defaults.append(ast.Constant(value=None))  # required at call time
-
     kwonlyargs.append(_argument('format', _format_literal_annotation()))
     kw_defaults.append(ast.Constant(value=default_format))
 
@@ -300,6 +297,9 @@ def _build_export_function(
     from otterapi.codegen.endpoints import FunctionSignatureBuilder
 
     builder = FunctionSignatureBuilder()
+    # output_path is the first positional argument so it can be passed
+    # without a keyword: export_fn("out.jsonl", symbol="BRCA1")
+    builder._args.append(_argument('output_path', _output_path_annotation()))
     builder.add_parameters(parameters)
     builder.add_request_body(request_body_info)
     builder.add_client_parameter()
@@ -370,6 +370,7 @@ def _build_export_function(
 
     imports: ImportDict = {
         'pathlib': {'Path'},
+        'upath': {'UPath'},
         'typing': {'Any', 'Literal'},
         '._export': {'export_async' if (is_async and is_paginated) else 'export'},
     }
