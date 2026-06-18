@@ -1148,9 +1148,7 @@ class TestEndpointReturnsListUnwrap:
             'ResponseWithStatusEnvelopeThing',
         )
         assert (
-            endpoint_returns_list(
-                endpoint, unwrap_type_ast=_make_annotation('Thing')
-            )
+            endpoint_returns_list(endpoint, unwrap_type_ast=_make_annotation('Thing'))
             is False
         )
 
@@ -1268,4 +1266,3 @@ class TestUnwrappedEnvelopeDataFrameGeneration:
         assert 'def get_things_pl(' in endpoints_src
         assert 'def async_get_things_df(' in endpoints_src
         assert 'def async_get_things_pl(' in endpoints_src
-
