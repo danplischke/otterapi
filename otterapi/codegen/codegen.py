@@ -1219,7 +1219,12 @@ class Codegen(OpenAPIProcessor):
         """Emit sync+async export wrappers for a non-paginated list endpoint."""
         if not self.config.export.enabled:
             return False
-        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint)
+        # When response unwrapping is active, the list lives behind the data
+        # path (e.g. envelope.data) rather than directly on the response type,
+        # so resolve the item type through that path.
+        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+        data_path = unwrap_path if should_unwrap else None
+        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint, data_path)
         if item_type_ast is None:
             return False
         should_generate, formats, _path = (
@@ -1722,8 +1727,20 @@ class Codegen(OpenAPIProcessor):
 
         Note:
             This method delegates to get_dataframe_config_for_endpoint() from dataframe_utils.
+            When response unwrapping is active, the unwrapped data type is the
+            endpoint's real return type, so it is passed through for list
+            detection -- otherwise non-paginated envelope list endpoints (e.g.
+            ``ResponseWithStatusEnvelope*``) would be misclassified and lose
+            their DataFrame variants.
         """
-        return get_dataframe_config_for_endpoint(endpoint, self.config.dataframe)
+        unwrap_type_ast = None
+        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+        if should_unwrap and unwrap_path:
+            unwrap_type_ast, _ = self._get_unwrapped_type_ast(endpoint, unwrap_path)
+
+        return get_dataframe_config_for_endpoint(
+            endpoint, self.config.dataframe, unwrap_type_ast=unwrap_type_ast
+        )
 
     def _get_pagination_config(
         self, endpoint: Endpoint

@@ -1019,7 +1019,19 @@ class SplitModuleEmitter:
         if not (self.dataframe_config and self.dataframe_config.enabled):
             return False
 
-        df_config = get_dataframe_config_for_endpoint(endpoint, self.dataframe_config)
+        # When response unwrapping is active the unwrapped data type is the
+        # endpoint's real return type, so feed it to list detection -- without
+        # this, non-paginated envelope list endpoints (e.g.
+        # ``ResponseWithStatusEnvelope*``) are misclassified as non-list and
+        # silently lose their DataFrame variants.
+        unwrap_type_ast = None
+        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+        if should_unwrap and unwrap_path:
+            unwrap_type_ast, _ = self._get_unwrapped_type_ast(endpoint, unwrap_path)
+
+        df_config = get_dataframe_config_for_endpoint(
+            endpoint, self.dataframe_config, unwrap_type_ast=unwrap_type_ast
+        )
 
         generated = False
         if df_config.generate_pandas:
@@ -1109,7 +1121,12 @@ class SplitModuleEmitter:
         """Emit sync+async export wrappers for a non-paginated list endpoint."""
         if not self.export_config or not self.export_config.enabled:
             return False
-        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint)
+        # When response unwrapping is active, the list lives behind the data
+        # path (e.g. envelope.data) rather than directly on the response type,
+        # so resolve the item type through that path.
+        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+        data_path = unwrap_path if should_unwrap else None
+        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint, data_path)
         if item_type_ast is None:
             return False
         should_generate, formats, _path = (

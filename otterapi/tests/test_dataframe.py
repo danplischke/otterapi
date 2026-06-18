@@ -1036,3 +1036,236 @@ class TestDataFrameNormalization:
         content = dataframe_file.read_text()
         assert 'def to_pandas' in content
         assert 'def to_polars' in content
+
+
+def _make_annotation(source: str) -> ast.expr:
+    """Parse a type annotation source string into an AST expression."""
+    return ast.parse(source, mode='eval').body
+
+
+def _make_endpoint_with_response_type(
+    name: str,
+    response_annotation: str | None,
+):
+    """Build a minimal Endpoint whose response_type carries *response_annotation*."""
+    from otterapi.codegen.types import Endpoint, Type
+
+    empty_args = ast.arguments(
+        posonlyargs=[],
+        args=[],
+        kwonlyargs=[],
+        kw_defaults=[],
+        defaults=[],
+    )
+    sync_ast = ast.FunctionDef(
+        name=name,
+        args=empty_args,
+        body=[ast.Return(value=ast.Constant(value=None))],
+        decorator_list=[],
+        returns=None,
+    )
+    async_ast = ast.AsyncFunctionDef(
+        name=f'async_{name}',
+        args=empty_args,
+        body=[ast.Return(value=ast.Constant(value=None))],
+        decorator_list=[],
+        returns=None,
+    )
+
+    response_type = None
+    if response_annotation is not None:
+        response_type = Type(
+            reference=None,
+            name='ResponseType',
+            type='model',
+            annotation_ast=_make_annotation(response_annotation),
+        )
+
+    return Endpoint(
+        sync_ast=sync_ast,
+        async_ast=async_ast,
+        sync_fn_name=name,
+        async_fn_name=f'async_{name}',
+        method='GET',
+        path=f'/{name}',
+        response_type=response_type,
+    )
+
+
+class TestAnnotationAstReturnsList:
+    """Tests for annotation_ast_returns_list."""
+
+    def test_list_subscript_is_list(self):
+        from otterapi.codegen.dataframes import annotation_ast_returns_list
+
+        assert annotation_ast_returns_list(_make_annotation('list[Item]')) is True
+
+    def test_bare_name_is_not_list(self):
+        from otterapi.codegen.dataframes import annotation_ast_returns_list
+
+        assert annotation_ast_returns_list(_make_annotation('Item')) is False
+
+    def test_non_list_subscript_is_not_list(self):
+        from otterapi.codegen.dataframes import annotation_ast_returns_list
+
+        assert annotation_ast_returns_list(_make_annotation('dict[str, int]')) is False
+
+    def test_none_is_not_list(self):
+        from otterapi.codegen.dataframes import annotation_ast_returns_list
+
+        assert annotation_ast_returns_list(None) is False
+
+
+class TestEndpointReturnsListUnwrap:
+    """Tests for endpoint_returns_list with response unwrapping active."""
+
+    def test_unwrap_list_type_detected_over_envelope_response_type(self):
+        """An envelope response_type still counts as a list when the unwrapped
+        data type is a ``list[...]`` -- the response_unwrap gap fix."""
+        from otterapi.codegen.dataframes import endpoint_returns_list
+
+        endpoint = _make_endpoint_with_response_type(
+            'get_alpha_missense',
+            'ResponseWithStatusEnvelopeAlphaMissense',
+        )
+        # Without unwrap info the envelope is (correctly) not a list.
+        assert endpoint_returns_list(endpoint) is False
+        # With the unwrapped data type, it is recognised as a list.
+        assert (
+            endpoint_returns_list(
+                endpoint,
+                unwrap_type_ast=_make_annotation('list[AlphaMissense]'),
+            )
+            is True
+        )
+
+    def test_unwrap_non_list_type_not_detected(self):
+        """A scalar unwrapped data field is not a list."""
+        from otterapi.codegen.dataframes import endpoint_returns_list
+
+        endpoint = _make_endpoint_with_response_type(
+            'get_thing',
+            'ResponseWithStatusEnvelopeThing',
+        )
+        assert (
+            endpoint_returns_list(
+                endpoint, unwrap_type_ast=_make_annotation('Thing')
+            )
+            is False
+        )
+
+    def test_no_unwrap_falls_back_to_response_type(self):
+        """Without unwrap info, detection uses the response_type annotation."""
+        from otterapi.codegen.dataframes import endpoint_returns_list
+
+        list_endpoint = _make_endpoint_with_response_type('get_list', 'list[Item]')
+        scalar_endpoint = _make_endpoint_with_response_type('get_item', 'Item')
+        assert endpoint_returns_list(list_endpoint) is True
+        assert endpoint_returns_list(scalar_endpoint) is False
+
+    def test_get_dataframe_config_uses_unwrap_type(self):
+        """get_dataframe_config_for_endpoint generates df methods for an
+        envelope endpoint once the unwrapped list type is supplied."""
+        from otterapi.codegen.dataframes import get_dataframe_config_for_endpoint
+
+        endpoint = _make_endpoint_with_response_type(
+            'get_alpha_missense',
+            'ResponseWithStatusEnvelopeAlphaMissense',
+        )
+        df_config = DataFrameConfig(enabled=True, pandas=True, polars=True)
+
+        # Envelope alone -> no df methods.
+        without = get_dataframe_config_for_endpoint(endpoint, df_config)
+        assert without.generate_pandas is False
+        assert without.generate_polars is False
+
+        # Unwrapped list type -> df methods generated.
+        with_unwrap = get_dataframe_config_for_endpoint(
+            endpoint,
+            df_config,
+            unwrap_type_ast=_make_annotation('list[AlphaMissense]'),
+        )
+        assert with_unwrap.generate_pandas is True
+        assert with_unwrap.generate_polars is True
+
+
+class TestUnwrappedEnvelopeDataFrameGeneration:
+    """End-to-end: non-paginated envelope list endpoints get DataFrame variants."""
+
+    def test_unwrapped_envelope_list_endpoint_generates_dataframe_fns(self, tmp_path):
+        import json
+
+        from otterapi.codegen.codegen import Codegen
+        from otterapi.config import (
+            DataFrameConfig,
+            DocumentConfig,
+            ResponseUnwrapConfig,
+        )
+
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'Test API', 'version': '1.0.0'},
+            'servers': [{'url': 'https://api.example.com'}],
+            'paths': {
+                '/things': {
+                    'get': {
+                        'operationId': 'getThings',
+                        'summary': 'Get things',
+                        'responses': {
+                            '200': {
+                                'description': 'Success',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {
+                                            '$ref': '#/components/schemas/ResponseEnvelopeThing'
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                },
+            },
+            'components': {
+                'schemas': {
+                    'ResponseEnvelopeThing': {
+                        'type': 'object',
+                        'properties': {
+                            'data': {
+                                'type': 'array',
+                                'items': {'$ref': '#/components/schemas/Thing'},
+                            },
+                        },
+                    },
+                    'Thing': {
+                        'type': 'object',
+                        'properties': {
+                            'id': {'type': 'integer'},
+                            'name': {'type': 'string'},
+                        },
+                    },
+                }
+            },
+        }
+
+        spec_file = tmp_path / 'openapi.json'
+        spec_file.write_text(json.dumps(spec))
+
+        output_dir = tmp_path / 'client'
+
+        config = DocumentConfig(
+            source=str(spec_file),
+            output=str(output_dir),
+            dataframe=DataFrameConfig(enabled=True, pandas=True, polars=True),
+            response_unwrap=ResponseUnwrapConfig(enabled=True, data_path='data'),
+        )
+
+        Codegen(config).generate()
+
+        endpoints_src = (output_dir / 'endpoints.py').read_text()
+        # The non-paginated envelope list endpoint must now get df/pl variants.
+        assert 'def get_things_df(' in endpoints_src
+        assert 'def get_things_pl(' in endpoints_src
+        assert 'def async_get_things_df(' in endpoints_src
+        assert 'def async_get_things_pl(' in endpoints_src
+

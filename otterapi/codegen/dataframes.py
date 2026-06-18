@@ -26,6 +26,7 @@ __all__ = [
     'get_dataframe_config_from_parts',
     'endpoint_returns_list',
     'response_type_returns_list',
+    'annotation_ast_returns_list',
 ]
 
 
@@ -79,14 +80,46 @@ class DataFrameMethodConfig:
     path: str | None = None
 
 
-def endpoint_returns_list(endpoint: 'Endpoint') -> bool:
+def annotation_ast_returns_list(annotation_ast: 'ast.expr | None') -> bool:
+    """Check if a raw annotation AST represents a ``list[...]`` type.
+
+    Args:
+        annotation_ast: The annotation AST node to check, or None.
+
+    Returns:
+        True if the annotation is a ``list[...]`` subscript, False otherwise.
+    """
+    if isinstance(annotation_ast, ast.Subscript):
+        if isinstance(annotation_ast.value, ast.Name) and (
+            annotation_ast.value.id == 'list'
+        ):
+            return True
+
+    return False
+
+
+def endpoint_returns_list(
+    endpoint: 'Endpoint',
+    unwrap_type_ast: 'ast.expr | None' = None,
+) -> bool:
     """Check if an endpoint returns a list type.
 
     Examines the endpoint's response type annotation AST to determine
     if it represents a list type.
 
+    When response unwrapping is active for the endpoint, the function's actual
+    return type is the unwrapped data field rather than the envelope model on
+    ``endpoint.response_type``. In that case the caller passes the unwrapped
+    type AST (e.g. ``list[Pet]`` extracted from ``data``) via
+    *unwrap_type_ast*, and it is consulted instead of the envelope type.
+    Without this, every non-paginated ``ResponseWithStatusEnvelope*`` list
+    endpoint would be misclassified as non-list and silently lose its
+    DataFrame variants.
+
     Args:
         endpoint: The endpoint to check.
+        unwrap_type_ast: The AST of the unwrapped return type when response
+            unwrapping is active, or None when it is not.
 
     Returns:
         True if the endpoint returns a list, False otherwise.
@@ -96,6 +129,9 @@ def endpoint_returns_list(endpoint: 'Endpoint') -> bool:
         >>> endpoint_returns_list(endpoint)
         True
     """
+    if unwrap_type_ast is not None:
+        return annotation_ast_returns_list(unwrap_type_ast)
+
     if not endpoint.response_type:
         return False
 
@@ -117,18 +153,13 @@ def response_type_returns_list(response_type: 'Type | None') -> bool:
     if not response_type:
         return False
 
-    if response_type.annotation_ast:
-        ann = response_type.annotation_ast
-        if isinstance(ann, ast.Subscript):
-            if isinstance(ann.value, ast.Name) and ann.value.id == 'list':
-                return True
-
-    return False
+    return annotation_ast_returns_list(response_type.annotation_ast)
 
 
 def get_dataframe_config_for_endpoint(
     endpoint: 'Endpoint',
     dataframe_config: 'DataFrameConfig',
+    unwrap_type_ast: 'ast.expr | None' = None,
 ) -> DataFrameMethodConfig:
     """Get the DataFrame method configuration for an endpoint.
 
@@ -139,6 +170,9 @@ def get_dataframe_config_for_endpoint(
     Args:
         endpoint: The endpoint to get configuration for.
         dataframe_config: The global DataFrame configuration.
+        unwrap_type_ast: The AST of the unwrapped return type when response
+            unwrapping is active for the endpoint, or None. When provided it
+            is used for list detection instead of the envelope response type.
 
     Returns:
         DataFrameMethodConfig with generation flags and default path.
@@ -151,8 +185,9 @@ def get_dataframe_config_for_endpoint(
     if not dataframe_config.enabled:
         return DataFrameMethodConfig()
 
-    # Check if this endpoint returns a list type
-    returns_list = endpoint_returns_list(endpoint)
+    # Check if this endpoint returns a list type. When response unwrapping is
+    # active the unwrapped data type is the real return type, so prefer it.
+    returns_list = endpoint_returns_list(endpoint, unwrap_type_ast=unwrap_type_ast)
 
     # Get the sync function name for config lookup
     endpoint_name = endpoint.sync_fn_name

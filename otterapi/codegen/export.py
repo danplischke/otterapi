@@ -99,9 +99,20 @@ class ExportMethodConfig:
             self.formats = []
 
 
-def _returns_list(response_type: 'Type | None') -> bool:
+def _returns_list(
+    response_type: 'Type | None',
+    unwrap_type_ast: 'ast.expr | None' = None,
+) -> bool:
     # Local import avoids a circular dependency at module load.
-    from otterapi.codegen.dataframes import response_type_returns_list
+    from otterapi.codegen.dataframes import (
+        annotation_ast_returns_list,
+        response_type_returns_list,
+    )
+
+    # When response unwrapping is active, list detection must inspect the
+    # unwrapped type (e.g. ``list[Thing]``) rather than the envelope type.
+    if unwrap_type_ast is not None:
+        return annotation_ast_returns_list(unwrap_type_ast)
 
     return response_type_returns_list(response_type)
 
@@ -109,12 +120,13 @@ def _returns_list(response_type: 'Type | None') -> bool:
 def get_export_config_for_endpoint(
     endpoint: 'Endpoint',
     export_config: 'ExportConfig',
+    unwrap_type_ast: 'ast.expr | None' = None,
 ) -> ExportMethodConfig:
     """Resolve export configuration for a fully-constructed endpoint."""
     if not export_config.enabled:
         return ExportMethodConfig()
 
-    returns_list = _returns_list(endpoint.response_type)
+    returns_list = _returns_list(endpoint.response_type, unwrap_type_ast)
     should_generate, formats, path = export_config.should_generate_for_endpoint(
         endpoint_name=endpoint.sync_fn_name,
         returns_list=returns_list,

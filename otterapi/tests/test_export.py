@@ -1162,3 +1162,78 @@ class TestGeneratedFunctionsAreSyntacticallyValid:
         ast.parse(source)
         assert 'async def get_users_async_export' in source
         assert 'await export_async' in source
+
+
+class TestUnwrappedEnvelopeExportGeneration:
+    """End-to-end: non-paginated envelope list endpoints get export variants."""
+
+    def test_unwrapped_envelope_list_endpoint_generates_export_fns(self, tmp_path):
+        from otterapi.codegen.codegen import Codegen
+        from otterapi.config import ResponseUnwrapConfig
+
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'Test API', 'version': '1.0.0'},
+            'servers': [{'url': 'https://api.example.com'}],
+            'paths': {
+                '/things': {
+                    'get': {
+                        'operationId': 'getThings',
+                        'summary': 'Get things',
+                        'responses': {
+                            '200': {
+                                'description': 'Success',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {
+                                            '$ref': '#/components/schemas/ResponseEnvelopeThing'
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                },
+            },
+            'components': {
+                'schemas': {
+                    'ResponseEnvelopeThing': {
+                        'type': 'object',
+                        'properties': {
+                            'data': {
+                                'type': 'array',
+                                'items': {'$ref': '#/components/schemas/Thing'},
+                            },
+                        },
+                    },
+                    'Thing': {
+                        'type': 'object',
+                        'properties': {
+                            'id': {'type': 'integer'},
+                            'name': {'type': 'string'},
+                        },
+                    },
+                }
+            },
+        }
+
+        spec_file = tmp_path / 'openapi.json'
+        spec_file.write_text(json.dumps(spec))
+
+        output_dir = tmp_path / 'client'
+
+        config = DocumentConfig(
+            source=str(spec_file),
+            output=str(output_dir),
+            export=ExportConfig(enabled=True, formats=['jsonl']),
+            response_unwrap=ResponseUnwrapConfig(enabled=True, data_path='data'),
+        )
+
+        Codegen(config).generate()
+
+        endpoints_src = (output_dir / 'endpoints.py').read_text()
+        # The non-paginated envelope list endpoint must now get export variants.
+        assert 'def get_things_export(' in endpoints_src
+        assert 'def async_get_things_export(' in endpoints_src
+        # The export wrapper should target the unwrapped item model.
+        assert 'model=Thing' in endpoints_src
