@@ -36,9 +36,7 @@ def _openapi_spec(*, schemas: dict, response_ref: str, operation_id: str) -> dic
                         '200': {
                             'description': 'OK',
                             'content': {
-                                'application/json': {
-                                    'schema': {'$ref': response_ref}
-                                }
+                                'application/json': {'schema': {'$ref': response_ref}}
                             },
                         }
                     },

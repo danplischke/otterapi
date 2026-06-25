@@ -98,9 +98,7 @@ def _topo_sort_by_base_classes(
         if not isinstance(impl, ast.ClassDef):
             return set()
         return {
-            b.id
-            for b in impl.bases
-            if isinstance(b, ast.Name) and b.id in model_names
+            b.id for b in impl.bases if isinstance(b, ast.Name) and b.id in model_names
         }
 
     result: list = []

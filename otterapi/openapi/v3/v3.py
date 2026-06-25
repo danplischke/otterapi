@@ -117,7 +117,7 @@ class ParameterStyle(Enum):
     deepObject = 'deepObject'
 
 
-def _style_value(style: 'ParameterStyle | str | None') -> str | None:
+def _style_value(style: ParameterStyle | str | None) -> str | None:
     """Return the string value of a parameter/header style.
 
     The ``style`` field may be parsed either as a :class:`ParameterStyle`

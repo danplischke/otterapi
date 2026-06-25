@@ -32,9 +32,21 @@ from otterapi.openapi.v3_2 import Reference, Schema, Type as DataType
 # their annotation to the FieldInfo descriptor instead of the actual type.
 _PYTHON_BUILTIN_TYPE_NAMES: frozenset[str] = frozenset(
     {
-        'int', 'str', 'bool', 'float', 'bytes', 'bytearray',
-        'list', 'dict', 'set', 'frozenset', 'tuple', 'type', 'object',
-        'None', 'complex',
+        'int',
+        'str',
+        'bool',
+        'float',
+        'bytes',
+        'bytearray',
+        'list',
+        'dict',
+        'set',
+        'frozenset',
+        'tuple',
+        'type',
+        'object',
+        'None',
+        'complex',
     }
 )
 
@@ -895,9 +907,7 @@ class TypeGenerator(OpenAPIProcessor):
         union_ast = _union_expr(types=[t.annotation_ast for t in types_])
 
         extra_imports: dict[str, set[str]] = {}
-        if schema.discriminator is not None and self._discriminator_is_literal(
-            schema
-        ):
+        if schema.discriminator is not None and self._discriminator_is_literal(schema):
             discriminator_kw = ast.keyword(
                 arg='discriminator',
                 value=ast.Constant(value=schema.discriminator.propertyName),
@@ -1284,10 +1294,7 @@ class TypeGenerator(OpenAPIProcessor):
             type_ = self._create_object_type(
                 schema, name=schema_name, base_name=effective_base_name
             )
-        elif (
-            isinstance(schema.type, list)
-            and (schema.properties or schema.allOf)
-        ):
+        elif isinstance(schema.type, list) and (schema.properties or schema.allOf):
             # OpenAPI 3.0 nullable object schema converted to type array by the
             # spec adapter (e.g. ``nullable: true`` with no explicit ``type``
             # becomes ``type: [null]``).  Treat as object and wrap nullable.
