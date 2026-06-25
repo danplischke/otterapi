@@ -26,6 +26,18 @@ from otterapi.codegen.utils import (
 from otterapi.openapi.constants import MediaType
 from otterapi.openapi.v3_2 import Reference, Schema, Type as DataType
 
+# Python builtin type names that appear as type annotations in generated code.
+# A field named the same as one of these would shadow the builtin when Pydantic
+# evaluates get_type_hints(), causing other fields in the same model to resolve
+# their annotation to the FieldInfo descriptor instead of the actual type.
+_PYTHON_BUILTIN_TYPE_NAMES: frozenset[str] = frozenset(
+    {
+        'int', 'str', 'bool', 'float', 'bytes', 'bytearray',
+        'list', 'dict', 'set', 'frozenset', 'tuple', 'type', 'object',
+        'None', 'complex',
+    }
+)
+
 __all__ = [
     'Type',
     'Parameter',
@@ -403,6 +415,12 @@ def _binop_includes_none(node: ast.expr) -> bool:
 class TypeGenerator(OpenAPIProcessor):
     types: dict[str, Type] = dataclasses.field(default_factory=dict)
     pydantic_version: int = 2
+    # Names of models currently being built, in stack order (used to detect
+    # recursive cycles).  List (not set) so we can mark the whole in-progress
+    # chain as cyclic when a back-edge is detected.
+    _building: list[str] = dataclasses.field(default_factory=list, init=False)
+    # Names of models that participate in a reference cycle (need model_rebuild).
+    _cyclic: set[str] = dataclasses.field(default_factory=set, init=False)
 
     @staticmethod
     def _rename_type(type_: Type, new_name: str) -> None:
@@ -596,9 +614,19 @@ class TypeGenerator(OpenAPIProcessor):
 
         # class EnumName(str, Enum):  # str mixin for string enums
         #     MEMBER = 'value'
+        # schema.type may be a list (nullable type array like ["string", "null"])
+        def _type_is_string(t) -> bool:
+            if isinstance(t, list):
+                return any(
+                    (hasattr(item, 'value') and item.value == 'string')
+                    or item == 'string'
+                    for item in t
+                )
+            return bool(t and hasattr(t, 'value') and t.value == 'string')
+
         bases = (
             [_name('str'), _name('Enum')]
-            if schema.type and schema.type.value == 'string'
+            if _type_is_string(schema.type)
             else [_name('Enum')]
         )
 
@@ -734,6 +762,19 @@ class TypeGenerator(OpenAPIProcessor):
 
         sanitized_field_name = sanitize_parameter_field_name(field_name)
 
+        # Detect field-name / type-name clash: if the sanitized field name is
+        # the same as a registered type name OR a Python builtin type name,
+        # Pydantic's schema resolver picks up the field descriptor (FieldInfo)
+        # instead of the intended class when evaluating the model's type hints
+        # (e.g. `x: dict[str, x] = Field(...)` or `bigInt: int` in the same
+        # class as `int: bool`).  Suffix with '_' to avoid the clash; the
+        # original name is kept as the alias so serialization is unaffected.
+        if (
+            sanitized_field_name in self.types
+            or sanitized_field_name in _PYTHON_BUILTIN_TYPE_NAMES
+        ):
+            sanitized_field_name = sanitized_field_name + '_'
+
         # Determine the annotation - wrap in Union with None if nullable
         annotation_ast = field_type.annotation_ast
         if is_nullable and not self._type_already_nullable(field_type):
@@ -813,6 +854,28 @@ class TypeGenerator(OpenAPIProcessor):
             for base_schema in schema.allOf or []
         ]
 
+    def _discriminator_is_literal(self, schema: Schema) -> bool:
+        """Return True only if every variant has the discriminator property
+        constrained to a single ``enum`` value.
+
+        Pydantic v2 requires ``Literal`` types on the discriminator field.
+        If any variant is missing the constraint we fall back to a plain union.
+        """
+        prop_name = schema.discriminator.propertyName
+        variants = schema.anyOf or schema.oneOf or []
+        for variant in variants:
+            resolved, _ = self._resolve_reference(variant)
+            if resolved is None:
+                return False
+            props = resolved.properties or {}
+            disc_prop = props.get(prop_name)
+            if disc_prop is None:
+                return False
+            # A single-value enum is the only reliable source of Literal.
+            if not (disc_prop.enum and len(disc_prop.enum) == 1):
+                return False
+        return True
+
     def _build_union_variant_type(self, schema: Schema, base_name: str | None) -> Type:
         """Build an inline union type for an ``anyOf``/``oneOf`` schema.
 
@@ -832,7 +895,9 @@ class TypeGenerator(OpenAPIProcessor):
         union_ast = _union_expr(types=[t.annotation_ast for t in types_])
 
         extra_imports: dict[str, set[str]] = {}
-        if schema.discriminator is not None:
+        if schema.discriminator is not None and self._discriminator_is_literal(
+            schema
+        ):
             discriminator_kw = ast.keyword(
                 arg='discriminator',
                 value=ast.Constant(value=schema.discriminator.propertyName),
@@ -957,19 +1022,56 @@ class TypeGenerator(OpenAPIProcessor):
         for field_type in field_types:
             if field_type.name:
                 type_.dependencies.add(field_type.name)
-                type_.dependencies.update(field_type.dependencies)
+            # Always propagate transitive deps, even from anonymous types
+            # (e.g. dict[str, SomeModel] or list[SomeModel] where the outer
+            # type has no name of its own but SomeModel is a dependency).
+            type_.dependencies.update(field_type.dependencies)
 
     def _create_pydantic_model(
         self, schema: Schema, name: str | None = None, base_name: str | None = None
     ) -> Type:
+        # Compute the stable name early so we can pre-register a placeholder
+        # before any recursive allOf-base or field resolution happens.
+        stable_name = name or (
+            sanitize_identifier(schema.title) if schema.title else None
+        )
+
+        # Cycle guard: if we are already building this model (allOf cycle or
+        # re-entry during field resolution), return the placeholder immediately.
+        # Mark every model currently on the build stack as cyclic — they all
+        # participate in the cycle that just closed.
+        if stable_name and stable_name in self._building:
+            self._cyclic.update(self._building)
+            return self.types[stable_name]
+
+        # Pre-register a placeholder before ANY recursive step so that
+        # back-references ($ref pointing at this model) hit the cache in
+        # schema_to_type instead of recursing forever.
+        own_placeholder = False
+        if stable_name and stable_name not in self.types:
+            type_shell = Type(
+                reference=None,
+                name=stable_name,
+                annotation_ast=_name(stable_name),
+                implementation_ast=None,
+                dependencies=set(),
+                type='model',
+            )
+            self.types[stable_name] = type_shell
+            self._building.append(stable_name)
+            own_placeholder = True
+
         base_bases = self._build_allof_base_types(schema, base_name)
 
         if schema.anyOf or schema.oneOf:
+            # Named anyOf/oneOf schemas: discard the placeholder because
+            # _build_union_variant_type returns an anonymous inline union.
+            if own_placeholder:
+                self._building.remove(stable_name)
+                del self.types[stable_name]
             return self._build_union_variant_type(schema, base_name)
 
-        name = name or (
-            sanitize_identifier(schema.title) if schema.title else 'UnnamedModel'
-        )
+        name = stable_name or 'UnnamedModel'
 
         bases = [b.name for b in base_bases] or [BaseModel.__name__]
         bases = [_name(base) for base in bases]
@@ -986,20 +1088,30 @@ class TypeGenerator(OpenAPIProcessor):
             type_params=[],
         )
 
-        type_ = Type(
-            reference=None,
-            name=name,
-            annotation_ast=_name(name),
-            implementation_ast=model,
-            dependencies=set(),
-            type='model',
-        )
-
-        self._attach_model_dependencies(type_, base_bases, field_types)
-
-        type_.add_implementation_import(module='pydantic', name=BaseModel.__name__)
-        type_.add_implementation_import(module='pydantic', name=Field.__name__)
-        type_.copy_imports_from_sub_types(field_types)
+        if own_placeholder:
+            # Mutate the pre-registered placeholder in-place so that any Type
+            # reference captured during field building still points to the
+            # fully-built object.
+            type_ = self.types[name]  # same object as type_shell
+            type_.implementation_ast = model
+            self._attach_model_dependencies(type_, base_bases, field_types)
+            type_.add_implementation_import(module='pydantic', name=BaseModel.__name__)
+            type_.add_implementation_import(module='pydantic', name=Field.__name__)
+            type_.copy_imports_from_sub_types(field_types)
+            self._building.remove(name)
+        else:
+            type_ = Type(
+                reference=None,
+                name=name,
+                annotation_ast=_name(name),
+                implementation_ast=model,
+                dependencies=set(),
+                type='model',
+            )
+            self._attach_model_dependencies(type_, base_bases, field_types)
+            type_.add_implementation_import(module='pydantic', name=BaseModel.__name__)
+            type_.add_implementation_import(module='pydantic', name=Field.__name__)
+            type_.copy_imports_from_sub_types(field_types)
 
         type_ = self.add_type(type_, base_name=base_name)
         return type_
@@ -1099,6 +1211,19 @@ class TypeGenerator(OpenAPIProcessor):
             for module, names in value_type_imports.items():
                 for name_import in names:
                     type_.add_annotation_import(module, name_import)
+            # Track the value-type as a dependency so the topological sort
+            # emits it before any model that contains this dict-typed field.
+            if (
+                schema.additionalProperties is not None
+                and schema.additionalProperties is not True
+                and schema.additionalProperties is not False
+                and isinstance(schema.additionalProperties, (Schema, Reference))
+            ):
+                # additional_type was built above; re-reference it here.
+                # We do a quick look-up: if a named type was registered, add it.
+                if additional_type.name:
+                    type_.dependencies.add(additional_type.name)
+                type_.dependencies.update(additional_type.dependencies)
 
             return type_
 
@@ -1116,6 +1241,11 @@ class TypeGenerator(OpenAPIProcessor):
             ref_name = schema.ref.split('/')[-1]
             sanitized_ref_name = sanitize_identifier(ref_name)
             if sanitized_ref_name in self.types:
+                # If the cached type is still being built, this is a cycle.
+                if sanitized_ref_name in self._building:
+                    # Mark the whole in-progress chain — every model on the
+                    # stack is part of the cycle that just closed.
+                    self._cyclic.update(self._building)
                 return self.types[sanitized_ref_name]
 
         schema, schema_name = self._resolve_reference(schema)
@@ -1154,6 +1284,18 @@ class TypeGenerator(OpenAPIProcessor):
             type_ = self._create_object_type(
                 schema, name=schema_name, base_name=effective_base_name
             )
+        elif (
+            isinstance(schema.type, list)
+            and (schema.properties or schema.allOf)
+        ):
+            # OpenAPI 3.0 nullable object schema converted to type array by the
+            # spec adapter (e.g. ``nullable: true`` with no explicit ``type``
+            # becomes ``type: [null]``).  Treat as object and wrap nullable.
+            type_ = self._create_object_type(
+                schema, name=schema_name, base_name=effective_base_name
+            )
+            if self._is_nullable(schema):
+                type_ = self._make_nullable_type(type_)
         else:
             type_ = self._get_primitive_type_ast(
                 schema, base_name=effective_base_name, field_name=field_name
@@ -1173,7 +1315,9 @@ class TypeGenerator(OpenAPIProcessor):
             if type_.name in perm_mark:
                 return
             if type_.name in temp_mark:
-                raise ValueError(f'Cyclic dependency detected for type: {type_.name}')
+                # Cycle in the dependency graph — skip to break it gracefully.
+                # Cyclic models are handled at emit time via model_rebuild().
+                return
 
             temp_mark.add(type_.name)
 

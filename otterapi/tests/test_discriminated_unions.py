@@ -36,7 +36,7 @@ def _dog_cat_schema(*, with_discriminator: bool, use_oneof: bool = True) -> Sche
         title='Dog',
         required=['kind', 'bark'],
         properties={
-            'kind': Schema(type='string'),
+            'kind': Schema(type='string', enum=['dog']),
             'bark': Schema(type='string'),
         },
     )
@@ -45,7 +45,7 @@ def _dog_cat_schema(*, with_discriminator: bool, use_oneof: bool = True) -> Sche
         title='Cat',
         required=['kind', 'meow'],
         properties={
-            'kind': Schema(type='string'),
+            'kind': Schema(type='string', enum=['cat']),
             'meow': Schema(type='string'),
         },
     )

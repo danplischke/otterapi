@@ -32,6 +32,7 @@ components:
       properties:
         kind:
           type: string
+          enum: [dog]
         bark:
           type: string
     Cat:
@@ -40,5 +41,6 @@ components:
       properties:
         kind:
           type: string
+          enum: [cat]
         meow:
           type: string

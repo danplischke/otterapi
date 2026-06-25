@@ -12,6 +12,22 @@ from otterapi.openapi.v3_2 import OpenAPI, Reference, Schema
 
 __all__ = ('is_url', 'sanitize_identifier', 'to_snake_case')
 
+# Names that conflict with Pydantic/typing imports used in the generated
+# models.py.  Schemas whose sanitized name would collide get a trailing ``_``
+# (e.g. a schema named "Field" becomes the class ``Field_``).
+_RESERVED_GENERATED_CLASS_NAMES: frozenset[str] = frozenset(
+    {
+        'Field',
+        'BaseModel',
+        'Annotated',
+        'Any',
+        'Union',
+        'Optional',
+        'Literal',
+        'Enum',
+    }
+)
+
 
 def capitalize(input_string):
     if not input_string:
@@ -54,7 +70,7 @@ def sanitize_parameter_field_name(name: str) -> str:
     sanitized = re.sub(r'\W', '', sanitized, flags=re.ASCII)
 
     if sanitized and sanitized[0].isdigit():
-        sanitized = '_' + sanitized
+        sanitized = 'field_' + sanitized
     return sanitized
 
 
@@ -114,7 +130,14 @@ def sanitize_identifier(name: str) -> str:
         sanitized = '_' + sanitized
 
     # If empty after sanitization, return a default
-    return sanitized or 'UnnamedType'
+    if not sanitized:
+        return 'UnnamedType'
+
+    # Avoid clashing with Pydantic/typing names imported into the generated file
+    if sanitized in _RESERVED_GENERATED_CLASS_NAMES:
+        sanitized += '_'
+
+    return sanitized
 
 
 def validate_python_syntax(content: str) -> None:
