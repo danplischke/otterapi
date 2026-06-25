@@ -117,6 +117,19 @@ class ParameterStyle(Enum):
     deepObject = 'deepObject'
 
 
+def _style_value(style: ParameterStyle | str | None) -> str | None:
+    """Return the string value of a parameter/header style.
+
+    The ``style`` field may be parsed either as a :class:`ParameterStyle`
+    enum or as a plain ``str`` depending on the model, so normalize both.
+    """
+    if style is None:
+        return None
+    if isinstance(style, ParameterStyle):
+        return style.value
+    return style
+
+
 class SecuritySchemeType(Enum):
     apiKey = 'apiKey'
     http = 'http'
@@ -537,6 +550,12 @@ class OpenAPI(BaseModel):
     ) -> openapi_v3_1.Schema | openapi_v3_1.Reference:
         """Convert a Schema or Reference from OpenAPI 3.0 to 3.1."""
         if isinstance(schema_or_ref, Reference):
+            # An empty schema object (``{}``) validates as a ``Reference``
+            # because the Reference RootModel permits a dict with no ``$ref``
+            # key. An empty schema means "any value", so convert it to an empty
+            # 3.1 ``Schema`` rather than emitting a bogus empty ``$ref``.
+            if not schema_or_ref.root.get('$ref'):
+                return openapi_v3_1.Schema()
             return self._convert_reference_to_3_1(schema_or_ref)
         return self._convert_schema_to_3_1(schema_or_ref, warnings)
 
@@ -855,7 +874,7 @@ class OpenAPI(BaseModel):
             'required': param.required,
             'deprecated': param.deprecated,
             'allowEmptyValue': param.allowEmptyValue,
-            'style': param.style.value if param.style is not None else None,
+            'style': _style_value(param.style),
             'explode': param.explode,
             'allowReserved': param.allowReserved,
             'schema': schema_,
@@ -904,7 +923,7 @@ class OpenAPI(BaseModel):
             'required': header.required,
             'deprecated': header.deprecated,
             'allowEmptyValue': header.allowEmptyValue,
-            'style': header.style.value if header.style is not None else None,
+            'style': _style_value(header.style),
             'explode': header.explode,
             'allowReserved': header.allowReserved,
             'schema': schema_,

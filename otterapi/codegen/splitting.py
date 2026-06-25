@@ -1339,6 +1339,18 @@ class SplitModuleEmitter:
         final_body.append(_all(sorted(all_names)))
         final_body.extend(body)
 
+        # Prepend from __future__ import annotations so forward references in
+        # type annotations (e.g. model names imported from .models) resolve
+        # correctly when models contain cyclic references.
+        final_body.insert(
+            0,
+            ast.ImportFrom(
+                module='__future__',
+                names=[ast.alias(name='annotations')],
+                level=0,
+            ),
+        )
+
         file_path = UPath(file_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         write_mod(final_body, file_path)

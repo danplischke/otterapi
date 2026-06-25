@@ -74,6 +74,59 @@ def _load_models_mixin_source() -> str:
     )
 
 
+def _topo_sort_by_base_classes(
+    types_list: list,
+    model_names: set[str],
+) -> list:
+    """Return *types_list* re-ordered so every base class precedes its subclasses.
+
+    ``get_sorted_types()`` uses field-level dependency edges.  When it breaks a
+    field-level cycle it may place a subclass before its base class.
+    ``from __future__ import annotations`` defers annotation evaluation, so
+    field-level cycles are fine — but ``class Foo(Bar):`` base expressions are
+    evaluated *eagerly* at class-definition time.  Inheritance always forms a
+    DAG in Python (cycles are a ``TypeError``), so a simple DFS topological sort
+    on base-class edges always terminates and produces a valid ordering.
+
+    Types with no name (primitive aliases, etc.) are appended unchanged after
+    the named types.
+    """
+    name_to_type: dict[str, object] = {t.name: t for t in types_list if t.name}
+
+    def base_deps(t: object) -> set[str]:
+        impl = t.implementation_ast  # type: ignore[attr-defined]
+        if not isinstance(impl, ast.ClassDef):
+            return set()
+        return {
+            b.id for b in impl.bases if isinstance(b, ast.Name) and b.id in model_names
+        }
+
+    result: list = []
+    visited: set[str] = set()
+
+    def dfs(name: str) -> None:
+        if name in visited:
+            return
+        visited.add(name)
+        t = name_to_type.get(name)
+        if t is None:
+            return
+        for base_name in base_deps(t):
+            dfs(base_name)
+        result.append(t)
+
+    for t in types_list:
+        if t.name:
+            dfs(t.name)
+
+    # Preserve unnamed entries (should be rare / none for ClassDef models)
+    for t in types_list:
+        if not t.name:
+            result.append(t)
+
+    return result
+
+
 # Content types that should be treated as JSON
 JSON_CONTENT_TYPES = {MediaType.JSON, MediaType.TEXT_JSON}
 
@@ -1317,23 +1370,63 @@ class Codegen(OpenAPIProcessor):
         import_collector = ImportCollector()
         all_names = set()
 
-        for type_name, type_ in self.typegen.types.items():
+        # Names of all types that will get _HtmlReprMixin injected.  Used
+        # below to skip re-injection for classes whose base is already a
+        # generated model (which would cause an MRO conflict).
+        all_model_names: set[str] = {
+            type_.name
+            for type_ in self.typegen.types.values()
+            if type_.name and isinstance(type_.implementation_ast, ast.ClassDef)
+        }
+
+        # Emit types in dependency order (dependencies before dependents) so
+        # that forward references in field annotations resolve at class-creation
+        # time.  get_sorted_types() returns dependents-first; reversing gives
+        # the dependencies-first order needed for correct emission.
+        # Types not reachable from get_sorted_types (e.g. orphaned names) are
+        # appended at the end via the seen-set guard.
+        sorted_types = list(reversed(self.typegen.get_sorted_types()))
+        seen: set[str] = {t.name for t in sorted_types if t.name}
+        for extra in self.typegen.types.values():
+            if extra.name not in seen:
+                sorted_types.append(extra)
+
+        # Re-sort to guarantee every base class precedes every subclass.
+        # get_sorted_types() uses field-level dependencies; when it breaks a
+        # field-level cycle it may place a subclass before its base class.
+        # from __future__ import annotations makes field-type annotations lazy,
+        # but base classes in `class Foo(Base):` are evaluated EAGERLY, so the
+        # ordering of ClassDef nodes in the emitted file must respect the
+        # inheritance DAG.  Python forbids inheritance cycles, so this sort
+        # always terminates.
+        sorted_types = _topo_sort_by_base_classes(sorted_types, all_model_names)
+
+        for type_ in sorted_types:
             if type_.implementation_ast:
                 impl = type_.implementation_ast
                 # Inject _HtmlReprMixin as the first base of every model class so
                 # it renders as an HTML table in Jupyter without touching the
                 # per-model implementation_ast (which is exec'd in unit tests).
+                # Skip injection when a base is itself a generated model: that
+                # base already gets _HtmlReprMixin, so adding it again would
+                # produce an unresolvable MRO (e.g. Child(_HtmlReprMixin, Parent)
+                # where Parent is already Child(_HtmlReprMixin, BaseModel)).
                 if isinstance(impl, ast.ClassDef):
-                    impl = ast.ClassDef(
-                        name=impl.name,
-                        bases=[
-                            ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
-                            *impl.bases,
-                        ],
-                        keywords=impl.keywords,
-                        body=impl.body,
-                        decorator_list=impl.decorator_list,
+                    has_model_base = any(
+                        isinstance(b, ast.Name) and b.id in all_model_names
+                        for b in impl.bases
                     )
+                    if not has_model_base:
+                        impl = ast.ClassDef(
+                            name=impl.name,
+                            bases=[
+                                ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
+                                *impl.bases,
+                            ],
+                            keywords=impl.keywords,
+                            body=impl.body,
+                            decorator_list=impl.decorator_list,
+                        )
                 body.append(impl)
                 if type_.name:
                     all_names.add(type_.name)
@@ -1341,6 +1434,41 @@ class Codegen(OpenAPIProcessor):
                 # Collect imports from implementation and annotations
                 import_collector.add_imports(type_.implementation_imports)
                 import_collector.add_imports(type_.annotation_imports)
+
+        # Emit model_rebuild() / update_forward_refs() for cyclic models so
+        # that Pydantic can resolve the forward references introduced by
+        # from __future__ import annotations and self-referential schemas.
+        cyclic = getattr(self.typegen, '_cyclic', set())
+        for model_name in sorted(cyclic):
+            if model_name in all_names:
+                if self.typegen.pydantic_version == 1:
+                    body.append(
+                        ast.Expr(
+                            ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id=model_name, ctx=ast.Load()),
+                                    attr='update_forward_refs',
+                                    ctx=ast.Load(),
+                                ),
+                                args=[],
+                                keywords=[],
+                            )
+                        )
+                    )
+                else:
+                    body.append(
+                        ast.Expr(
+                            ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id=model_name, ctx=ast.Load()),
+                                    attr='model_rebuild',
+                                    ctx=ast.Load(),
+                                ),
+                                args=[],
+                                keywords=[],
+                            )
+                        )
+                    )
 
         # Prepend the _HtmlReprMixin helper (defines _repr_html_ for Jupyter)
         body[0:0] = ast.parse(_load_models_mixin_source()).body
@@ -1351,6 +1479,19 @@ class Codegen(OpenAPIProcessor):
         # Add all imports at the beginning
         for import_stmt in import_collector.to_ast():
             body.insert(0, import_stmt)
+
+        # from __future__ import annotations must be the very first statement
+        # so forward references in type annotations resolve lazily.  This is
+        # required when cyclic models refer to each other before their class
+        # bodies are fully defined.
+        body.insert(
+            0,
+            ast.ImportFrom(
+                module='__future__',
+                names=[ast.alias(name='annotations')],
+                level=0,
+            ),
+        )
 
         write_mod(body, path)
 
