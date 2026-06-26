@@ -167,7 +167,14 @@ class Codegen(OpenAPIProcessor):
     """
 
     def __init__(
-        self, config: DocumentConfig, schema_loader: SchemaLoader | None = None
+        self,
+        config: DocumentConfig,
+        schema_loader: SchemaLoader | None = None,
+        *,
+        format_output: bool = True,
+        validate_output: bool = True,
+        generate_endpoints: bool = True,
+        create_py_typed: bool = True,
     ):
         """Initialize the code generator.
 
@@ -175,12 +182,20 @@ class Codegen(OpenAPIProcessor):
             config: Configuration specifying source schema and output location.
             schema_loader: Optional custom schema loader. If not provided,
                           a default SchemaLoader will be created.
+            format_output: Whether to format generated code with ruff/black.
+            validate_output: Whether to validate generated code syntax.
+            generate_endpoints: Whether to generate endpoint functions.
+            create_py_typed: Whether to create a py.typed marker file.
         """
         super().__init__(None)
         self.config = config
         self.openapi: OpenAPIv3_2 | None = None
         self.typegen: TypeGenerator | None = None
         self._schema_loader = schema_loader or SchemaLoader()
+        self.format_output = format_output
+        self.validate_output = validate_output
+        self.generate_endpoints = generate_endpoints
+        self.create_py_typed = create_py_typed
 
     @property
     def _adapter(self):
@@ -943,10 +958,7 @@ class Codegen(OpenAPIProcessor):
         )
         pag_dict = self._build_pagination_config_dict(pag_config)
 
-        for fn_name, is_async in (
-            (endpoint.sync_fn_name, False),
-            (endpoint.async_fn_name, True),
-        ):
+        for is_async, fn_name in self._sync_async_pair(endpoint):
             fn, imports = build_standalone_paginated_fn(
                 fn_name=fn_name,
                 method=endpoint.method,
@@ -965,10 +977,7 @@ class Codegen(OpenAPIProcessor):
             body.append(fn)
             import_collector.add_imports(imports)
 
-        for base_fn_name, is_async in (
-            (endpoint.sync_fn_name, False),
-            (endpoint.async_fn_name, True),
-        ):
+        for is_async, base_fn_name in self._sync_async_pair(endpoint):
             iter_fn_name = f'{base_fn_name}_iter'
             iter_fn, iter_imports = build_standalone_paginated_iter_fn(
                 fn_name=iter_fn_name,
@@ -1034,10 +1043,7 @@ class Codegen(OpenAPIProcessor):
                 endpoint.response_type.annotation_ast
             )
 
-        for fn_name, is_async in (
-            (endpoint.sync_fn_name, False),
-            (endpoint.async_fn_name, True),
-        ):
+        for is_async, fn_name in self._sync_async_pair(endpoint):
             fn, imports = build_standalone_endpoint_fn(
                 fn_name=fn_name,
                 method=endpoint.method,
@@ -1101,19 +1107,22 @@ class Codegen(OpenAPIProcessor):
     # Per-feature emitters extracted from ``_build_endpoint_file_body``
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _sync_async_pair(endpoint: Endpoint) -> list[tuple[bool, str]]:
+    def _sync_async_pair(self, endpoint: Endpoint) -> list[tuple[bool, str]]:
         """Return the (is_async, base_fn_name) pair every feature emitter loops over.
 
         Factoring this out removes the four near-identical inline tuples in
         the paired emitters below and keeps the "sync first, async second"
         emission order consistent across DataFrame / export / paginated
         variants (issue #3 item 5 follow-up).
+
+        Respects ``generate_sync`` and ``generate_async`` from the document config.
         """
-        return [
-            (False, endpoint.sync_fn_name),
-            (True, endpoint.async_fn_name),
-        ]
+        result = []
+        if self.config.generate_sync:
+            result.append((False, endpoint.sync_fn_name))
+        if self.config.generate_async:
+            result.append((True, endpoint.async_fn_name))
+        return result
 
     def _emit_paginated_dataframe_pair(
         self,
@@ -1352,7 +1361,7 @@ class Codegen(OpenAPIProcessor):
         final_body.append(_all(sorted(all_names)))
         final_body.extend(body)
 
-        write_mod(final_body, path)
+        write_mod(final_body, path, format_code=self.format_output, validate_code=self.validate_output)
         return endpoint_names
 
     def _generate_models_file(self, path: UPath) -> None:
@@ -1493,7 +1502,7 @@ class Codegen(OpenAPIProcessor):
             ),
         )
 
-        write_mod(body, path)
+        write_mod(body, path, format_code=self.format_output, validate_code=self.validate_output)
 
     def generate(self):
         self._load_schema()
@@ -1530,15 +1539,18 @@ class Codegen(OpenAPIProcessor):
         client_name = self._get_client_class_name()
 
         # Check if module splitting is enabled
-        if self.config.module_split.enabled:
-            split_files = self._generate_split_endpoints(
-                directory, models_file, endpoints, client_name
-            )
-            generated_files.extend(split_files)
+        if self.generate_endpoints:
+            if self.config.module_split.enabled:
+                split_files = self._generate_split_endpoints(
+                    directory, models_file, endpoints, client_name
+                )
+                generated_files.extend(split_files)
+            else:
+                endpoints_file = directory / self.config.endpoints_file
+                endpoint_names = self._generate_endpoint_file(endpoints_file, endpoints)
+                generated_files.append(f'{output_name}/{self.config.endpoints_file}')
         else:
-            endpoints_file = directory / self.config.endpoints_file
-            endpoint_names = self._generate_endpoint_file(endpoints_file, endpoints)
-            generated_files.append(f'{output_name}/{self.config.endpoints_file}')
+            endpoint_names = set()
 
         client_files = self._generate_client_file(
             directory, endpoints, base_url, client_name
@@ -1549,6 +1561,11 @@ class Codegen(OpenAPIProcessor):
         if not self.config.module_split.enabled:
             self._generate_init_file(directory, endpoint_names, client_name)
             generated_files.append(f'{output_name}/__init__.py')
+
+        if self.create_py_typed:
+            py_typed = directory / 'py.typed'
+            py_typed.touch()
+            generated_files.append(f'{output_name}/py.typed')
 
         return generated_files
 
@@ -1701,7 +1718,7 @@ class Codegen(OpenAPIProcessor):
 
         # Write __init__.py
         init_path = directory / '__init__.py'
-        write_mod(body, init_path)
+        write_mod(body, init_path, format_code=self.format_output, validate_code=self.validate_output)
 
     def _generate_split_endpoints(
         self,
@@ -1743,6 +1760,8 @@ class Codegen(OpenAPIProcessor):
             export_config=self.config.export,
             reexport_models=self.config.reexport_models,
             reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
+            format_output=self.format_output,
+            validate_output=self.validate_output,
         )
 
         emitted = emitter.emit(
@@ -1841,7 +1860,7 @@ class Codegen(OpenAPIProcessor):
 
         # Write _client.py (always regenerated)
         client_file = directory / '_client.py'
-        write_mod(body, client_file)
+        write_mod(body, client_file, format_code=self.format_output, validate_code=self.validate_output)
         generated_files.append(f'{output_name}/_client.py')
 
         # Generate client.py stub (only if it doesn't exist)

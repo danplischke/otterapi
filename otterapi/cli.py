@@ -163,7 +163,14 @@ def _resolve_codegen_config(
         raise typer.Exit(1)
 
 
-def _generate_document(document_config: DocumentConfig) -> None:
+def _generate_document(
+    document_config: DocumentConfig,
+    *,
+    format_output: bool = True,
+    validate_output: bool = True,
+    generate_endpoints: bool = True,
+    create_py_typed: bool = True,
+) -> None:
     """Run code generation for a single document, with a progress spinner."""
     with Progress(
         SpinnerColumn(),
@@ -175,7 +182,13 @@ def _generate_document(document_config: DocumentConfig) -> None:
             total=None,
         )
 
-        codegen = Codegen(document_config)
+        codegen = Codegen(
+            document_config,
+            format_output=format_output,
+            validate_output=validate_output,
+            generate_endpoints=generate_endpoints,
+            create_py_typed=create_py_typed,
+        )
         generated_files = codegen.generate()
         progress.update(
             task,
@@ -228,7 +241,13 @@ def generate(
         codegen_config = _resolve_codegen_config(config, source, output)
 
         for document_config in codegen_config.documents:
-            _generate_document(document_config)
+            _generate_document(
+                document_config,
+                format_output=codegen_config.format_output,
+                validate_output=codegen_config.validate_output,
+                generate_endpoints=codegen_config.generate_endpoints,
+                create_py_typed=codegen_config.create_py_typed,
+            )
 
         console.print('\n[green]✓[/green] Code generation completed!')
 

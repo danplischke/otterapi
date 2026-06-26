@@ -609,6 +609,8 @@ class SplitModuleEmitter:
         export_config: ExportConfig | None = None,
         reexport_models: bool = False,
         reexport_model_exclude_patterns: list[str] | None = None,
+        format_output: bool = True,
+        validate_output: bool = True,
     ):
         """Initialize the split module emitter.
 
@@ -624,6 +626,8 @@ class SplitModuleEmitter:
             export_config: Optional export configuration.
             reexport_models: Whether to include model names in __all__.
             reexport_model_exclude_patterns: Glob patterns of model names to exclude.
+            format_output: Whether to format generated code with ruff/black.
+            validate_output: Whether to validate generated code syntax.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -638,6 +642,8 @@ class SplitModuleEmitter:
         self.reexport_model_exclude_patterns: list[str] = (
             reexport_model_exclude_patterns or []
         )
+        self.format_output = format_output
+        self.validate_output = validate_output
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
 
@@ -1353,7 +1359,7 @@ class SplitModuleEmitter:
 
         file_path = UPath(file_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        write_mod(final_body, file_path)
+        write_mod(final_body, file_path, format_code=self.format_output, validate_code=self.validate_output)
 
         return endpoint_names
 
@@ -1624,7 +1630,7 @@ class SplitModuleEmitter:
 
         init_path = UPath(dir_path) / '__init__.py'
         if body:
-            write_mod(body, init_path)
+            write_mod(body, init_path, format_code=self.format_output, validate_code=self.validate_output)
         else:
             init_path.touch()
 
@@ -1719,7 +1725,7 @@ class SplitModuleEmitter:
         # Write __init__.py
         init_path = self.output_dir / '__init__.py'
         if body:
-            write_mod(body, init_path)
+            write_mod(body, init_path, format_code=self.format_output, validate_code=self.validate_output)
 
     def _get_model_names(self) -> list[str]:
         """Get model names from the typegen_types."""

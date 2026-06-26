@@ -214,7 +214,10 @@ def format_source(source: str) -> str:
 
 
 def write_mod(
-    body: list[ast.stmt], path: UPath | Path | str, format_code: bool = True
+    body: list[ast.stmt],
+    path: UPath | Path | str,
+    format_code: bool = True,
+    validate_code: bool = True,
 ) -> None:
     """Write a list of AST statements to a Python file.
 
@@ -222,7 +225,7 @@ def write_mod(
     1. Creates an AST Module from the statements
     2. Fixes missing locations in the AST
     3. Unparses the AST to Python source code
-    4. Validates the code by compiling it
+    4. Optionally validates the code by compiling it
     5. Optionally formats the code with ruff/black
     6. Writes the code to the specified file
 
@@ -230,9 +233,10 @@ def write_mod(
         body: List of AST statement nodes to write.
         path: Path where the file should be written.
         format_code: Whether to format the code with ruff/black. Defaults to True.
+        validate_code: Whether to validate the code by compiling it. Defaults to True.
 
     Raises:
-        SyntaxError: If the generated code is not valid Python.
+        SyntaxError: If the generated code is not valid Python (when validate_code=True).
         OSError: If the file cannot be written.
     """
     # Convert path to string for consistency
@@ -246,7 +250,8 @@ def write_mod(
     file_content = ast.unparse(mod)
 
     # Validate the generated code by compiling it
-    validate_python_syntax(file_content)
+    if validate_code:
+        validate_python_syntax(file_content)
 
     # Format code if requested
     if format_code:
