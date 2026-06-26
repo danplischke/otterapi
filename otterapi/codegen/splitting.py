@@ -1359,7 +1359,12 @@ class SplitModuleEmitter:
 
         file_path = UPath(file_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        write_mod(final_body, file_path, format_code=self.format_output, validate_code=self.validate_output)
+        write_mod(
+            final_body,
+            file_path,
+            format_code=self.format_output,
+            validate_code=self.validate_output,
+        )
 
         return endpoint_names
 
@@ -1630,7 +1635,12 @@ class SplitModuleEmitter:
 
         init_path = UPath(dir_path) / '__init__.py'
         if body:
-            write_mod(body, init_path, format_code=self.format_output, validate_code=self.validate_output)
+            write_mod(
+                body,
+                init_path,
+                format_code=self.format_output,
+                validate_code=self.validate_output,
+            )
         else:
             init_path.touch()
 
@@ -1725,7 +1735,12 @@ class SplitModuleEmitter:
         # Write __init__.py
         init_path = self.output_dir / '__init__.py'
         if body:
-            write_mod(body, init_path, format_code=self.format_output, validate_code=self.validate_output)
+            write_mod(
+                body,
+                init_path,
+                format_code=self.format_output,
+                validate_code=self.validate_output,
+            )
 
     def _get_model_names(self) -> list[str]:
         """Get model names from the typegen_types."""

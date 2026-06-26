@@ -1361,7 +1361,12 @@ class Codegen(OpenAPIProcessor):
         final_body.append(_all(sorted(all_names)))
         final_body.extend(body)
 
-        write_mod(final_body, path, format_code=self.format_output, validate_code=self.validate_output)
+        write_mod(
+            final_body,
+            path,
+            format_code=self.format_output,
+            validate_code=self.validate_output,
+        )
         return endpoint_names
 
     def _generate_models_file(self, path: UPath) -> None:
@@ -1502,7 +1507,12 @@ class Codegen(OpenAPIProcessor):
             ),
         )
 
-        write_mod(body, path, format_code=self.format_output, validate_code=self.validate_output)
+        write_mod(
+            body,
+            path,
+            format_code=self.format_output,
+            validate_code=self.validate_output,
+        )
 
     def generate(self):
         self._load_schema()
@@ -1718,7 +1728,12 @@ class Codegen(OpenAPIProcessor):
 
         # Write __init__.py
         init_path = directory / '__init__.py'
-        write_mod(body, init_path, format_code=self.format_output, validate_code=self.validate_output)
+        write_mod(
+            body,
+            init_path,
+            format_code=self.format_output,
+            validate_code=self.validate_output,
+        )
 
     def _generate_split_endpoints(
         self,
@@ -1860,7 +1875,12 @@ class Codegen(OpenAPIProcessor):
 
         # Write _client.py (always regenerated)
         client_file = directory / '_client.py'
-        write_mod(body, client_file, format_code=self.format_output, validate_code=self.validate_output)
+        write_mod(
+            body,
+            client_file,
+            format_code=self.format_output,
+            validate_code=self.validate_output,
+        )
         generated_files.append(f'{output_name}/_client.py')
 
         # Generate client.py stub (only if it doesn't exist)
