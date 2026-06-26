@@ -38,3 +38,18 @@ publish:
     rm -rf dist
     uv build
     uv run twine upload dist/*  --verbose
+
+[group('package')]
+version:
+    @git describe --tags --abbrev=0 2>/dev/null || echo "No tags found"
+
+[group('package')]
+versions:
+    @git tag -l "v*" --sort=-v:refname | head -10
+
+[group('package')]
+release ver:
+    git tag -a v{{ ver }} -m "Release v{{ ver }}"
+    @echo "Created tag v{{ ver }}"
+    git push origin "v{{ ver }}"
+
