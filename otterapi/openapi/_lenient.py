@@ -57,9 +57,7 @@ class LenientRefModel(BaseModel):
             field.alias for field in cls.model_fields.values() if field.alias
         )
         unknown = [
-            key
-            for key in data
-            if key not in allowed and key not in _REFERENCE_KEYS
+            key for key in data if key not in allowed and key not in _REFERENCE_KEYS
         ]
         if not unknown:
             return data

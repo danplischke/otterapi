@@ -338,14 +338,10 @@ class SchemaLoader:
         grouped: dict[str, str] = {}
         for err in error.errors():
             msg = err.get('msg', '')
-            loc = '.'.join(
-                str(part) for part in err.get('loc', ()) if str(part)
-            )
+            loc = '.'.join(str(part) for part in err.get('loc', ()) if str(part))
             grouped.setdefault(msg, loc)
 
-        messages = [
-            f'{loc}: {msg}' if loc else msg for msg, loc in grouped.items()
-        ]
+        messages = [f'{loc}: {msg}' if loc else msg for msg, loc in grouped.items()]
         if len(messages) > limit:
             hidden = len(messages) - limit
             messages = messages[:limit]

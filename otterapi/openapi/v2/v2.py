@@ -230,9 +230,7 @@ class LenientModelWithVendorExtensions(BaseModel):
             dropped = context.get('dropped_keys')
             if dropped is not None:
                 dropped.update(str(key) for key in unknown)
-            return {
-                key: value for key, value in data.items() if key not in unknown
-            }
+            return {key: value for key, value in data.items() if key not in unknown}
 
         raise ValueError(
             f'unexpected field(s) on {cls.__name__}: '
@@ -537,9 +535,7 @@ class Responses(BaseModelWithVendorExtensions):
         )
 
     @staticmethod
-    def _convert_response_value(
-        value: Any, context: Any = None
-    ) -> ResponseValue | Any:
+    def _convert_response_value(value: Any, context: Any = None) -> ResponseValue | Any:
         """Convert a raw mapping value into a Response or JsonReference object."""
         if not isinstance(value, dict):
             return value
