@@ -351,6 +351,25 @@ class Codegen(OpenAPIProcessor):
 
         return []
 
+    @staticmethod
+    def _dedupe_types(types: list[Type]) -> list[Type]:
+        """Drop duplicate types (by rendered annotation), preserving order.
+
+        An operation often maps several status codes (e.g. ``200`` and
+        ``default``, or ``200`` and ``201``) to the same response model. Without
+        deduplication the response union collapses to ``X | X``.
+        """
+        seen: set[str] = set()
+        unique: list[Type] = []
+        for t in types:
+            key = (
+                ast.dump(t.annotation_ast) if t.annotation_ast is not None else repr(t)
+            )
+            if key not in seen:
+                seen.add(key)
+                unique.append(t)
+        return unique
+
     def _get_response_models(
         self, operation: Operation
     ) -> tuple[list[ResponseInfo], Type | None]:
@@ -374,7 +393,7 @@ class Codegen(OpenAPIProcessor):
         json_types = [r.type for r in response_list if r.is_json and r.type]
         non_json_types = self._collect_non_json_types(response_list)
 
-        all_types = json_types + non_json_types
+        all_types = self._dedupe_types(json_types + non_json_types)
 
         if len(all_types) == 0:
             return response_list, None

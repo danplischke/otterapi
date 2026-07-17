@@ -482,6 +482,63 @@ class TestCodegen:
             'get_v1_feed_hcp_profile_changes',
         }
 
+    def test_duplicate_status_codes_collapse_to_single_response_type(
+        self, temp_output_dir
+    ):
+        """Multiple status codes pointing at the same schema must collapse to a
+        single response type, not a redundant ``X | X`` union.
+        """
+        count_schema = {
+            'type': 'object',
+            'properties': {'count': {'type': 'integer'}},
+        }
+        spec = {
+            'openapi': '3.1.0',
+            'info': {'title': 'Dup Responses', 'version': '1.0.0'},
+            'components': {'schemas': {'Count': count_schema}},
+            'paths': {
+                '/count': {
+                    'get': {
+                        'operationId': 'getCount',
+                        'responses': {
+                            '200': {
+                                'description': 'ok',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {'$ref': '#/components/schemas/Count'}
+                                    }
+                                },
+                            },
+                            '201': {
+                                'description': 'created',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {'$ref': '#/components/schemas/Count'}
+                                    }
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        spec_file = temp_output_dir / 'dup_responses.json'
+        spec_file.write_text(json.dumps(spec))
+        config = DocumentConfig(
+            source=str(spec_file), output=str(temp_output_dir / 'output')
+        )
+        codegen = Codegen(config)
+        codegen._load_schema()
+
+        op = codegen.openapi.paths.root['/count'].get
+        _, response_type = codegen._get_response_models(op)
+
+        assert response_type is not None
+        rendered = ast.unparse(response_type.annotation_ast)
+        members = [m.strip() for m in rendered.split('|')]
+        # No repeated union member (would be "Count | Count" before the fix).
+        assert len(members) == len(set(members)), rendered
+
     def test_resolve_base_url(self, temp_output_dir, petstore_spec_file):
         """Test the _resolve_base_url method."""
         output_dir = temp_output_dir / 'output'
