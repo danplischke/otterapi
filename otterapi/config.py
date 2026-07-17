@@ -1120,7 +1120,10 @@ class CodegenConfig(BaseSettings):
         description=(
             'Drop unrecognized, structurally-invalid fields from the input '
             'specification instead of failing validation. Dropped fields are '
-            'reported as warnings; vendor extensions (x-*) are always kept.'
+            'reported as warnings. Vendor extensions (x-*) are always '
+            'preserved, except on the type-discriminated security-scheme '
+            'objects, which still reject unknown keys to keep their union '
+            'unambiguous.'
         ),
     )
 

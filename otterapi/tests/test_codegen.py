@@ -364,6 +364,64 @@ class TestCodegen:
         assert 'limit' in param_names
         assert 'status' in param_names
 
+    def test_extract_operation_parameters_disambiguates_colliding_names(
+        self, temp_output_dir
+    ):
+        """Distinct params that sanitize to the same identifier must not emit a
+        duplicate function argument.
+
+        Collisions arise from same-name/different-location params (``id`` in
+        both query and header) and from names that differ only by separators
+        (``user id`` vs ``user-id`` both sanitize to ``user_id``). The wire name
+        (``param.name``) must be preserved; only the Python identifier changes.
+        """
+        spec = {
+            'openapi': '3.1.0',
+            'info': {'title': 'Colliding Params', 'version': '1.0.0'},
+            'paths': {
+                '/items': {
+                    'get': {
+                        'operationId': 'listItems',
+                        'parameters': [
+                            {'name': 'id', 'in': 'query', 'schema': {'type': 'string'}},
+                            {'name': 'id', 'in': 'header', 'schema': {'type': 'string'}},
+                            {
+                                'name': 'user id',
+                                'in': 'query',
+                                'schema': {'type': 'string'},
+                            },
+                            {
+                                'name': 'user-id',
+                                'in': 'header',
+                                'schema': {'type': 'string'},
+                            },
+                        ],
+                        'responses': {'200': {'description': 'ok'}},
+                    }
+                }
+            },
+        }
+        spec_file = temp_output_dir / 'colliding.json'
+        spec_file.write_text(json.dumps(spec))
+        config = DocumentConfig(
+            source=str(spec_file), output=str(temp_output_dir / 'output')
+        )
+        codegen = Codegen(config)
+        codegen._load_schema()
+
+        op = codegen.openapi.paths.root['/items'].get
+        params = codegen._extract_operation_parameters(op)
+
+        sanitized = [p.name_sanitized for p in params]
+        # Generated Python identifiers must all be unique and valid identifiers.
+        assert len(sanitized) == len(set(sanitized))
+        assert all(name.isidentifier() for name in sanitized)
+        # Wire names are preserved unchanged.
+        assert sorted(p.name for p in params) == ['id', 'id', 'user id', 'user-id']
+        # Colliding identifiers get a numeric suffix rather than duplicating.
+        assert {'id', 'id_2'} <= set(sanitized)
+        assert {'user_id', 'user_id_2'} <= set(sanitized)
+
     def test_resolve_base_url(self, temp_output_dir, petstore_spec_file):
         """Test the _resolve_base_url method."""
         output_dir = temp_output_dir / 'output'

@@ -423,9 +423,10 @@ class Codegen(OpenAPIProcessor):
                 all_params.append(self._build_parameter(param))
 
         # Distinct OpenAPI parameters can map to the same Python identifier
-        # (e.g. "sort" and "Sort", or a query and header of the same name),
-        # which would emit a function with a duplicate argument. Disambiguate
-        # the generated identifier while preserving the wire name (param.name).
+        # (e.g. a query and header of the same name, or "user id" and
+        # "user-id" which both sanitize to "user_id"), which would emit a
+        # function with a duplicate argument. Disambiguate the generated
+        # identifier while preserving the wire name (param.name).
         used_names: set[str] = set()
         for param in all_params:
             candidate = param.name_sanitized

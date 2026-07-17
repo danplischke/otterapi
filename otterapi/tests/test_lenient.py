@@ -1,11 +1,12 @@
-"""Tests for opt-in lenient validation.
+"""Tests for opt-in lenient validation and vendor-extension preservation.
 
 Lenient mode (``--lenient`` / ``lenient: true``) drops unrecognized,
-structurally-invalid fields instead of failing. These tests cover the three
-layers that implement it:
+structurally-invalid fields instead of failing. These tests cover the layers
+that implement it:
 
-* ``LenientRefModel`` -- the shared base for the strict (``extra='forbid'``)
-  OpenAPI 3.0/3.1/3.2 object models.
+* ``LenientRefModel`` -- the shared base for the OpenAPI 3.0/3.1/3.2 object
+  models. It preserves ``x-*`` vendor extensions (``extra='allow'``) while still
+  rejecting other unknown keys in strict mode and keeping ``$ref`` discrimination.
 * The v2 bases ``LenientModelWithVendorExtensions`` (strips) and
   ``UnionVariantModel`` (always raises, to keep union discrimination correct).
 * ``SchemaLoader`` end-to-end: strict raises with a ``--lenient`` hint, lenient
@@ -37,7 +38,7 @@ def _lenient_ctx() -> tuple[dict, set[str]]:
 
 
 # -----------------------------------------------------------------------------
-# LenientRefModel -- the v3.x forbid-model base
+# LenientRefModel -- the v3.x object-model base (extra='allow', preserves x-*)
 # -----------------------------------------------------------------------------
 
 
@@ -107,14 +108,54 @@ class TestRefDiscriminationUnderLenient:
         mt = v3_2.MediaType.model_validate(
             {'schema': {'$ref': '#/components/schemas/Pet', 'bogus': 1}}, context=ctx
         )
-        # $ref is never stripped, so the object branch keeps failing and the
-        # Reference branch continues to win.
+        # An undeclared $ref makes the object branch fail, so the Reference
+        # branch continues to win -- even in lenient mode.
         assert isinstance(mt.schema_, v3_2.Reference)
 
     def test_object_schema_still_parses_as_schema(self):
         ctx, _ = _lenient_ctx()
         mt = v3_2.MediaType.model_validate({'schema': {'type': 'object'}}, context=ctx)
         assert isinstance(mt.schema_, v3_2.Schema)
+
+
+# -----------------------------------------------------------------------------
+# Vendor extensions (x-*) are preserved, never rejected
+# -----------------------------------------------------------------------------
+
+
+class TestVendorExtensionsPreserved:
+    def test_x_star_preserved_in_strict_mode(self):
+        info = v3_2.Info.model_validate(
+            {'title': 't', 'version': '1', 'x-internal': 'keep', 'x-team': {'a': 1}}
+        )
+        assert info.model_extra == {'x-internal': 'keep', 'x-team': {'a': 1}}
+
+    def test_x_star_kept_while_junk_dropped_in_lenient(self):
+        ctx, dropped = _lenient_ctx()
+        info = v3_2.Info.model_validate(
+            {'title': 't', 'version': '1', 'x-ok': 9, 'bogus': 1}, context=ctx
+        )
+        assert dropped == {'bogus'}
+        assert (info.model_extra or {}).get('x-ok') == 9
+
+    @pytest.mark.parametrize(
+        ('model', 'base'),
+        [
+            (v3_2.Info, {'title': 't', 'version': '1'}),
+            (v3_1.Contact, {'name': 'Acme'}),
+            (v3_0.MediaType, {}),
+        ],
+    )
+    def test_x_star_preserved_across_all_three_v3_files(self, model, base):
+        instance = model.model_validate({**base, 'x-vendor': 'v'})
+        assert (instance.model_extra or {}).get('x-vendor') == 'v'
+
+    def test_object_schema_keeps_x_star(self):
+        mt = v3_2.MediaType.model_validate(
+            {'schema': {'type': 'object', 'x-vendor': 'v'}}
+        )
+        assert isinstance(mt.schema_, v3_2.Schema)
+        assert (mt.schema_.model_extra or {}).get('x-vendor') == 'v'
 
 
 # -----------------------------------------------------------------------------

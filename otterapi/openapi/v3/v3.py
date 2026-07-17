@@ -51,7 +51,7 @@ class License(BaseModel):
 
 
 class ServerVariable(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     enum: list[str] | None = None
     default: str
@@ -83,7 +83,7 @@ class XML(BaseModel):
 
 
 class Example(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     summary: str | None = None
     description: str | None = None
@@ -195,7 +195,7 @@ class OpenIdConnectSecurityScheme(BaseModel):
 
 
 class ImplicitOAuthFlow(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     authorizationUrl: str
     refreshUrl: str | None = None
@@ -203,7 +203,7 @@ class ImplicitOAuthFlow(LenientRefModel):
 
 
 class PasswordOAuthFlow(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     tokenUrl: str
     refreshUrl: str | None = None
@@ -211,7 +211,7 @@ class PasswordOAuthFlow(LenientRefModel):
 
 
 class ClientCredentialsFlow(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     tokenUrl: str
     refreshUrl: str | None = None
@@ -219,7 +219,7 @@ class ClientCredentialsFlow(LenientRefModel):
 
 
 class AuthorizationCodeOAuthFlow(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     authorizationUrl: str
     tokenUrl: str
@@ -299,7 +299,7 @@ class Tag(BaseModel):
 
 
 class OAuthFlows(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     implicit: ImplicitOAuthFlow | None = None
     password: PasswordOAuthFlow | None = None
@@ -308,7 +308,7 @@ class OAuthFlows(LenientRefModel):
 
 
 class Link(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     operationId: str | None = None
     operationRef: str | None = None
@@ -1352,7 +1352,7 @@ class Response(BaseModel):
 
 
 class MediaType(LenientRefModel):
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
 
     schema_: Reference | Schema | None = Field(None, alias='schema')
     example: Any | None = None
@@ -1456,7 +1456,7 @@ class RequestBody(BaseModel):
 
 
 class Encoding(LenientRefModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='allow')
 
     contentType: str | None = None
     headers: dict[str, Header | Reference] | None = None

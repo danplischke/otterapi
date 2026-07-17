@@ -85,7 +85,10 @@ class SchemaLoader:
                     from the specification (e.g. stray keys emitted by some
                     generators) instead of failing validation. Dropped fields
                     are reported as warnings. Vendor extensions (``x-*``) are
-                    always preserved.
+                    always preserved, in both strict and lenient mode. The one
+                    exception is the type-discriminated security-scheme objects,
+                    which still reject unknown keys (including ``x-*``) so their
+                    variant union stays unambiguous.
         """
         self._http_client = http_client
         self._resolve_external_refs = resolve_external_refs
