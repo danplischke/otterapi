@@ -15,6 +15,8 @@ from pydantic import (
     StringConstraints,
 )
 
+from otterapi.openapi._lenient import LenientRefModel
+
 # Import OpenAPI 3.1 models for upgrade functionality
 from otterapi.openapi.v3_1 import v3_1 as openapi_v3_1
 from otterapi.openapi.warnings import WarningCollector
@@ -48,8 +50,8 @@ class License(BaseModel):
     url: str | None = None
 
 
-class ServerVariable(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class ServerVariable(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     enum: list[str] | None = None
     default: str
@@ -80,8 +82,8 @@ class XML(BaseModel):
     wrapped: bool | None = False
 
 
-class Example(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class Example(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     summary: str | None = None
     description: str | None = None
@@ -192,32 +194,32 @@ class OpenIdConnectSecurityScheme(BaseModel):
     description: str | None = None
 
 
-class ImplicitOAuthFlow(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class ImplicitOAuthFlow(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     authorizationUrl: str
     refreshUrl: str | None = None
     scopes: dict[str, str]
 
 
-class PasswordOAuthFlow(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class PasswordOAuthFlow(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     tokenUrl: str
     refreshUrl: str | None = None
     scopes: dict[str, str]
 
 
-class ClientCredentialsFlow(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class ClientCredentialsFlow(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     tokenUrl: str
     refreshUrl: str | None = None
     scopes: dict[str, str]
 
 
-class AuthorizationCodeOAuthFlow(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class AuthorizationCodeOAuthFlow(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     authorizationUrl: str
     tokenUrl: str
@@ -296,8 +298,8 @@ class Tag(BaseModel):
     externalDocs: ExternalDocumentation | None = None
 
 
-class OAuthFlows(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class OAuthFlows(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     implicit: ImplicitOAuthFlow | None = None
     password: PasswordOAuthFlow | None = None
@@ -305,8 +307,8 @@ class OAuthFlows(BaseModel):
     authorizationCode: AuthorizationCodeOAuthFlow | None = None
 
 
-class Link(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class Link(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     operationId: str | None = None
     operationRef: str | None = None
@@ -1349,8 +1351,8 @@ class Response(BaseModel):
     links: dict[str, Link | Reference] | None = None
 
 
-class MediaType(BaseModel):
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
+class MediaType(LenientRefModel):
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
 
     schema_: Reference | Schema | None = Field(None, alias='schema')
     example: Any | None = None
@@ -1453,8 +1455,8 @@ class RequestBody(BaseModel):
     required: bool | None = False
 
 
-class Encoding(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+class Encoding(LenientRefModel):
+    model_config = ConfigDict(extra='allow')
 
     contentType: str | None = None
     headers: dict[str, Header | Reference] | None = None

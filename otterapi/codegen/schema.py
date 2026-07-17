@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 import yaml
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from otterapi.exceptions import (
     SchemaLoadError,
@@ -69,6 +69,7 @@ class SchemaLoader:
         http_client: httpx.Client | None = None,
         resolve_external_refs: bool = False,
         base_path: str | Path | None = None,
+        lenient: bool = False,
     ):
         """Initialize the schema loader.
 
@@ -80,12 +81,21 @@ class SchemaLoader:
                                   will be loaded and inlined.
             base_path: Base path for resolving relative file references.
                       Defaults to current working directory.
+            lenient: When True, drop unrecognized, structurally-invalid fields
+                    from the specification (e.g. stray keys emitted by some
+                    generators) instead of failing validation. Dropped fields
+                    are reported as warnings. Vendor extensions (``x-*``) are
+                    always preserved, in both strict and lenient mode. The one
+                    exception is the type-discriminated security-scheme objects,
+                    which still reject unknown keys (including ``x-*``) so their
+                    variant union stays unambiguous.
         """
         self._http_client = http_client
         self._resolve_external_refs = resolve_external_refs
         self._base_path = Path(base_path) if base_path else Path.cwd()
         self._external_cache: dict[str, dict] = {}
         self._upgrade_warnings: list[str] = []
+        self._lenient = lenient
 
     def load(self, source: str) -> OpenAPIv3:
         """Load and validate an OpenAPI schema from a URL or file path.
@@ -286,11 +296,28 @@ class SchemaLoader:
     def _validate_and_upgrade(self, content: dict, source: str) -> OpenAPIv3:
         """Validate and upgrade schema content to OpenAPI 3.2."""
         self._upgrade_warnings = []
+        dropped_keys: set[str] = set()
+        context = {'lenient': self._lenient, 'dropped_keys': dropped_keys}
 
         try:
             universal: UniversalOpenAPI = TypeAdapter(UniversalOpenAPI).validate_python(
-                content
+                content, context=context
             )
+        except ValidationError as e:
+            raise SchemaValidationError(
+                source, errors=self._format_validation_errors(e)
+            )
+
+        if dropped_keys:
+            summary = (
+                f'Lenient mode dropped {len(dropped_keys)} unrecognized field '
+                f'name(s) from the specification: '
+                f'{", ".join(sorted(dropped_keys))}'
+            )
+            logger.warning(summary)
+            self._upgrade_warnings.append(summary)
+
+        try:
             schema = universal.root
 
             if isinstance(schema, OpenAPIv3):
@@ -304,6 +331,31 @@ class SchemaLoader:
 
         except Exception as e:
             raise SchemaValidationError(source, errors=[str(e)])
+
+    def _format_validation_errors(
+        self, error: ValidationError, limit: int = 15
+    ) -> list[str]:
+        """Render a pydantic ``ValidationError`` into concise, de-duplicated
+        messages, grouping identical problems that repeat across the document.
+        """
+        grouped: dict[str, str] = {}
+        for err in error.errors():
+            msg = err.get('msg', '')
+            loc = '.'.join(str(part) for part in err.get('loc', ()) if str(part))
+            grouped.setdefault(msg, loc)
+
+        messages = [f'{loc}: {msg}' if loc else msg for msg, loc in grouped.items()]
+        if len(messages) > limit:
+            hidden = len(messages) - limit
+            messages = messages[:limit]
+            messages.append(f'... and {hidden} more distinct validation error(s)')
+
+        if not self._lenient:
+            messages.append(
+                'Hint: re-run with --lenient (or set lenient: true in your '
+                'config) to drop unrecognized fields instead of failing.'
+            )
+        return messages
 
 
 # =============================================================================

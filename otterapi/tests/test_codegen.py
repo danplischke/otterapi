@@ -364,6 +364,181 @@ class TestCodegen:
         assert 'limit' in param_names
         assert 'status' in param_names
 
+    def test_extract_operation_parameters_disambiguates_colliding_names(
+        self, temp_output_dir
+    ):
+        """Distinct params that sanitize to the same identifier must not emit a
+        duplicate function argument.
+
+        Collisions arise from same-name/different-location params (``id`` in
+        both query and header) and from names that differ only by separators
+        (``user id`` vs ``user-id`` both sanitize to ``user_id``). The wire name
+        (``param.name``) must be preserved; only the Python identifier changes.
+        """
+        spec = {
+            'openapi': '3.1.0',
+            'info': {'title': 'Colliding Params', 'version': '1.0.0'},
+            'paths': {
+                '/items': {
+                    'get': {
+                        'operationId': 'listItems',
+                        'parameters': [
+                            {'name': 'id', 'in': 'query', 'schema': {'type': 'string'}},
+                            {
+                                'name': 'id',
+                                'in': 'header',
+                                'schema': {'type': 'string'},
+                            },
+                            {
+                                'name': 'user id',
+                                'in': 'query',
+                                'schema': {'type': 'string'},
+                            },
+                            {
+                                'name': 'user-id',
+                                'in': 'header',
+                                'schema': {'type': 'string'},
+                            },
+                        ],
+                        'responses': {'200': {'description': 'ok'}},
+                    }
+                }
+            },
+        }
+        spec_file = temp_output_dir / 'colliding.json'
+        spec_file.write_text(json.dumps(spec))
+        config = DocumentConfig(
+            source=str(spec_file), output=str(temp_output_dir / 'output')
+        )
+        codegen = Codegen(config)
+        codegen._load_schema()
+
+        op = codegen.openapi.paths.root['/items'].get
+        params = codegen._extract_operation_parameters(op)
+
+        sanitized = [p.name_sanitized for p in params]
+        # Generated Python identifiers must all be unique and valid identifiers.
+        assert len(sanitized) == len(set(sanitized))
+        assert all(name.isidentifier() for name in sanitized)
+        # Wire names are preserved unchanged.
+        assert sorted(p.name for p in params) == ['id', 'id', 'user id', 'user-id']
+        # Colliding identifiers get a numeric suffix rather than duplicating.
+        assert {'id', 'id_2'} <= set(sanitized)
+        assert {'user_id', 'user_id_2'} <= set(sanitized)
+
+    def test_function_naming_from_path_avoids_operation_id_collisions(
+        self, temp_output_dir
+    ):
+        """``function_naming='path'`` names functions from the method and path.
+
+        Specs that reuse a single ``operationId`` across distinct paths (common
+        in Swashbuckle/.NET output) otherwise collapse to one name with numeric
+        suffixes. Path-based naming yields distinct, descriptive names instead.
+        """
+        spec = {
+            'openapi': '3.1.0',
+            'info': {'title': 'Shared Op Ids', 'version': '1.0.0'},
+            'paths': {
+                '/v1/feed/trial/changes': {
+                    'get': {
+                        'operationId': 'Feed_Changes',
+                        'responses': {'200': {'description': 'ok'}},
+                    }
+                },
+                '/v1/feed/hcp/profile/changes': {
+                    'get': {
+                        'operationId': 'Feed_Changes',
+                        'responses': {'200': {'description': 'ok'}},
+                    }
+                },
+            },
+        }
+        spec_file = temp_output_dir / 'shared_ops.json'
+        spec_file.write_text(json.dumps(spec))
+
+        # Default (operation_id) mode: both share ``Feed_Changes`` and only stay
+        # distinct because of the de-duplication suffix.
+        default_cfg = DocumentConfig(
+            source=str(spec_file), output=str(temp_output_dir / 'out_default')
+        )
+        default_gen = Codegen(default_cfg)
+        default_gen._load_schema()
+        default_names = {ep.sync_fn_name for ep in default_gen._generate_endpoints()}
+        assert 'feed_changes' in default_names
+        assert 'feed_changes_2' in default_names
+
+        # Path mode: names come from the method + path, so both are meaningful
+        # and unique without any numeric suffix.
+        path_cfg = DocumentConfig(
+            source=str(spec_file),
+            output=str(temp_output_dir / 'out_path'),
+            function_naming='path',
+        )
+        path_gen = Codegen(path_cfg)
+        path_gen._load_schema()
+        path_names = {ep.sync_fn_name for ep in path_gen._generate_endpoints()}
+        assert path_names == {
+            'get_v1_feed_trial_changes',
+            'get_v1_feed_hcp_profile_changes',
+        }
+
+    def test_duplicate_status_codes_collapse_to_single_response_type(
+        self, temp_output_dir
+    ):
+        """Multiple status codes pointing at the same schema must collapse to a
+        single response type, not a redundant ``X | X`` union.
+        """
+        count_schema = {
+            'type': 'object',
+            'properties': {'count': {'type': 'integer'}},
+        }
+        spec = {
+            'openapi': '3.1.0',
+            'info': {'title': 'Dup Responses', 'version': '1.0.0'},
+            'components': {'schemas': {'Count': count_schema}},
+            'paths': {
+                '/count': {
+                    'get': {
+                        'operationId': 'getCount',
+                        'responses': {
+                            '200': {
+                                'description': 'ok',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {'$ref': '#/components/schemas/Count'}
+                                    }
+                                },
+                            },
+                            '201': {
+                                'description': 'created',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {'$ref': '#/components/schemas/Count'}
+                                    }
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        spec_file = temp_output_dir / 'dup_responses.json'
+        spec_file.write_text(json.dumps(spec))
+        config = DocumentConfig(
+            source=str(spec_file), output=str(temp_output_dir / 'output')
+        )
+        codegen = Codegen(config)
+        codegen._load_schema()
+
+        op = codegen.openapi.paths.root['/count'].get
+        _, response_type = codegen._get_response_models(op)
+
+        assert response_type is not None
+        rendered = ast.unparse(response_type.annotation_ast)
+        members = [m.strip() for m in rendered.split('|')]
+        # No repeated union member (would be "Count | Count" before the fix).
+        assert len(members) == len(set(members)), rendered
+
     def test_resolve_base_url(self, temp_output_dir, petstore_spec_file):
         """Test the _resolve_base_url method."""
         output_dir = temp_output_dir / 'output'

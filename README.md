@@ -9,6 +9,7 @@
 - **Type-Safe Code Generation** - Generates Pydantic models and fully typed endpoint functions
 - **Sync & Async Support** - Generate both synchronous and asynchronous API clients
 - **OpenAPI 3.x Support** - Full support for OpenAPI 3.0, 3.1, and 3.2 specifications
+- **Strict or Lenient Validation** - Fail fast on malformed specs, or drop stray fields with `--lenient` (vendor `x-*` extensions always preserved)
 - **Module Splitting** - Organize large APIs into multiple organized files
 - **Pagination** - Auto-detect or configure offset, cursor, page, and link-header pagination
 - **DataFrame Conversion** - Generate pandas/polars DataFrame methods for list endpoints
@@ -108,6 +109,7 @@ These sit at the root of your config file, outside of `documents:`.
 | `format_output` | bool | `true` | Format generated code with ruff/black |
 | `validate_output` | bool | `true` | Validate generated code syntax after writing |
 | `create_py_typed` | bool | `true` | Create `py.typed` marker files |
+| `lenient` | bool | `false` | Drop unrecognized, invalid fields instead of failing (see [Strict vs Lenient Validation](#-strict-vs-lenient-validation)) |
 
 ```yaml
 format_output: true
@@ -134,8 +136,25 @@ Each entry under `documents:` supports these fields:
 | `generate_async` | bool | `true` | Generate async endpoint functions |
 | `generate_sync` | bool | `true` | Generate sync endpoint functions |
 | `client_class_name` | string | from API title | Override the generated client class name |
+| `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
+
+#### Function Naming
+
+By default, endpoint function names come from each operation's `operationId`. Some
+specs (notably Swashbuckle/.NET output) reuse a single `operationId` across many
+distinct paths, which produces a pile of numerically-suffixed duplicates like
+`feed_changes`, `feed_changes_2`, … `feed_changes_43`. Set `function_naming: path`
+to derive names from the HTTP method and URL path instead, giving distinct,
+descriptive names:
+
+```yaml
+documents:
+  - source: https://api.example.com/swagger.json
+    output: ./client
+    function_naming: path   # get_v1_feed_trial_changes, get_v1_feed_hcp_profile_changes, ...
+```
 
 #### Path Filtering
 
@@ -172,6 +191,34 @@ You can also configure a single document entirely via environment variables (no 
 | `OTTER_BASE_URL` | Base URL override |
 | `OTTER_MODELS_FILE` | Models filename |
 | `OTTER_ENDPOINTS_FILE` | Endpoints filename |
+
+### 🔎 Strict vs Lenient Validation
+
+By default, OtterAPI validates specs **strictly**: an unrecognized or
+structurally-invalid field aborts generation with a clear error, catching
+malformed specs early.
+
+Some real-world specs (especially auto-generated Swagger 2.0 documents) carry
+stray, non-standard keys. Set `lenient: true` — or pass `--lenient` — to **drop**
+those fields instead of failing. Each dropped key is reported as a warning.
+
+```yaml
+lenient: true
+
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+```
+
+```bash
+otter generate --lenient
+```
+
+**Vendor extensions are always preserved.** OpenAPI specification extensions
+(`x-*`) are kept in both strict and lenient mode. The only exception is the
+type-discriminated security-scheme objects (`apiKey`, `http`, `oauth2`,
+`openIdConnect`), which still reject unknown keys so their variant stays
+unambiguous.
 
 ---
 
@@ -708,6 +755,9 @@ otter generate
 
 # Generate from specific config file
 otter generate -c my-config.yml
+
+# Tolerate malformed specs (drop unknown/invalid fields with a warning)
+otter generate --lenient
 
 # Initialize a new config file
 otter init

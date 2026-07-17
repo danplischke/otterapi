@@ -175,6 +175,7 @@ class Codegen(OpenAPIProcessor):
         validate_output: bool = True,
         generate_endpoints: bool = True,
         create_py_typed: bool = True,
+        lenient: bool = False,
     ):
         """Initialize the code generator.
 
@@ -186,12 +187,15 @@ class Codegen(OpenAPIProcessor):
             validate_output: Whether to validate generated code syntax.
             generate_endpoints: Whether to generate endpoint functions.
             create_py_typed: Whether to create a py.typed marker file.
+            lenient: Whether to drop unrecognized, structurally-invalid fields
+                from the input specification instead of failing validation.
+                Ignored when a custom ``schema_loader`` is supplied.
         """
         super().__init__(None)
         self.config = config
         self.openapi: OpenAPIv3_2 | None = None
         self.typegen: TypeGenerator | None = None
-        self._schema_loader = schema_loader or SchemaLoader()
+        self._schema_loader = schema_loader or SchemaLoader(lenient=lenient)
         self.format_output = format_output
         self.validate_output = validate_output
         self.generate_endpoints = generate_endpoints
@@ -347,6 +351,25 @@ class Codegen(OpenAPIProcessor):
 
         return []
 
+    @staticmethod
+    def _dedupe_types(types: list[Type]) -> list[Type]:
+        """Drop duplicate types (by rendered annotation), preserving order.
+
+        An operation often maps several status codes (e.g. ``200`` and
+        ``default``, or ``200`` and ``201``) to the same response model. Without
+        deduplication the response union collapses to ``X | X``.
+        """
+        seen: set[str] = set()
+        unique: list[Type] = []
+        for t in types:
+            key = (
+                ast.dump(t.annotation_ast) if t.annotation_ast is not None else repr(t)
+            )
+            if key not in seen:
+                seen.add(key)
+                unique.append(t)
+        return unique
+
     def _get_response_models(
         self, operation: Operation
     ) -> tuple[list[ResponseInfo], Type | None]:
@@ -370,7 +393,7 @@ class Codegen(OpenAPIProcessor):
         json_types = [r.type for r in response_list if r.is_json and r.type]
         non_json_types = self._collect_non_json_types(response_list)
 
-        all_types = json_types + non_json_types
+        all_types = self._dedupe_types(json_types + non_json_types)
 
         if len(all_types) == 0:
             return response_list, None
@@ -417,6 +440,22 @@ class Codegen(OpenAPIProcessor):
 
             if (param.name, param.in_) not in param_keys_seen:
                 all_params.append(self._build_parameter(param))
+
+        # Distinct OpenAPI parameters can map to the same Python identifier
+        # (e.g. a query and header of the same name, or "user id" and
+        # "user-id" which both sanitize to "user_id"), which would emit a
+        # function with a duplicate argument. Disambiguate the generated
+        # identifier while preserving the wire name (param.name).
+        used_names: set[str] = set()
+        for param in all_params:
+            candidate = param.name_sanitized
+            if candidate in used_names:
+                suffix = 2
+                while f'{candidate}_{suffix}' in used_names:
+                    suffix += 1
+                candidate = f'{candidate}_{suffix}'
+                param.name_sanitized = candidate
+            used_names.add(candidate)
 
         return all_params
 
@@ -587,11 +626,54 @@ class Codegen(OpenAPIProcessor):
 
         return params, body_info
 
+    @staticmethod
+    def _path_based_name(method: str, path: str) -> str:
+        """Derive a raw function name from an HTTP method and URL path.
+
+        Example: ``('get', '/v1/feed/trial/changes')`` ->
+        ``'get__v1_feed_trial_changes'`` (``to_snake_case`` collapses the stray
+        underscores afterwards). The method is always included so that different
+        verbs on the same path (e.g. GET vs POST ``/search/count``) stay distinct.
+        """
+        cleaned = path.replace('/', '_').replace('{', '').replace('}', '')
+        return f'{method}_{cleaned}'
+
+    def _raw_operation_name(self, method: str, path: str, operation: Operation) -> str:
+        """Return the pre-sanitized function name for an operation.
+
+        Honors the ``function_naming`` config option: ``'path'`` always derives
+        the name from the method and path (useful for specs that reuse
+        ``operationId`` across many paths, which otherwise collapse to a single
+        name with numeric suffixes); otherwise the ``operationId`` is used,
+        falling back to the path when it is absent.
+        """
+        if self.config.function_naming == 'path':
+            return self._path_based_name(method, path)
+        return operation.operationId or self._path_based_name(method, path)
+
+    @staticmethod
+    def _unique_fn_name(raw_name: str, used_names: set[str]) -> str:
+        """Snake-case ``raw_name`` and disambiguate it against ``used_names``.
+
+        Guarantees no two endpoints share a function name even when distinct
+        raw names sanitize to the same identifier (this can happen with
+        path-based naming, e.g. ``/feed/changes`` and ``/feed-changes``).
+        """
+        fn_name = to_snake_case(raw_name)
+        if fn_name in used_names:
+            suffix = 2
+            while f'{fn_name}_{suffix}' in used_names:
+                suffix += 1
+            fn_name = f'{fn_name}_{suffix}'
+        used_names.add(fn_name)
+        return fn_name
+
     def _generate_endpoint(
         self,
         path: str,
         method: str,
         operation: Operation,
+        fn_name: str,
         path_item_parameters: list | None = None,
     ) -> Endpoint:
         """Generate an endpoint with sync and async functions.
@@ -600,17 +682,12 @@ class Codegen(OpenAPIProcessor):
             path: The API path for the endpoint.
             method: The HTTP method (get, post, etc.).
             operation: The OpenAPI operation definition.
+            fn_name: The already sanitized and de-duplicated sync function name.
             path_item_parameters: Optional list of path-level parameters to inherit.
 
         Returns:
             An Endpoint object containing the generated functions and imports.
         """
-        # Convert operationId to snake_case for Pythonic function names
-        raw_name = (
-            operation.operationId
-            or f'{method}_{path.replace("/", "_").replace("{", "").replace("}", "")}'
-        )
-        fn_name = to_snake_case(raw_name)
         async_fn_name = f'async_{fn_name}'
 
         parameters, request_body_info = self._get_param_model(
@@ -703,6 +780,7 @@ class Codegen(OpenAPIProcessor):
             List of generated Endpoint objects.
         """
         endpoints: list[Endpoint] = []
+        used_fn_names: set[str] = set()
         # Use the adapter for path access -- hides the "RootModel vs dict"
         # wrinkle from the rest of codegen (issue #3 item 10).
         for path, path_item in self._adapter.paths().items():
@@ -717,8 +795,12 @@ class Codegen(OpenAPIProcessor):
             for method in HTTP_METHODS:
                 operation = getattr(path_item, method, None)
                 if operation:
+                    fn_name = self._unique_fn_name(
+                        self._raw_operation_name(method, path, operation),
+                        used_fn_names,
+                    )
                     ep = self._generate_endpoint(
-                        path, method, operation, path_item_parameters
+                        path, method, operation, fn_name, path_item_parameters
                     )
                     endpoints.append(ep)
         return endpoints
@@ -933,6 +1015,7 @@ class Codegen(OpenAPIProcessor):
             'next_cursor_path': pag_config.next_cursor_path,
             'total_pages_path': pag_config.total_pages_path,
             'default_page_size': pag_config.default_page_size,
+            'send_page_size': pag_config.send_page_size,
         }
 
     def _emit_paginated_endpoint_methods(

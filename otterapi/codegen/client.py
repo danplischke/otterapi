@@ -692,6 +692,12 @@ def generate_base_client_class(
     # Build lifecycle methods
     lifecycle_methods = _build_lifecycle_methods()
 
+    # Build _before_request hook method (pre-send request customization)
+    before_request_method = _build_before_request_method()
+
+    # Build _async_before_request hook method (async pre-send customization)
+    async_before_request_method = _build_async_before_request_method()
+
     # Build _request method (sync)
     request_method = _build_request_method(is_async=False)
 
@@ -743,6 +749,8 @@ Args:
         ),
         init_method,
         *lifecycle_methods,
+        before_request_method,
+        async_before_request_method,
         request_method,
         async_request_method,
         request_json_method,
@@ -1060,6 +1068,137 @@ def _build_validate_response_method() -> ast.FunctionDef:
         body=body,
         decorator_list=[],
         returns=ast.Constant(value=None),
+    )
+
+
+def _build_before_request_method() -> ast.FunctionDef:
+    """Build the ``_before_request`` hook method.
+
+    Called just before each HTTP request is sent (sync and async), on every
+    attempt including retries. Subclasses override it to modify the outgoing
+    request or perform side effects.
+    """
+    args = ast.arguments(
+        posonlyargs=[],
+        args=[
+            _argument('self'),
+            _argument('request', _name('dict')),
+        ],
+        kwonlyargs=[],
+        kw_defaults=[],
+        kwarg=None,
+        defaults=[],
+    )
+
+    docstring = """Hook called just before each HTTP request is sent.
+
+        Override this method to modify the outgoing request (add headers,
+        tweak params, refresh an auth token, rewrite the URL) or to perform
+        side effects (logging, metrics, tracing). It runs on every attempt,
+        including retries.
+
+        The ``request`` mapping holds the keyword arguments passed to
+        ``httpx.Client.request`` / ``httpx.AsyncClient.request``:
+        ``method``, ``url``, ``params``, ``headers``, ``json``, ``data``,
+        ``files``, ``content`` and ``timeout``.
+
+        Mutate ``request`` in place and/or return the mapping to use. Returning
+        ``None`` keeps the (possibly mutated) original. To override the HTTP
+        client itself, reassign ``self._sync_client`` / ``self._async_client``
+        here.
+
+        Args:
+            request: Mutable mapping of httpx request keyword arguments.
+
+        Returns:
+            The request mapping to send (or None to use the original).
+
+        Example:
+            def _before_request(self, request):
+                request['headers']['Authorization'] = f'Bearer {self.token()}'
+                return request
+        """
+
+    body: list[ast.stmt] = [
+        ast.Expr(value=ast.Constant(value=docstring)),
+        ast.Return(value=_name('request')),
+    ]
+
+    return ast.FunctionDef(
+        name='_before_request',
+        args=args,
+        body=body,
+        decorator_list=[],
+        returns=_name('dict'),
+    )
+
+
+def _build_async_before_request_method() -> ast.AsyncFunctionDef:
+    """Build the ``_async_before_request`` hook method.
+
+    Awaited just before each async HTTP request is sent, on every attempt
+    including retries. Defaults to delegating to the synchronous
+    ``_before_request`` hook so a single sync override applies to both sync and
+    async requests. Subclasses override this when the hook needs to ``await``
+    (e.g. refresh an OAuth token) or mutate the async client.
+    """
+    args = ast.arguments(
+        posonlyargs=[],
+        args=[
+            _argument('self'),
+            _argument('request', _name('dict')),
+        ],
+        kwonlyargs=[],
+        kw_defaults=[],
+        kwarg=None,
+        defaults=[],
+    )
+
+    docstring = """Async hook called just before each async HTTP request is sent.
+
+        This is the asynchronous counterpart of ``_before_request``. It is
+        awaited on every async attempt, including retries. By default it
+        delegates to ``_before_request``, so overriding only the synchronous
+        hook customizes both sync and async requests.
+
+        Override this method (instead of ``_before_request``) when the hook must
+        ``await`` something — for example refreshing an OAuth token, reading
+        from an async cache, or awaiting a rate limiter. To override the HTTP
+        client itself, reassign ``self._async_client`` here.
+
+        The ``request`` mapping holds the keyword arguments passed to
+        ``httpx.AsyncClient.request``: ``method``, ``url``, ``params``,
+        ``headers``, ``json``, ``data``, ``files``, ``content`` and ``timeout``.
+
+        Mutate ``request`` in place and/or return the mapping to use. Returning
+        ``None`` keeps the (possibly mutated) original.
+
+        Args:
+            request: Mutable mapping of httpx request keyword arguments.
+
+        Returns:
+            The request mapping to send (or None to use the original).
+
+        Example:
+            async def _async_before_request(self, request):
+                token = await self.refresh_token()
+                request['headers']['Authorization'] = f'Bearer {token}'
+                return request
+        """
+
+    body: list[ast.stmt] = [
+        ast.Expr(value=ast.Constant(value=docstring)),
+        ast.Return(
+            value=_call(_attr('self', '_before_request'), args=[_name('request')])
+        ),
+    ]
+
+    return ast.AsyncFunctionDef(
+        name='_async_before_request',
+        args=args,
+        body=body,
+        decorator_list=[],
+        returns=_name('dict'),
     )
 
 
@@ -1388,19 +1527,71 @@ def _build_filtered_params_expr() -> ast.expr:
     )
 
 
-def _build_request_keywords(
-    merged_headers: ast.expr, timeout_expr: ast.expr
-) -> list[ast.keyword]:
-    """Shared keyword args for httpx request calls."""
-    return [
-        ast.keyword(arg='params', value=_name('filtered_params')),
-        ast.keyword(arg='headers', value=merged_headers),
-        ast.keyword(arg='json', value=_name('json')),
-        ast.keyword(arg='data', value=_name('data')),
-        ast.keyword(arg='files', value=_name('files')),
-        ast.keyword(arg='content', value=_name('content')),
-        ast.keyword(arg='timeout', value=timeout_expr),
-    ]
+def _build_request_dict(
+    url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
+) -> ast.Dict:
+    """Build the mutable request-kwargs dict passed through ``_before_request``.
+
+    Keys match ``httpx.Client.request`` parameters so the dict can be splatted
+    with ``**request`` into the send call.
+    """
+    return ast.Dict(
+        keys=[
+            ast.Constant(value='method'),
+            ast.Constant(value='url'),
+            ast.Constant(value='params'),
+            ast.Constant(value='headers'),
+            ast.Constant(value='json'),
+            ast.Constant(value='data'),
+            ast.Constant(value='files'),
+            ast.Constant(value='content'),
+            ast.Constant(value='timeout'),
+        ],
+        values=[
+            _name('method'),
+            url_expr,
+            _name('filtered_params'),
+            merged_headers,
+            _name('json'),
+            _name('data'),
+            _name('files'),
+            _name('content'),
+            timeout_expr,
+        ],
+    )
+
+
+def _build_before_request_call() -> ast.stmt:
+    """Build: ``request = self._before_request(request) or request``."""
+    return _assign(
+        _name('request'),
+        ast.BoolOp(
+            op=ast.Or(),
+            values=[
+                _call(_attr('self', '_before_request'), args=[_name('request')]),
+                _name('request'),
+            ],
+        ),
+    )
+
+
+def _build_async_before_request_call() -> ast.stmt:
+    """Build: ``request = await self._async_before_request(request) or request``."""
+    return _assign(
+        _name('request'),
+        ast.BoolOp(
+            op=ast.Or(),
+            values=[
+                ast.Await(
+                    value=_call(
+                        _attr('self', '_async_before_request'),
+                        args=[_name('request')],
+                    )
+                ),
+                _name('request'),
+            ],
+        ),
+    )
 
 
 def _build_retry_check(backoff_fn: str, is_async: bool) -> ast.If:
@@ -1495,16 +1686,22 @@ def _build_sync_request_body(
         _name('filtered_params'), _build_filtered_params_expr()
     )
 
+    request_dict_stmt = _assign(
+        _name('request'), _build_request_dict(url_expr, merged_headers, timeout_expr)
+    )
+    before_request_stmt = _build_before_request_call()
+
     request_stmt = _assign(
         _name('response'),
         _call(
             _attr(_attr('self', '_sync_client'), 'request'),
-            args=[_name('method'), url_expr],
-            keywords=_build_request_keywords(merged_headers, timeout_expr),
+            keywords=[ast.keyword(arg=None, value=_name('request'))],
         ),
     )
 
     try_body = [
+        request_dict_stmt,
+        before_request_stmt,
         request_stmt,
         _build_retry_check('_backoff_sleep', is_async=False),
         ast.Return(value=_name('response')),
@@ -1549,23 +1746,27 @@ def _build_async_request_body(
         _name('filtered_params'), _build_filtered_params_expr()
     )
 
+    request_dict_stmt = _assign(
+        _name('request'), _build_request_dict(url_expr, merged_headers, timeout_expr)
+    )
+    before_request_stmt = _build_async_before_request_call()
+
     def _request_call(client_expr: ast.expr) -> ast.stmt:
         return _assign(
             _name('response'),
             ast.Await(
                 value=_call(
                     _attr(client_expr, 'request'),
-                    args=[_name('method'), url_expr],
-                    keywords=_build_request_keywords(merged_headers, timeout_expr),
+                    keywords=[ast.keyword(arg=None, value=_name('request'))],
                 )
             ),
         )
 
     # if self._async_client is not None:
-    #     response = await self._async_client.request(...)
+    #     response = await self._async_client.request(**request)
     # else:
     #     async with AsyncClient() as _owned_ac:
-    #         response = await _owned_ac.request(...)
+    #         response = await _owned_ac.request(**request)
     async_with_stmt = ast.AsyncWith(
         items=[
             ast.withitem(
@@ -1587,6 +1788,8 @@ def _build_async_request_body(
     )
 
     try_body = [
+        request_dict_stmt,
+        before_request_stmt,
         client_if,
         _build_retry_check('_backoff_sleep_async', is_async=True),
         ast.Return(value=_name('response')),

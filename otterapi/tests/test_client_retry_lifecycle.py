@@ -6,6 +6,7 @@ to generate a real client once, then exercises retry and context-manager behavio
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 from pathlib import Path
@@ -177,3 +178,139 @@ class TestLifecycle:
         client = Client(async_http_client=async_http)
         await client.aclose()
         assert async_http.is_closed
+
+
+class TestBeforeRequestHook:
+    def test_default_hook_returns_request_unchanged(self, retry_pkg):
+        client = retry_pkg.Client()
+        request = {'headers': {}}
+        assert client._before_request(request) is request
+
+    def test_override_can_modify_outgoing_request(self, retry_pkg):
+        seen = {}
+
+        def handler(request):
+            seen['auth'] = request.headers.get('authorization')
+            return httpx.Response(200, json=[])
+
+        class CustomClient(retry_pkg.Client):
+            def _before_request(self, request):
+                request['headers']['Authorization'] = 'Bearer test-token'
+                return request
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = CustomClient(http_client=http, max_retries=0)
+            retry_pkg.list_users(client=client)
+        assert seen['auth'] == 'Bearer test-token'
+
+    def test_hook_runs_on_every_attempt_including_retries(self, retry_pkg):
+        calls = 0
+
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return httpx.Response(503, json={'detail': 'unavailable'})
+            return httpx.Response(200, json=[])
+
+        hook_calls = 0
+
+        class CountingClient(retry_pkg.Client):
+            def _before_request(self, request):
+                nonlocal hook_calls
+                hook_calls += 1
+                return request
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = CountingClient(http_client=http, max_retries=3)
+            with patch.object(retry_pkg._client, '_backoff_sleep'):
+                retry_pkg.list_users(client=client)
+        assert hook_calls == 3
+
+    def test_returning_none_keeps_mutated_request(self, retry_pkg):
+        seen = {}
+
+        def handler(request):
+            seen['auth'] = request.headers.get('authorization')
+            return httpx.Response(200, json=[])
+
+        class NoneReturningClient(retry_pkg.Client):
+            def _before_request(self, request):
+                request['headers']['Authorization'] = 'Bearer via-none'
+                # Intentionally return None to exercise the ``or request`` path.
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = NoneReturningClient(http_client=http, max_retries=0)
+            retry_pkg.list_users(client=client)
+        assert seen['auth'] == 'Bearer via-none'
+
+    def test_default_async_hook_returns_request_unchanged(self, retry_pkg):
+        async def run():
+            client = retry_pkg.Client()
+            request = {'headers': {}}
+            return await client._async_before_request(request), request
+
+        result, request = asyncio.run(run())
+        assert result is request
+
+    @pytest.mark.asyncio
+    async def test_async_default_delegates_to_sync_hook(self, retry_pkg):
+        seen = {}
+
+        def handler(request):
+            seen['auth'] = request.headers.get('authorization')
+            return httpx.Response(200, json=[])
+
+        class SyncOnlyClient(retry_pkg.Client):
+            def _before_request(self, request):
+                request['headers']['Authorization'] = 'Bearer sync-hook'
+                return request
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = SyncOnlyClient(async_http_client=http, max_retries=0)
+            await retry_pkg.async_list_users(client=client)
+        assert seen['auth'] == 'Bearer sync-hook'
+
+    @pytest.mark.asyncio
+    async def test_async_hook_can_await(self, retry_pkg):
+        seen = {}
+
+        def handler(request):
+            seen['auth'] = request.headers.get('authorization')
+            return httpx.Response(200, json=[])
+
+        class AsyncHookClient(retry_pkg.Client):
+            async def _async_before_request(self, request):
+                await asyncio.sleep(0)
+                request['headers']['Authorization'] = 'Bearer async-hook'
+                return request
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = AsyncHookClient(async_http_client=http, max_retries=0)
+            await retry_pkg.async_list_users(client=client)
+        assert seen['auth'] == 'Bearer async-hook'
+
+    @pytest.mark.asyncio
+    async def test_async_hook_runs_on_every_attempt_including_retries(self, retry_pkg):
+        calls = 0
+
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return httpx.Response(503, json={'detail': 'unavailable'})
+            return httpx.Response(200, json=[])
+
+        hook_calls = 0
+
+        class CountingAsyncClient(retry_pkg.Client):
+            async def _async_before_request(self, request):
+                nonlocal hook_calls
+                hook_calls += 1
+                return request
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = CountingAsyncClient(async_http_client=http, max_retries=3)
+            with patch.object(retry_pkg._client, '_backoff_sleep_async'):
+                await retry_pkg.async_list_users(client=client)
+        assert hook_calls == 3

@@ -170,6 +170,7 @@ def _generate_document(
     validate_output: bool = True,
     generate_endpoints: bool = True,
     create_py_typed: bool = True,
+    lenient: bool = False,
 ) -> None:
     """Run code generation for a single document, with a progress spinner."""
     with Progress(
@@ -188,6 +189,7 @@ def _generate_document(
             validate_output=validate_output,
             generate_endpoints=generate_endpoints,
             create_py_typed=create_py_typed,
+            lenient=lenient,
         )
         generated_files = codegen.generate()
         progress.update(
@@ -222,6 +224,16 @@ def generate(
         bool, typer.Option('--verbose', '-v', help='Enable verbose output')
     ] = False,
     debug: Annotated[bool, typer.Option('--debug', help='Enable debug output')] = False,
+    lenient: Annotated[
+        bool,
+        typer.Option(
+            '--lenient',
+            help=(
+                'Drop unrecognized, structurally-invalid fields from the spec '
+                'instead of failing validation (with a warning)'
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Generate Python client code from OpenAPI specifications.
 
@@ -234,6 +246,7 @@ def generate(
         otterapi generate -c config.json
         otterapi generate --source https://api.example.com/openapi.json --output ./client
         otterapi generate -s ./api.yaml -o ./generated
+        otterapi generate -s ./api.yaml -o ./generated --lenient
     """
     setup_logging(verbose, debug)
 
@@ -247,6 +260,7 @@ def generate(
                 validate_output=codegen_config.validate_output,
                 generate_endpoints=codegen_config.generate_endpoints,
                 create_py_typed=codegen_config.create_py_typed,
+                lenient=lenient or codegen_config.lenient,
             )
 
         console.print('\n[green]✓[/green] Code generation completed!')
