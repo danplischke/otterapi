@@ -1003,6 +1003,18 @@ class DocumentConfig(BaseModel):
         None, description='Optional name for a generated client class.'
     )
 
+    function_naming: Literal['operation_id', 'path'] = Field(
+        default='operation_id',
+        description=(
+            'How to derive generated endpoint function names. "operation_id" '
+            "(default) uses the spec's operationId. \"path\" derives the name "
+            'from the HTTP method and URL path instead, which avoids the many '
+            'numerically-suffixed duplicates (e.g. ``feed_changes2`` .. '
+            '``feed_changes43``) produced by specs that reuse the same '
+            'operationId across distinct paths.'
+        ),
+    )
+
     reexport_models: bool = Field(
         default=False,
         description=(

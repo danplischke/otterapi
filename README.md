@@ -136,8 +136,25 @@ Each entry under `documents:` supports these fields:
 | `generate_async` | bool | `true` | Generate async endpoint functions |
 | `generate_sync` | bool | `true` | Generate sync endpoint functions |
 | `client_class_name` | string | from API title | Override the generated client class name |
+| `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
+
+#### Function Naming
+
+By default, endpoint function names come from each operation's `operationId`. Some
+specs (notably Swashbuckle/.NET output) reuse a single `operationId` across many
+distinct paths, which produces a pile of numerically-suffixed duplicates like
+`feed_changes`, `feed_changes_2`, … `feed_changes_43`. Set `function_naming: path`
+to derive names from the HTTP method and URL path instead, giving distinct,
+descriptive names:
+
+```yaml
+documents:
+  - source: https://api.example.com/swagger.json
+    output: ./client
+    function_naming: path   # get_v1_feed_trial_changes, get_v1_feed_hcp_profile_changes, ...
+```
 
 #### Path Filtering
 

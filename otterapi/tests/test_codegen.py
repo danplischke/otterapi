@@ -426,6 +426,62 @@ class TestCodegen:
         assert {'id', 'id_2'} <= set(sanitized)
         assert {'user_id', 'user_id_2'} <= set(sanitized)
 
+    def test_function_naming_from_path_avoids_operation_id_collisions(
+        self, temp_output_dir
+    ):
+        """``function_naming='path'`` names functions from the method and path.
+
+        Specs that reuse a single ``operationId`` across distinct paths (common
+        in Swashbuckle/.NET output) otherwise collapse to one name with numeric
+        suffixes. Path-based naming yields distinct, descriptive names instead.
+        """
+        spec = {
+            'openapi': '3.1.0',
+            'info': {'title': 'Shared Op Ids', 'version': '1.0.0'},
+            'paths': {
+                '/v1/feed/trial/changes': {
+                    'get': {
+                        'operationId': 'Feed_Changes',
+                        'responses': {'200': {'description': 'ok'}},
+                    }
+                },
+                '/v1/feed/hcp/profile/changes': {
+                    'get': {
+                        'operationId': 'Feed_Changes',
+                        'responses': {'200': {'description': 'ok'}},
+                    }
+                },
+            },
+        }
+        spec_file = temp_output_dir / 'shared_ops.json'
+        spec_file.write_text(json.dumps(spec))
+
+        # Default (operation_id) mode: both share ``Feed_Changes`` and only stay
+        # distinct because of the de-duplication suffix.
+        default_cfg = DocumentConfig(
+            source=str(spec_file), output=str(temp_output_dir / 'out_default')
+        )
+        default_gen = Codegen(default_cfg)
+        default_gen._load_schema()
+        default_names = {ep.sync_fn_name for ep in default_gen._generate_endpoints()}
+        assert 'feed_changes' in default_names
+        assert 'feed_changes_2' in default_names
+
+        # Path mode: names come from the method + path, so both are meaningful
+        # and unique without any numeric suffix.
+        path_cfg = DocumentConfig(
+            source=str(spec_file),
+            output=str(temp_output_dir / 'out_path'),
+            function_naming='path',
+        )
+        path_gen = Codegen(path_cfg)
+        path_gen._load_schema()
+        path_names = {ep.sync_fn_name for ep in path_gen._generate_endpoints()}
+        assert path_names == {
+            'get_v1_feed_trial_changes',
+            'get_v1_feed_hcp_profile_changes',
+        }
+
     def test_resolve_base_url(self, temp_output_dir, petstore_spec_file):
         """Test the _resolve_base_url method."""
         output_dir = temp_output_dir / 'output'
