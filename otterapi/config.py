@@ -1091,6 +1091,8 @@ class CodegenConfig(BaseSettings):
         format_output: Whether to format generated code with black/ruff.
         validate_output: Whether to validate generated code syntax.
         create_py_typed: Whether to create py.typed marker files.
+        lenient: Whether to drop unrecognized, structurally-invalid fields
+            from the input specification instead of failing validation.
     """
 
     documents: list[DocumentConfig] = Field(
@@ -1111,6 +1113,15 @@ class CodegenConfig(BaseSettings):
 
     create_py_typed: bool = Field(
         True, description='Whether to create py.typed marker files.'
+    )
+
+    lenient: bool = Field(
+        False,
+        description=(
+            'Drop unrecognized, structurally-invalid fields from the input '
+            'specification instead of failing validation. Dropped fields are '
+            'reported as warnings; vendor extensions (x-*) are always kept.'
+        ),
     )
 
     @field_validator('documents')

@@ -218,6 +218,7 @@ class TestGenerateExportModule:
 
 class TestPydanticToArrowSchema:
     def test_maps_scalar_fields(self, exported_runtime):
+        pytest.importorskip('pyarrow')
         schema = exported_runtime.pydantic_to_arrow_schema(User)
         names = schema.names
         assert names == ['id', 'name', 'email', 'status', 'created_at', 'tags']
@@ -233,6 +234,7 @@ class TestPydanticToArrowSchema:
 
     def test_naive_datetime_maps_to_no_tz_timestamp(self, exported_runtime):
         """Naive datetime must not produce a UTC-timezone column (breaks at write time)."""
+        pytest.importorskip('pyarrow')
         schema = exported_runtime.pydantic_to_arrow_schema(User)
         dt_type = str(schema.field('created_at').type)
         assert 'timestamp' in dt_type
@@ -240,6 +242,7 @@ class TestPydanticToArrowSchema:
 
     def test_pydantic_datetime_sentinels_map_correctly(self, exported_runtime):
         """AwareDatetime (a Pydantic sentinel class) must resolve to timestamp, not string."""
+        pytest.importorskip('pyarrow')
         try:
             from pydantic import AwareDatetime
         except ImportError:
@@ -253,6 +256,7 @@ class TestPydanticToArrowSchema:
 
     def test_tuple_homogeneous_maps_to_list(self, exported_runtime):
         """tuple[T, ...] must map to list<T>, not crash."""
+        pytest.importorskip('pyarrow')
 
         class TupleModel(BaseModel):
             coords: tuple[float, ...]
@@ -262,6 +266,7 @@ class TestPydanticToArrowSchema:
 
     def test_tuple_heterogeneous_maps_to_string(self, exported_runtime):
         """tuple[A, B] must fall back to string rather than crashing."""
+        pytest.importorskip('pyarrow')
 
         class PairModel(BaseModel):
             pair: tuple[int, str]

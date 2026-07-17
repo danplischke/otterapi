@@ -19,6 +19,8 @@ from pydantic import (
     RootModel,
 )
 
+from .._lenient import LenientRefModel
+
 if TYPE_CHECKING:
     from ..v3_2 import v3_2
 
@@ -31,7 +33,7 @@ class Reference(BaseModel):
     description: str | None = None
 
 
-class Contact(BaseModel):
+class Contact(LenientRefModel):
     """Contact information for the API."""
 
     model_config = ConfigDict(extra='forbid')
@@ -43,7 +45,7 @@ class Contact(BaseModel):
     )
 
 
-class License(BaseModel):
+class License(LenientRefModel):
     """License information for the API."""
 
     model_config = ConfigDict(extra='forbid')
@@ -53,7 +55,7 @@ class License(BaseModel):
     url: str | None = None
 
 
-class ServerVariable(BaseModel):
+class ServerVariable(LenientRefModel):
     """Server variable for URL templating."""
 
     model_config = ConfigDict(extra='forbid')
@@ -82,7 +84,7 @@ class Discriminator(BaseModel):
     mapping: dict[str, str] | None = None
 
 
-class XML(BaseModel):
+class XML(LenientRefModel):
     """XML representation metadata."""
 
     model_config = ConfigDict(extra='forbid')
@@ -94,7 +96,7 @@ class XML(BaseModel):
     wrapped: bool | None = False
 
 
-class Example(BaseModel):
+class Example(LenientRefModel):
     """Example object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -111,7 +113,7 @@ class SecurityRequirement(RootModel[dict[str, list[str]]]):
     root: dict[str, list[str]]
 
 
-class ExternalDocumentation(BaseModel):
+class ExternalDocumentation(LenientRefModel):
     """External documentation reference."""
 
     model_config = ConfigDict(extra='forbid')
@@ -213,7 +215,7 @@ class OpenIdConnectSecurityScheme(BaseModel):
     description: str | None = None
 
 
-class ImplicitOAuthFlow(BaseModel):
+class ImplicitOAuthFlow(LenientRefModel):
     """OAuth2 implicit flow."""
 
     model_config = ConfigDict(extra='forbid')
@@ -223,7 +225,7 @@ class ImplicitOAuthFlow(BaseModel):
     scopes: dict[str, str]
 
 
-class PasswordOAuthFlow(BaseModel):
+class PasswordOAuthFlow(LenientRefModel):
     """OAuth2 password flow."""
 
     model_config = ConfigDict(extra='forbid')
@@ -233,7 +235,7 @@ class PasswordOAuthFlow(BaseModel):
     scopes: dict[str, str]
 
 
-class ClientCredentialsFlow(BaseModel):
+class ClientCredentialsFlow(LenientRefModel):
     """OAuth2 client credentials flow."""
 
     model_config = ConfigDict(extra='forbid')
@@ -243,7 +245,7 @@ class ClientCredentialsFlow(BaseModel):
     scopes: dict[str, str]
 
 
-class AuthorizationCodeOAuthFlow(BaseModel):
+class AuthorizationCodeOAuthFlow(LenientRefModel):
     """OAuth2 authorization code flow."""
 
     model_config = ConfigDict(extra='forbid')
@@ -260,7 +262,7 @@ class Callback(RootModel[dict[Annotated[str, Field(pattern=r'^x-')], Any]]):
     root: dict[Annotated[str, Field(pattern=r'^x-')], Any]
 
 
-class Info(BaseModel):
+class Info(LenientRefModel):
     """API metadata."""
 
     model_config = ConfigDict(extra='forbid')
@@ -274,7 +276,7 @@ class Info(BaseModel):
     version: str
 
 
-class Server(BaseModel):
+class Server(LenientRefModel):
     """Server object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -284,7 +286,7 @@ class Server(BaseModel):
     variables: dict[str, ServerVariable] | None = None
 
 
-class Schema(BaseModel):
+class Schema(LenientRefModel):
     """JSON Schema object for OpenAPI 3.1.
 
     OpenAPI 3.1 uses JSON Schema 2020-12 with some modifications.
@@ -348,7 +350,7 @@ class Schema(BaseModel):
     # Note: nullable is removed in 3.1, use type arrays instead
 
 
-class Tag(BaseModel):
+class Tag(LenientRefModel):
     """Tag for API operations."""
 
     model_config = ConfigDict(extra='forbid')
@@ -358,7 +360,7 @@ class Tag(BaseModel):
     externalDocs: ExternalDocumentation | None = None
 
 
-class OAuthFlows(BaseModel):
+class OAuthFlows(LenientRefModel):
     """OAuth2 flows configuration."""
 
     model_config = ConfigDict(extra='forbid')
@@ -369,7 +371,7 @@ class OAuthFlows(BaseModel):
     authorizationCode: AuthorizationCodeOAuthFlow | None = None
 
 
-class Link(BaseModel):
+class Link(LenientRefModel):
     """Link object for response links."""
 
     model_config = ConfigDict(extra='forbid')
@@ -410,7 +412,7 @@ class SecurityScheme(
     )
 
 
-class Components(BaseModel):
+class Components(LenientRefModel):
     """Components object for reusable definitions."""
 
     model_config = ConfigDict(extra='forbid')
@@ -471,7 +473,7 @@ class Components(BaseModel):
     ) = None  # New in 3.1
 
 
-class Response(BaseModel):
+class Response(LenientRefModel):
     """Response object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -482,7 +484,7 @@ class Response(BaseModel):
     links: dict[str, Link | Reference] | None = None
 
 
-class MediaType(BaseModel):
+class MediaType(LenientRefModel):
     """Media type object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -493,7 +495,7 @@ class MediaType(BaseModel):
     encoding: dict[str, Encoding] | None = None
 
 
-class Header(BaseModel):
+class Header(LenientRefModel):
     """Header object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -520,7 +522,7 @@ class Paths(RootModel[dict[str, 'PathItem']]):
     root: dict[str, PathItem]
 
 
-class PathItem(BaseModel):
+class PathItem(LenientRefModel):
     """Path item object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -540,7 +542,7 @@ class PathItem(BaseModel):
     parameters: list[Parameter | Reference] | None = None
 
 
-class Operation(BaseModel):
+class Operation(LenientRefModel):
     """Operation object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -568,7 +570,7 @@ class Responses(RootModel[dict[str, Response | Reference]]):
     pass
 
 
-class Parameter(BaseModel):
+class Parameter(LenientRefModel):
     """Parameter object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -588,7 +590,7 @@ class Parameter(BaseModel):
     examples: dict[str, Example | Reference] | None = None
 
 
-class RequestBody(BaseModel):
+class RequestBody(LenientRefModel):
     """Request body object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -598,7 +600,7 @@ class RequestBody(BaseModel):
     required: bool | None = False
 
 
-class Encoding(BaseModel):
+class Encoding(LenientRefModel):
     """Encoding object."""
 
     model_config = ConfigDict(extra='forbid')
@@ -616,7 +618,7 @@ class Webhook(RootModel[dict[str, Union['PathItem', Reference]]]):
     root: dict[str, PathItem | Reference]
 
 
-class OpenAPI(BaseModel):
+class OpenAPI(LenientRefModel):
     """OpenAPI 3.1 root document."""
 
     model_config = ConfigDict(extra='forbid')

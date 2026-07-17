@@ -57,7 +57,7 @@ Features:
 """
 
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -65,6 +65,7 @@ from pydantic import (
     Field,
     HttpUrl,
     RootModel,
+    ValidationInfo,
     model_validator,
 )
 
@@ -178,6 +179,78 @@ class BaseModelWithVendorExtensions(BaseModel):
     """Base model that allows vendor extensions (x- fields)."""
 
     model_config = ConfigDict(extra='allow', populate_by_name=True)
+
+
+class LenientModelWithVendorExtensions(BaseModel):
+    """Base model that preserves vendor extensions (``x-*``) and, when lenient
+    parsing is requested, drops other unknown, structurally-invalid fields.
+
+    Some upstream generators (e.g. NSwag) emit malformed Swagger 2.0 with stray
+    keys, such as HTTP status codes placed directly on an operation object. Those
+    keys are neither valid fields nor vendor extensions.
+
+    By default (strict) such keys raise a clear error so genuine mistakes in a
+    spec are surfaced loudly. When validation is called with
+    ``context={'lenient': True}`` (wired to the ``--lenient`` CLI flag / config
+    option) the keys are dropped instead and recorded in
+    ``context['dropped_keys']`` so the loader can warn about them once. Genuine
+    ``x-*`` extensions are always kept for the upgrade step, and declared fields
+    validate as usual.
+    """
+
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
+
+    # Subclasses whose *unknown* fields act as a union discriminator (e.g. the
+    # parameter variants, where ``type`` vs ``schema`` distinguishes a query
+    # parameter from a body parameter) set this to ``False`` so they always
+    # raise on unexpected keys. That keeps union resolution correct and avoids
+    # over-reporting fields that a sibling variant legitimately owns.
+    LENIENT_STRIPPABLE: ClassVar[bool] = True
+
+    @model_validator(mode='before')
+    @classmethod
+    def _handle_unknown_fields(cls, data: Any, info: ValidationInfo) -> Any:
+        if not isinstance(data, dict):
+            return data
+        allowed = set(cls.model_fields)
+        allowed.update(
+            field.alias for field in cls.model_fields.values() if field.alias
+        )
+        unknown = [
+            key
+            for key in data
+            if key not in allowed
+            and not (isinstance(key, str) and key.startswith('x-'))
+        ]
+        if not unknown:
+            return data
+
+        context = info.context or {}
+        if context.get('lenient') and cls.LENIENT_STRIPPABLE:
+            dropped = context.get('dropped_keys')
+            if dropped is not None:
+                dropped.update(str(key) for key in unknown)
+            return {
+                key: value for key, value in data.items() if key not in unknown
+            }
+
+        raise ValueError(
+            f'unexpected field(s) on {cls.__name__}: '
+            f'{", ".join(sorted(str(key) for key in unknown))}'
+        )
+
+
+class UnionVariantModel(LenientModelWithVendorExtensions):
+    """Lenient base for models resolved as members of a smart union.
+
+    Their unexpected keys are how the correct variant is chosen (e.g. ``type``
+    vs ``schema`` for parameters, or ``type``/``flow`` for security schemes), so
+    they must raise -- never silently drop -- even in lenient mode. Otherwise a
+    losing branch could strip a field a sibling variant legitimately owns, both
+    corrupting union resolution and over-reporting dropped fields.
+    """
+
+    LENIENT_STRIPPABLE: ClassVar[bool] = False
 
 
 class JsonReference(BaseModel):
@@ -339,7 +412,7 @@ class PrimitivesItems(BaseModelWithVendorExtensions):
     multiple_of: float | None = Field(None, alias='multipleOf', gt=0)
 
 
-class BaseParameterFields(BaseModelWithVendorExtensions):
+class BaseParameterFields(UnionVariantModel):
     """Common fields for all parameter types."""
 
     name: str
@@ -354,8 +427,6 @@ class BodyParameter(BaseParameterFields):
     in_: Literal[ParameterLocation.BODY] = Field(ParameterLocation.BODY, alias='in')
     schema_: Schema = Field(..., alias='schema')
     required: bool = False
-
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
 
 class NonBodyParameter(BaseParameterFields):
@@ -395,8 +466,6 @@ class NonBodyParameter(BaseParameterFields):
             raise ValueError('Path parameters must have required=True')
         return self
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
-
 
 Parameter = BodyParameter | NonBodyParameter | JsonReference
 
@@ -431,15 +500,13 @@ class Header(BaseModelWithVendorExtensions):
     description: str | None = None
 
 
-class Response(BaseModelWithVendorExtensions):
+class Response(LenientModelWithVendorExtensions):
     """Response object."""
 
     description: str
     schema_: Schema | FileSchema | None = Field(None, alias='schema')
     headers: dict[str, Header] | None = None
     examples: dict[str, Any] | None = None
-
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
 
 ResponseValue = Response | JsonReference
@@ -470,17 +537,19 @@ class Responses(BaseModelWithVendorExtensions):
         )
 
     @staticmethod
-    def _convert_response_value(value: Any) -> ResponseValue | Any:
+    def _convert_response_value(
+        value: Any, context: Any = None
+    ) -> ResponseValue | Any:
         """Convert a raw mapping value into a Response or JsonReference object."""
         if not isinstance(value, dict):
             return value
         if '$ref' in value:
-            return JsonReference(**value)
-        return Response(**value)
+            return JsonReference.model_validate(value, context=context)
+        return Response.model_validate(value, context=context)
 
     @model_validator(mode='before')
     @classmethod
-    def validate_and_convert_responses(cls, data: Any) -> Any:
+    def validate_and_convert_responses(cls, data: Any, info: ValidationInfo) -> Any:
         """Validate response keys and convert to Response objects."""
         if not isinstance(data, dict):
             return data
@@ -488,7 +557,7 @@ class Responses(BaseModelWithVendorExtensions):
         result = {}
         for key, value in data.items():
             cls._validate_response_key(key)
-            result[key] = cls._convert_response_value(value)
+            result[key] = cls._convert_response_value(value, info.context)
 
         return result
 
@@ -498,7 +567,7 @@ class Responses(BaseModelWithVendorExtensions):
 # ============================================================================
 
 
-class Operation(BaseModelWithVendorExtensions):
+class Operation(LenientModelWithVendorExtensions):
     """Operation (HTTP method) on a path."""
 
     tags: list[str] | None = None
@@ -514,10 +583,8 @@ class Operation(BaseModelWithVendorExtensions):
     deprecated: bool = False
     security: list[dict[str, list[str]]] | None = None
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
-
-class PathItem(BaseModelWithVendorExtensions):
+class PathItem(LenientModelWithVendorExtensions):
     """Path item with operations."""
 
     ref: str | None = Field(None, alias='$ref')
@@ -530,8 +597,6 @@ class PathItem(BaseModelWithVendorExtensions):
     patch: Operation | None = None
     parameters: list[Parameter] | None = None
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
-
 
 class Paths(RootModel[dict[str, PathItem | Any]]):
     """
@@ -542,7 +607,7 @@ class Paths(RootModel[dict[str, PathItem | Any]]):
 
     @model_validator(mode='before')
     @classmethod
-    def validate_and_convert_paths(cls, data: Any) -> Any:
+    def validate_and_convert_paths(cls, data: Any, info: ValidationInfo) -> Any:
         """Validate path keys and convert path items to PathItem objects."""
         if not isinstance(data, dict):
             return data
@@ -555,7 +620,7 @@ class Paths(RootModel[dict[str, PathItem | Any]]):
 
             # Convert dict values to PathItem objects for paths
             if key.startswith('/') and isinstance(value, dict):
-                result[key] = PathItem(**value)
+                result[key] = PathItem.model_validate(value, context=info.context)
             else:
                 result[key] = value
 
@@ -567,16 +632,14 @@ class Paths(RootModel[dict[str, PathItem | Any]]):
 # ============================================================================
 
 
-class BasicAuthenticationSecurity(BaseModelWithVendorExtensions):
+class BasicAuthenticationSecurity(UnionVariantModel):
     """Basic authentication security scheme."""
 
     type: Literal[SecuritySchemeType.BASIC]
     description: str | None = None
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
-
-class ApiKeySecurity(BaseModelWithVendorExtensions):
+class ApiKeySecurity(UnionVariantModel):
     """API key security scheme."""
 
     type: Literal[SecuritySchemeType.API_KEY]
@@ -584,10 +647,8 @@ class ApiKeySecurity(BaseModelWithVendorExtensions):
     in_: ApiKeyLocation = Field(..., alias='in')
     description: str | None = None
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
-
-class OAuth2ImplicitSecurity(BaseModelWithVendorExtensions):
+class OAuth2ImplicitSecurity(UnionVariantModel):
     """OAuth2 implicit flow security scheme."""
 
     type: Literal[SecuritySchemeType.OAUTH2]
@@ -596,10 +657,8 @@ class OAuth2ImplicitSecurity(BaseModelWithVendorExtensions):
     scopes: dict[str, str] = {}
     description: str | None = None
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
-
-class OAuth2PasswordSecurity(BaseModelWithVendorExtensions):
+class OAuth2PasswordSecurity(UnionVariantModel):
     """OAuth2 password flow security scheme."""
 
     type: Literal[SecuritySchemeType.OAUTH2]
@@ -608,10 +667,8 @@ class OAuth2PasswordSecurity(BaseModelWithVendorExtensions):
     scopes: dict[str, str] = {}
     description: str | None = None
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
-
-class OAuth2ApplicationSecurity(BaseModelWithVendorExtensions):
+class OAuth2ApplicationSecurity(UnionVariantModel):
     """OAuth2 application flow security scheme."""
 
     type: Literal[SecuritySchemeType.OAUTH2]
@@ -620,10 +677,8 @@ class OAuth2ApplicationSecurity(BaseModelWithVendorExtensions):
     scopes: dict[str, str] = {}
     description: str | None = None
 
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
-
-class OAuth2AccessCodeSecurity(BaseModelWithVendorExtensions):
+class OAuth2AccessCodeSecurity(UnionVariantModel):
     """OAuth2 access code flow security scheme."""
 
     type: Literal[SecuritySchemeType.OAUTH2]
@@ -632,8 +687,6 @@ class OAuth2AccessCodeSecurity(BaseModelWithVendorExtensions):
     token_url: HttpUrl = Field(..., alias='tokenUrl')
     scopes: dict[str, str] = {}
     description: str | None = None
-
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
 
 SecurityScheme = (
@@ -651,7 +704,7 @@ SecurityScheme = (
 # ============================================================================
 
 
-class Swagger(BaseModelWithVendorExtensions):
+class Swagger(LenientModelWithVendorExtensions):
     """
     Root Swagger 2.0 specification object.
 
@@ -675,8 +728,6 @@ class Swagger(BaseModelWithVendorExtensions):
     security: list[dict[str, list[str]]] | None = None
     tags: list[Tag] | None = None
     external_docs: ExternalDocs | None = Field(None, alias='externalDocs')
-
-    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
     def upgrade(self) -> tuple[OpenAPI, list[str]]:
         """

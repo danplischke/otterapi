@@ -175,6 +175,7 @@ class Codegen(OpenAPIProcessor):
         validate_output: bool = True,
         generate_endpoints: bool = True,
         create_py_typed: bool = True,
+        lenient: bool = False,
     ):
         """Initialize the code generator.
 
@@ -186,12 +187,15 @@ class Codegen(OpenAPIProcessor):
             validate_output: Whether to validate generated code syntax.
             generate_endpoints: Whether to generate endpoint functions.
             create_py_typed: Whether to create a py.typed marker file.
+            lenient: Whether to drop unrecognized, structurally-invalid fields
+                from the input specification instead of failing validation.
+                Ignored when a custom ``schema_loader`` is supplied.
         """
         super().__init__(None)
         self.config = config
         self.openapi: OpenAPIv3_2 | None = None
         self.typegen: TypeGenerator | None = None
-        self._schema_loader = schema_loader or SchemaLoader()
+        self._schema_loader = schema_loader or SchemaLoader(lenient=lenient)
         self.format_output = format_output
         self.validate_output = validate_output
         self.generate_endpoints = generate_endpoints
@@ -417,6 +421,21 @@ class Codegen(OpenAPIProcessor):
 
             if (param.name, param.in_) not in param_keys_seen:
                 all_params.append(self._build_parameter(param))
+
+        # Distinct OpenAPI parameters can map to the same Python identifier
+        # (e.g. "sort" and "Sort", or a query and header of the same name),
+        # which would emit a function with a duplicate argument. Disambiguate
+        # the generated identifier while preserving the wire name (param.name).
+        used_names: set[str] = set()
+        for param in all_params:
+            candidate = param.name_sanitized
+            if candidate in used_names:
+                suffix = 2
+                while f'{candidate}_{suffix}' in used_names:
+                    suffix += 1
+                candidate = f'{candidate}_{suffix}'
+                param.name_sanitized = candidate
+            used_names.add(candidate)
 
         return all_params
 
