@@ -761,11 +761,12 @@ class EndpointFunctionFactory:
             )
 
         # page_size: int = default_page_size
-        builder.add_custom_kwarg(
-            name='page_size',
-            annotation=_name('int'),
-            default=ast.Constant(value=default_page_size),
-        )
+        if not self._omit_page_size():
+            builder.add_custom_kwarg(
+                name='page_size',
+                annotation=_name('int'),
+                default=ast.Constant(value=default_page_size),
+            )
 
         # max_items: int | None = None
         builder.add_custom_kwarg(
@@ -1047,7 +1048,11 @@ class EndpointFunctionFactory:
             ast.keyword(arg='extract_items', value=extract_items),
             ast.keyword(arg='get_next_cursor', value=get_next_cursor),
             ast.keyword(arg='start_cursor', value=_name('cursor')),
-            ast.keyword(arg='page_size', value=_name('page_size')),
+            *(
+                []
+                if self._omit_page_size()
+                else [ast.keyword(arg='page_size', value=_name('page_size'))]
+            ),
             ast.keyword(arg='max_items', value=_name('max_items')),
         ]
 
@@ -1258,6 +1263,17 @@ class EndpointFunctionFactory:
 
         return body
 
+    def _omit_page_size(self) -> bool:
+        """Whether to drop the page-size (limit) query param.
+
+        Only honored for cursor style: some cursor APIs (e.g. forward-token
+        feeds) have no page-size parameter, so sending ``limit`` is noise.
+        """
+        if self.config.pagination_style != PaginationStyle.CURSOR:
+            return False
+        pag_config = self.config.pagination_config or {}
+        return not pag_config.get('send_page_size', True)
+
     def _pagination_param_names(self) -> tuple[str, str, str, str]:
         """Resolve fetch_page's (param1_name, param2_name, param1_api_name, param2_api_name)."""
         pag_config = self.config.pagination_config or {}
@@ -1294,11 +1310,11 @@ class EndpointFunctionFactory:
     ) -> ast.Dict:
         """Build the ``params`` dict: pagination params plus passthrough query params."""
         pag_config = self.config.pagination_config or {}
-        param_keys = [
-            ast.Constant(value=param1_api_name),
-            ast.Constant(value=param2_api_name),
-        ]
-        param_values = [_name(param1_name), _name(param2_name)]
+        param_keys = [ast.Constant(value=param1_api_name)]
+        param_values = [_name(param1_name)]
+        if not self._omit_page_size():
+            param_keys.append(ast.Constant(value=param2_api_name))
+            param_values.append(_name(param2_name))
 
         skip_params = {
             pag_config.get('offset_param'),

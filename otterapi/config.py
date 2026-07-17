@@ -212,6 +212,16 @@ class EndpointPaginationConfig(BaseModel):
         description='Maximum page size for this endpoint.',
     )
 
+    send_page_size: bool | None = Field(
+        default=None,
+        description=(
+            'Whether to send the page-size query parameter (limit / per_page). '
+            'Set false for cursor APIs that have no page-size parameter so the '
+            'generated client stops sending an unwanted limit param. Only honored '
+            'for cursor style; offset/page styles always send it.'
+        ),
+    )
+
     model_config = {'extra': 'forbid'}
 
     @field_validator('style', mode='before')
@@ -303,6 +313,14 @@ class PaginationConfig(BaseModel):
         description='Default name of per_page parameter.',
     )
 
+    default_send_page_size: bool = Field(
+        default=True,
+        description=(
+            'Default for whether to send the page-size query parameter '
+            '(limit / per_page). Only honored for cursor style.'
+        ),
+    )
+
     # Per-endpoint configuration
     endpoints: dict[str, EndpointPaginationConfig] = Field(
         default_factory=dict,
@@ -343,6 +361,7 @@ class PaginationConfig(BaseModel):
             total_pages_path=None,
             default_page_size=self.default_page_size,
             max_page_size=None,
+            send_page_size=self.default_send_page_size,
         )
         return True, resolved
 
@@ -372,6 +391,11 @@ class PaginationConfig(BaseModel):
             default_page_size=endpoint_config.default_page_size
             or self.default_page_size,
             max_page_size=endpoint_config.max_page_size,
+            send_page_size=(
+                endpoint_config.send_page_size
+                if endpoint_config.send_page_size is not None
+                else self.default_send_page_size
+            ),
         )
         return True, resolved
 
@@ -453,6 +477,7 @@ class ResolvedPaginationConfig(BaseModel):
     total_pages_path: str | None
     default_page_size: int
     max_page_size: int | None
+    send_page_size: bool = True
 
     model_config = {'extra': 'forbid'}
 

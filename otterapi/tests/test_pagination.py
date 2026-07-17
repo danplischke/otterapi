@@ -261,6 +261,46 @@ class TestShouldGenerateForEndpoint:
         assert resolved.data_path == 'users'
 
 
+class TestSendPageSizeResolution:
+    """Tests for the send_page_size opt-out resolution."""
+
+    def test_defaults_to_true(self):
+        """send_page_size defaults to True when nothing is configured."""
+        config = PaginationConfig(
+            enabled=True,
+            default_style=PaginationStyle.CURSOR,
+            endpoints={'list_items': EndpointPaginationConfig()},
+        )
+        _, resolved = config.should_generate_for_endpoint('list_items')
+        assert resolved is not None
+        assert resolved.send_page_size is True
+
+    def test_endpoint_can_disable(self):
+        """A per-endpoint send_page_size=False is honored."""
+        config = PaginationConfig(
+            enabled=True,
+            default_style=PaginationStyle.CURSOR,
+            endpoints={
+                'list_items': EndpointPaginationConfig(send_page_size=False),
+            },
+        )
+        _, resolved = config.should_generate_for_endpoint('list_items')
+        assert resolved is not None
+        assert resolved.send_page_size is False
+
+    def test_global_default_applies(self):
+        """default_send_page_size=False propagates when the endpoint omits it."""
+        config = PaginationConfig(
+            enabled=True,
+            default_style=PaginationStyle.CURSOR,
+            default_send_page_size=False,
+            endpoints={'list_items': EndpointPaginationConfig()},
+        )
+        _, resolved = config.should_generate_for_endpoint('list_items')
+        assert resolved is not None
+        assert resolved.send_page_size is False
+
+
 class TestPaginationMethodConfig:
     """Tests for PaginationMethodConfig dataclass."""
 
@@ -508,6 +548,68 @@ class TestPaginatedFunctionGeneration:
         assert 'cursor' in arg_names
         assert 'page_size' in arg_names
         assert 'max_items' in arg_names
+
+    def test_cursor_send_page_size_false_omits_limit_param(self):
+        """When send_page_size is False, cursor endpoints drop the limit query param."""
+        fn_ast, _ = build_standalone_paginated_fn(
+            fn_name='list_items',
+            method='get',
+            path='/items',
+            parameters=None,
+            request_body_info=None,
+            response_type=None,
+            pagination_style='cursor',
+            pagination_config={
+                'cursor_param': 'forwardToken',
+                'limit_param': 'limit',
+                'data_path': 'items',
+                'next_cursor_path': 'pagination.nextPage',
+                'default_page_size': 50,
+                'send_page_size': False,
+            },
+            item_type_ast=ast.Name(id='Item', ctx=ast.Load()),
+            docs='List all items.',
+            is_async=False,
+        )
+        ast.fix_missing_locations(fn_ast)
+        source = ast.unparse(fn_ast)
+
+        # No page_size knob is exposed, and the limit param is never sent.
+        arg_names = [arg.arg for arg in fn_ast.args.kwonlyargs]
+        assert 'cursor' in arg_names
+        assert 'page_size' not in arg_names
+        assert 'max_items' in arg_names
+        assert "'limit'" not in source
+        assert "'forwardToken'" in source
+
+    def test_cursor_send_page_size_true_keeps_limit_param(self):
+        """The default (send_page_size True) still sends the limit query param."""
+        fn_ast, _ = build_standalone_paginated_fn(
+            fn_name='list_items',
+            method='get',
+            path='/items',
+            parameters=None,
+            request_body_info=None,
+            response_type=None,
+            pagination_style='cursor',
+            pagination_config={
+                'cursor_param': 'forwardToken',
+                'limit_param': 'limit',
+                'data_path': 'items',
+                'next_cursor_path': 'pagination.nextPage',
+                'default_page_size': 50,
+                'send_page_size': True,
+            },
+            item_type_ast=ast.Name(id='Item', ctx=ast.Load()),
+            docs='List all items.',
+            is_async=False,
+        )
+        ast.fix_missing_locations(fn_ast)
+        source = ast.unparse(fn_ast)
+
+        arg_names = [arg.arg for arg in fn_ast.args.kwonlyargs]
+        assert 'page_size' in arg_names
+        assert "'limit'" in source
 
     def test_build_async_paginated_function(self):
         """Test generating an async paginated function."""

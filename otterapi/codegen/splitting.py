@@ -751,6 +751,7 @@ class SplitModuleEmitter:
             'next_cursor_path': pag_config.next_cursor_path,
             'total_pages_path': pag_config.total_pages_path,
             'default_page_size': pag_config.default_page_size,
+            'send_page_size': pag_config.send_page_size,
         }
 
     @staticmethod

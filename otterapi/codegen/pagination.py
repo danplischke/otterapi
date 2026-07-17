@@ -108,6 +108,7 @@ class PaginationMethodConfig:
     total_pages_path: str | None = None
     default_page_size: int = 100
     max_page_size: int | None = None
+    send_page_size: bool = True
 
 
 def endpoint_is_paginated(
@@ -172,4 +173,5 @@ def get_pagination_config_for_endpoint(
         total_pages_path=resolved.total_pages_path,
         default_page_size=resolved.default_page_size,
         max_page_size=resolved.max_page_size,
+        send_page_size=resolved.send_page_size,
     )
