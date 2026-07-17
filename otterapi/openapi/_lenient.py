@@ -75,9 +75,7 @@ class LenientRefModel(BaseModel):
         # Vendor extensions (x-*) are always kept; declared fields validate as
         # usual; everything else is unexpected.
         unknown = [
-            key
-            for key in data
-            if key not in allowed and not _is_vendor_extension(key)
+            key for key in data if key not in allowed and not _is_vendor_extension(key)
         ]
         if not unknown:
             return data

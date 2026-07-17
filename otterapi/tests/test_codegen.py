@@ -384,7 +384,11 @@ class TestCodegen:
                         'operationId': 'listItems',
                         'parameters': [
                             {'name': 'id', 'in': 'query', 'schema': {'type': 'string'}},
-                            {'name': 'id', 'in': 'header', 'schema': {'type': 'string'}},
+                            {
+                                'name': 'id',
+                                'in': 'header',
+                                'schema': {'type': 'string'},
+                            },
                             {
                                 'name': 'user id',
                                 'in': 'query',
