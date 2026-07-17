@@ -52,16 +52,9 @@ Source = "https://github.com/danplischke/otter"
 otter = "otterapi.__main__:app"
 
 [dependency-groups]
-dev = [
+test = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
-    "ruff>=0.14.2",
-    "twine>=6.2.0",
-    "vulture>=2.14",
-]
-test = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "httpx>=0.25.0",
     "responses>=0.24.0",
@@ -70,6 +63,12 @@ test = [
     "pandas>=2.3.3",
     "polars>=1.38.0",
     "pyarrow>=15",
+]
+dev = [
+    { include-group = "test" },
+    "ruff>=0.14.2",
+    "twine>=6.2.0",
+    "vulture>=2.14",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -114,9 +113,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["pydantic_ai", "pydantic_evals", "pydantic_graph"]
-# weird issue with ruff thinking fasta2a is still editable
-known-third-party = ["fasta2a"]
+known-first-party = ["otterapi"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -168,8 +165,6 @@ sort_by_size = true
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
-    "if self.debug:",
-    "if settings.DEBUG",
     "raise AssertionError",
     "raise NotImplementedError",
     "if 0:",

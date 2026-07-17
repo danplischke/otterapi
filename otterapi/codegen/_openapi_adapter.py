@@ -10,8 +10,7 @@ requires touching every codegen file.
 that exposes the *intent* of what codegen wants from the parser
 ("paths()", "components_schema(name)", "info_title()") rather than raw
 attribute access. New call sites in codegen should reach for the adapter
-first; existing direct uses can migrate incrementally as touched (audited
-and tracked in issue #3, item 10).
+first; existing direct uses can migrate incrementally as touched.
 
 Keeping this minimal on purpose: the goal is to *establish the seam*, not
 to wholesale-translate every operation. Each method lands as a real

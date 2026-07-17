@@ -9,6 +9,7 @@ import fnmatch
 import logging
 import os
 from importlib.resources import files
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from upath import UPath
@@ -64,6 +65,8 @@ from otterapi.openapi.v3_2.v3_2 import (
     RequestBody as OpenAPIRequestBody,
     Response as OpenAPIResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _load_models_mixin_source() -> str:
@@ -203,7 +206,7 @@ class Codegen(OpenAPIProcessor):
 
     @property
     def _adapter(self):
-        """Facade over ``self.openapi`` for issue #3, item 10.
+        """Facade over ``self.openapi`` that hides the parser's attribute shape.
 
         Constructed lazily on first use so subclasses / tests that swap in
         a different ``openapi`` after construction still work.
@@ -259,7 +262,7 @@ class Codegen(OpenAPIProcessor):
             try:
                 status_code = int(status_code_str)
             except ValueError:
-                logging.debug(f'Skipping non-numeric status code: {status_code_str}')
+                logger.debug(f'Skipping non-numeric status code: {status_code_str}')
                 continue
 
             # Resolve reference if needed
@@ -293,7 +296,7 @@ class Codegen(OpenAPIProcessor):
 
         return responses
 
-    def _select_content_type(self, content: dict) -> tuple[str, any]:
+    def _select_content_type(self, content: dict) -> tuple[str, Any]:
         """Select the best content type from available options.
 
         Prefers JSON content types for better type safety.
@@ -487,18 +490,17 @@ class Codegen(OpenAPIProcessor):
         """
         if isinstance(param_or_ref, Reference):
             if not param_or_ref.ref.startswith('#/components/parameters/'):
-                logging.warning(
+                logger.warning(
                     f'Unsupported parameter reference format: {param_or_ref.ref}'
                 )
                 return None
 
             param_name = param_or_ref.ref.split('/')[-1]
-            # Migrated to OpenAPIAdapter (issue #3, item 10) -- the adapter
-            # encapsulates "components/parameters/<name>" lookup so this
-            # call site stays agnostic of the v3.2 attribute path.
+            # The adapter encapsulates "components/parameters/<name>" lookup so
+            # this call site stays agnostic of the v3.2 attribute path.
             resolved = self._adapter.components_parameter(param_name)
             if resolved is None:
-                logging.warning(
+                logger.warning(
                     f"Referenced parameter '{param_name}' not found in components.parameters"
                 )
                 return None
@@ -522,7 +524,7 @@ class Codegen(OpenAPIProcessor):
         """
         if isinstance(response_or_ref, Reference):
             if not response_or_ref.ref.startswith('#/components/responses/'):
-                logging.warning(
+                logger.warning(
                     f'Unsupported response reference format: {response_or_ref.ref}'
                 )
                 return None
@@ -530,7 +532,7 @@ class Codegen(OpenAPIProcessor):
             response_name = response_or_ref.ref.split('/')[-1]
             resolved = self._adapter.components_response(response_name)
             if resolved is None:
-                logging.warning(
+                logger.warning(
                     f"Referenced response '{response_name}' not found in components.responses"
                 )
                 return None
@@ -554,7 +556,7 @@ class Codegen(OpenAPIProcessor):
         """
         if isinstance(body_or_ref, Reference):
             if not body_or_ref.ref.startswith('#/components/requestBodies/'):
-                logging.warning(
+                logger.warning(
                     f'Unsupported request body reference format: {body_or_ref.ref}'
                 )
                 return None
@@ -562,7 +564,7 @@ class Codegen(OpenAPIProcessor):
             body_name = body_or_ref.ref.split('/')[-1]
             resolved = self._adapter.components_request_body(body_name)
             if resolved is None:
-                logging.warning(
+                logger.warning(
                     f"Referenced request body '{body_name}' not found in components.requestBodies"
                 )
                 return None
@@ -782,7 +784,7 @@ class Codegen(OpenAPIProcessor):
         endpoints: list[Endpoint] = []
         used_fn_names: set[str] = set()
         # Use the adapter for path access -- hides the "RootModel vs dict"
-        # wrinkle from the rest of codegen (issue #3 item 10).
+        # wrinkle from the rest of codegen.
         for path, path_item in self._adapter.paths().items():
             # Apply path filtering
             if not self._should_include_path(path):
@@ -861,7 +863,7 @@ class Codegen(OpenAPIProcessor):
         if self.config.base_url:
             return self.config.base_url
 
-        # Fetch declared servers through the adapter (issue #3 item 10).
+        # Fetch declared servers through the adapter.
         servers = self._adapter.servers()
         if not servers:
             raise ValueError(
@@ -892,7 +894,7 @@ class Codegen(OpenAPIProcessor):
             if self._is_absolute_url(source):
                 # Resolve relative server URL against the source URL
                 resolved_url = urljoin(source, baseurl)
-                logging.info(
+                logger.info(
                     f"Resolved relative server URL '{baseurl}' to '{resolved_url}' "
                     f"using source URL '{source}'"
                 )
@@ -1196,7 +1198,7 @@ class Codegen(OpenAPIProcessor):
         Factoring this out removes the four near-identical inline tuples in
         the paired emitters below and keeps the "sync first, async second"
         emission order consistent across DataFrame / export / paginated
-        variants (issue #3 item 5 follow-up).
+        variants.
 
         Respects ``generate_sync`` and ``generate_async`` from the document config.
         """
@@ -1452,6 +1454,66 @@ class Codegen(OpenAPIProcessor):
         )
         return endpoint_names
 
+    @staticmethod
+    def _inject_html_repr_mixin(impl: ast.stmt, all_model_names: set[str]) -> ast.stmt:
+        """Prepend ``_HtmlReprMixin`` as the first base of a model ClassDef.
+
+        This makes each model render as an HTML table in Jupyter without
+        touching the per-model implementation_ast (which is exec'd in unit
+        tests).  Injection is skipped when a base is itself a generated model:
+        that base already gets ``_HtmlReprMixin``, so adding it again would
+        produce an unresolvable MRO (e.g. ``Child(_HtmlReprMixin, Parent)``
+        where ``Parent`` is already ``Child(_HtmlReprMixin, BaseModel)``).
+        """
+        if not isinstance(impl, ast.ClassDef):
+            return impl
+        has_model_base = any(
+            isinstance(b, ast.Name) and b.id in all_model_names for b in impl.bases
+        )
+        if has_model_base:
+            return impl
+        return ast.ClassDef(
+            name=impl.name,
+            bases=[
+                ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
+                *impl.bases,
+            ],
+            keywords=impl.keywords,
+            body=impl.body,
+            decorator_list=impl.decorator_list,
+        )
+
+    def _forward_ref_rebuild_stmts(self, all_names: set[str]) -> list[ast.stmt]:
+        """Emit ``model_rebuild()`` / ``update_forward_refs()`` for cyclic models.
+
+        Cyclic models need an explicit rebuild so Pydantic can resolve the
+        forward references introduced by ``from __future__ import annotations``
+        and self-referential schemas.
+        """
+        method = (
+            'update_forward_refs'
+            if self.typegen.pydantic_version == 1
+            else 'model_rebuild'
+        )
+        cyclic = getattr(self.typegen, '_cyclic', set())
+        stmts: list[ast.stmt] = []
+        for model_name in sorted(cyclic):
+            if model_name in all_names:
+                stmts.append(
+                    ast.Expr(
+                        ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id=model_name, ctx=ast.Load()),
+                                attr=method,
+                                ctx=ast.Load(),
+                            ),
+                            args=[],
+                            keywords=[],
+                        )
+                    )
+                )
+        return stmts
+
     def _generate_models_file(self, path: UPath) -> None:
         """Generate the models Python file with Pydantic models.
 
@@ -1502,28 +1564,8 @@ class Codegen(OpenAPIProcessor):
             if type_.implementation_ast:
                 impl = type_.implementation_ast
                 # Inject _HtmlReprMixin as the first base of every model class so
-                # it renders as an HTML table in Jupyter without touching the
-                # per-model implementation_ast (which is exec'd in unit tests).
-                # Skip injection when a base is itself a generated model: that
-                # base already gets _HtmlReprMixin, so adding it again would
-                # produce an unresolvable MRO (e.g. Child(_HtmlReprMixin, Parent)
-                # where Parent is already Child(_HtmlReprMixin, BaseModel)).
-                if isinstance(impl, ast.ClassDef):
-                    has_model_base = any(
-                        isinstance(b, ast.Name) and b.id in all_model_names
-                        for b in impl.bases
-                    )
-                    if not has_model_base:
-                        impl = ast.ClassDef(
-                            name=impl.name,
-                            bases=[
-                                ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
-                                *impl.bases,
-                            ],
-                            keywords=impl.keywords,
-                            body=impl.body,
-                            decorator_list=impl.decorator_list,
-                        )
+                # it renders as an HTML table in Jupyter.
+                impl = self._inject_html_repr_mixin(impl, all_model_names)
                 body.append(impl)
                 if type_.name:
                     all_names.add(type_.name)
@@ -1535,37 +1577,7 @@ class Codegen(OpenAPIProcessor):
         # Emit model_rebuild() / update_forward_refs() for cyclic models so
         # that Pydantic can resolve the forward references introduced by
         # from __future__ import annotations and self-referential schemas.
-        cyclic = getattr(self.typegen, '_cyclic', set())
-        for model_name in sorted(cyclic):
-            if model_name in all_names:
-                if self.typegen.pydantic_version == 1:
-                    body.append(
-                        ast.Expr(
-                            ast.Call(
-                                func=ast.Attribute(
-                                    value=ast.Name(id=model_name, ctx=ast.Load()),
-                                    attr='update_forward_refs',
-                                    ctx=ast.Load(),
-                                ),
-                                args=[],
-                                keywords=[],
-                            )
-                        )
-                    )
-                else:
-                    body.append(
-                        ast.Expr(
-                            ast.Call(
-                                func=ast.Attribute(
-                                    value=ast.Name(id=model_name, ctx=ast.Load()),
-                                    attr='model_rebuild',
-                                    ctx=ast.Load(),
-                                ),
-                                args=[],
-                                keywords=[],
-                            )
-                        )
-                    )
+        body.extend(self._forward_ref_rebuild_stmts(all_names))
 
         # Prepend the _HtmlReprMixin helper (defines _repr_html_ for Jupyter)
         body[0:0] = ast.parse(_load_models_mixin_source()).body
@@ -1662,6 +1674,90 @@ class Codegen(OpenAPIProcessor):
 
         return generated_files
 
+    @staticmethod
+    def _add_reexport(
+        body: list[ast.stmt],
+        all_names: list[str],
+        module: str,
+        names: list[str],
+    ) -> None:
+        """Append ``from .<module> import <names>`` and record them for ``__all__``.
+
+        No-op when ``names`` is empty so callers can pass conditionally-built
+        export lists without guarding each one.
+        """
+        if not names:
+            return
+        body.append(
+            ast.ImportFrom(
+                module=module,
+                names=[ast.alias(name=n, asname=None) for n in names],
+                level=1,
+            )
+        )
+        all_names.extend(names)
+
+    def _add_feature_reexports(
+        self, body: list[ast.stmt], all_names: list[str]
+    ) -> None:
+        """Re-export runtime helpers from any enabled feature modules.
+
+        Keeps the package's public surface entirely in __init__.py; the
+        underscore-prefixed feature files remain the "regenerated, do not edit"
+        source of truth that users never import from directly.
+        """
+        if self.config.pagination.enabled:
+            self._add_reexport(
+                body,
+                all_names,
+                '_pagination',
+                [
+                    'paginate_offset',
+                    'paginate_offset_async',
+                    'paginate_cursor',
+                    'paginate_cursor_async',
+                    'paginate_page',
+                    'paginate_page_async',
+                    'iterate_offset',
+                    'iterate_offset_async',
+                    'iterate_cursor',
+                    'iterate_cursor_async',
+                    'iterate_page',
+                    'iterate_page_async',
+                ],
+            )
+        if self.config.export.enabled:
+            self._add_reexport(
+                body,
+                all_names,
+                '_export',
+                [
+                    'export',
+                    'export_async',
+                    'to_csv',
+                    'to_csv_async',
+                    'to_tsv',
+                    'to_tsv_async',
+                    'to_jsonl',
+                    'to_jsonl_async',
+                    'to_parquet',
+                    'to_parquet_async',
+                ],
+            )
+        if self.config.dataframe.enabled:
+            df_exports: list[str] = []
+            if self.config.dataframe.pandas:
+                df_exports.append('to_pandas')
+            if self.config.dataframe.polars:
+                df_exports.append('to_polars')
+            self._add_reexport(body, all_names, '_dataframe', df_exports)
+        self._add_reexport(
+            body,
+            all_names,
+            '_concurrency',
+            ['run_concurrently', 'run_concurrently_async', 'run_sync'],
+        )
+
     def _generate_init_file(
         self,
         directory: UPath,
@@ -1672,139 +1768,40 @@ class Codegen(OpenAPIProcessor):
         body: list[ast.stmt] = []
         all_names: list[str] = []
 
-        # Import endpoints from endpoints.py
-        endpoints_file_stem = self.config.endpoints_file.replace('.py', '')
+        # Re-export endpoints, the Client, and the error hierarchy.
         if endpoint_names:
-            body.append(
-                ast.ImportFrom(
-                    module=endpoints_file_stem,
-                    names=[
-                        ast.alias(name=name, asname=None)
-                        for name in sorted(endpoint_names)
-                    ],
-                    level=1,
-                )
+            self._add_reexport(
+                body,
+                all_names,
+                self.config.endpoints_file.replace('.py', ''),
+                sorted(endpoint_names),
             )
-            all_names.extend(endpoint_names)
-
-        # Import Client from client.py
-        body.append(
-            ast.ImportFrom(
-                module='client',
-                names=[ast.alias(name='Client', asname=None)],
-                level=1,
-            )
+        self._add_reexport(body, all_names, 'client', ['Client'])
+        # BaseClient + the full error hierarchy from _client.py so users can
+        # ``from my_pkg import NotFoundError`` without reaching into the
+        # underscore-prefixed runtime module.
+        self._add_reexport(
+            body,
+            all_names,
+            '_client',
+            [f'Base{client_class_name}', *_exported_error_names()],
         )
-        all_names.append('Client')
 
-        # Import BaseClient + the full error hierarchy from _client.py so
-        # users can ``from my_pkg import NotFoundError`` etc. without
-        # reaching into the underscore-prefixed runtime module.
-        base_client_name = f'Base{client_class_name}'
-        client_exports = [base_client_name, *_exported_error_names()]
-        body.append(
-            ast.ImportFrom(
-                module='_client',
-                names=[ast.alias(name=name, asname=None) for name in client_exports],
-                level=1,
-            )
-        )
-        all_names.extend(client_exports)
+        # Re-export runtime helpers from enabled feature modules.
+        self._add_feature_reexports(body, all_names)
 
-        # Re-export runtime helpers from any enabled feature modules so the
-        # package's public surface lives entirely in __init__.py (the
-        # underscore-prefixed files stay as the "regenerated, do not edit"
-        # source of truth -- users never need to import from them directly).
-        if self.config.pagination.enabled:
-            pagination_exports = [
-                'paginate_offset',
-                'paginate_offset_async',
-                'paginate_cursor',
-                'paginate_cursor_async',
-                'paginate_page',
-                'paginate_page_async',
-                'iterate_offset',
-                'iterate_offset_async',
-                'iterate_cursor',
-                'iterate_cursor_async',
-                'iterate_page',
-                'iterate_page_async',
-            ]
-            body.append(
-                ast.ImportFrom(
-                    module='_pagination',
-                    names=[ast.alias(name=n, asname=None) for n in pagination_exports],
-                    level=1,
-                )
-            )
-            all_names.extend(pagination_exports)
-
-        if self.config.export.enabled:
-            export_exports = [
-                'export',
-                'export_async',
-                'to_csv',
-                'to_csv_async',
-                'to_tsv',
-                'to_tsv_async',
-                'to_jsonl',
-                'to_jsonl_async',
-                'to_parquet',
-                'to_parquet_async',
-            ]
-            body.append(
-                ast.ImportFrom(
-                    module='_export',
-                    names=[ast.alias(name=n, asname=None) for n in export_exports],
-                    level=1,
-                )
-            )
-            all_names.extend(export_exports)
-
-        if self.config.dataframe.enabled:
-            df_exports = []
-            if self.config.dataframe.pandas:
-                df_exports.append('to_pandas')
-            if self.config.dataframe.polars:
-                df_exports.append('to_polars')
-            if df_exports:
-                body.append(
-                    ast.ImportFrom(
-                        module='_dataframe',
-                        names=[ast.alias(name=n, asname=None) for n in df_exports],
-                        level=1,
-                    )
-                )
-                all_names.extend(df_exports)
-
-        concurrency_exports = ['run_concurrently', 'run_concurrently_async', 'run_sync']
-        body.append(
-            ast.ImportFrom(
-                module='_concurrency',
-                names=[ast.alias(name=n, asname=None) for n in concurrency_exports],
-                level=1,
-            )
-        )
-        all_names.extend(concurrency_exports)
-
-        # Also get all model names from typegen
+        # Re-export model classes from the models module.
         all_model_names = {
             type_.name
             for type_ in self.typegen.types.values()
             if type_.name and type_.implementation_ast
         }
-        if all_model_names:
-            body.append(
-                ast.ImportFrom(
-                    module=self.config.models_file.replace('.py', ''),
-                    names=[
-                        ast.alias(name=name, asname=None)
-                        for name in sorted(all_model_names)
-                    ],
-                    level=1,
-                )
-            )
-            all_names.extend(all_model_names)
+        self._add_reexport(
+            body,
+            all_names,
+            self.config.models_file.replace('.py', ''),
+            sorted(all_model_names),
+        )
 
         # Add __all__ at the beginning
         body.insert(0, _all(sorted(set(all_names))))
@@ -1885,7 +1882,7 @@ class Codegen(OpenAPIProcessor):
             return self.config.client_class_name
 
         # Derive from API title (via the adapter so the parser's attribute
-        # shape stays encapsulated; issue #3 item 10).
+        # shape stays encapsulated).
         if self.openapi is not None and self._adapter.title():
             title = self._adapter.title()
             # Convert to PascalCase and add Client suffix

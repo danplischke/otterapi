@@ -26,6 +26,8 @@ from otterapi.codegen.utils import (
 from otterapi.openapi.constants import MediaType
 from otterapi.openapi.v3_2 import Reference, Schema, Type as DataType
 
+logger = logging.getLogger(__name__)
+
 # Python builtin type names that appear as type annotations in generated code.
 # A field named the same as one of these would shadow the builtin when Pydantic
 # evaluates get_type_hints(), causing other fields in the same model to resolve
@@ -1037,6 +1039,15 @@ class TypeGenerator(OpenAPIProcessor):
             # type has no name of its own but SomeModel is a dependency).
             type_.dependencies.update(field_type.dependencies)
 
+    def _finalize_model_type(
+        self, type_: Type, base_bases: list, field_types: list
+    ) -> None:
+        """Attach dependencies and pydantic imports to a freshly built model Type."""
+        self._attach_model_dependencies(type_, base_bases, field_types)
+        type_.add_implementation_import(module='pydantic', name=BaseModel.__name__)
+        type_.add_implementation_import(module='pydantic', name=Field.__name__)
+        type_.copy_imports_from_sub_types(field_types)
+
     def _create_pydantic_model(
         self, schema: Schema, name: str | None = None, base_name: str | None = None
     ) -> Type:
@@ -1104,10 +1115,7 @@ class TypeGenerator(OpenAPIProcessor):
             # fully-built object.
             type_ = self.types[name]  # same object as type_shell
             type_.implementation_ast = model
-            self._attach_model_dependencies(type_, base_bases, field_types)
-            type_.add_implementation_import(module='pydantic', name=BaseModel.__name__)
-            type_.add_implementation_import(module='pydantic', name=Field.__name__)
-            type_.copy_imports_from_sub_types(field_types)
+            self._finalize_model_type(type_, base_bases, field_types)
             self._building.remove(name)
         else:
             type_ = Type(
@@ -1118,10 +1126,7 @@ class TypeGenerator(OpenAPIProcessor):
                 dependencies=set(),
                 type='model',
             )
-            self._attach_model_dependencies(type_, base_bases, field_types)
-            type_.add_implementation_import(module='pydantic', name=BaseModel.__name__)
-            type_.add_implementation_import(module='pydantic', name=Field.__name__)
-            type_.copy_imports_from_sub_types(field_types)
+            self._finalize_model_type(type_, base_bases, field_types)
 
         type_ = self.add_type(type_, base_name=base_name)
         return type_
@@ -1268,10 +1273,9 @@ class TypeGenerator(OpenAPIProcessor):
         # a 1:1 translation, so silently treating them as whatever the outer
         # type says would produce a model that accepts forbidden values. Log a
         # warning and fall back to ``Any`` so the payload is still accepted but
-        # the looseness is visible. (Issue #3 follow-up, audit item "not
-        # schemas silently pass through".)
+        # the looseness is visible.
         if getattr(schema, 'not_', None) is not None:
-            logging.warning(
+            logger.warning(
                 'OpenAPI ``not`` schema encountered for %s; falling back to '
                 'Any (Pydantic has no direct equivalent).',
                 effective_base_name or field_name or '<inline>',

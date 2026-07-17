@@ -45,14 +45,14 @@ otter generate
 3. Use the generated code:
 
 ```python
-from petstore_client import get_pet_by_id, aget_pet_by_id
+from petstore_client import get_pet_by_id, async_get_pet_by_id
 
 # Synchronous usage
 pet = get_pet_by_id(pet_id=123)
 
 # Asynchronous usage
 import asyncio
-pet = asyncio.run(aget_pet_by_id(pet_id=123))
+pet = asyncio.run(async_get_pet_by_id(pet_id=123))
 ```
 
 ---
@@ -492,14 +492,14 @@ pagination:
 ### Usage
 
 ```python
-from client import list_users_iter, alist_users_iter
+from client import list_users_iter, async_list_users_iter
 
 # Iterate all users (handles pagination automatically)
 for user in list_users_iter():
     print(user.name)
 
 # Async variant
-async for user in alist_users_iter():
+async for user in async_list_users_iter():
     print(user.name)
 ```
 
@@ -526,7 +526,7 @@ documents:
 | Original | Pandas | Polars |
 |----------|--------|--------|
 | `get_users()` | `get_users_df()` | `get_users_pl()` |
-| `aget_users()` | `aget_users_df()` | `aget_users_pl()` |
+| `async_get_users()` | `async_get_users_df()` | `async_get_users_pl()` |
 
 ### Usage
 
@@ -696,8 +696,8 @@ response_unwrap:
 ```python
 from client import get_user, create_user, list_orders
 
-# Async versions are prefixed with 'a'
-from client import aget_user, acreate_user, alist_orders
+# Async versions are prefixed with 'async_'
+from client import async_get_user, async_create_user, async_list_orders
 
 # Sync
 user = get_user(user_id=123)
@@ -706,7 +706,7 @@ user = get_user(user_id=123)
 import asyncio
 
 async def main():
-    user = await aget_user(user_id=123)
+    user = await async_get_user(user_id=123)
 
 asyncio.run(main())
 ```
@@ -732,7 +732,7 @@ client = Client(
 user = client.get_user(user_id=123)
 
 async def main():
-    user = await client.aget_user(user_id=123)
+    user = await client.async_get_user(user_id=123)
 ```
 
 ### Working with Models

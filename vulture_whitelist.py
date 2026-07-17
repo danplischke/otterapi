@@ -37,6 +37,9 @@ _.validate_path_required
 _.validate_and_convert_responses
 _.validate_and_convert_paths
 
+# v3_2.py — coerces invalid Parameter.style values to None instead of raising
+_._coerce_style
+
 # ---------------------------------------------------------------------------
 # Enum members  (accessed as EnumClass.MEMBER, not by bare name)
 # ---------------------------------------------------------------------------
@@ -102,6 +105,21 @@ OffsetPaginationConfig
 CursorPaginationConfig
 PagePaginationConfig
 export_async
+
+# _pagination.py — offset/cursor/page paginate_*/iterate_* helpers (sync + async)
+# emitted into generated packages; never called by the library itself.
+paginate_offset
+paginate_offset_async
+iterate_offset
+iterate_offset_async
+paginate_cursor
+paginate_cursor_async
+iterate_cursor
+iterate_cursor_async
+paginate_page
+paginate_page_async
+iterate_page
+iterate_page_async
 
 # _concurrency.py — called by generated package consumers
 run_sync
