@@ -14,7 +14,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from upath import UPath
 
@@ -362,7 +362,11 @@ class ModuleMapResolver:
         stripped_path = self._strip_global_prefixes(path)
 
         if self.config.module_map and self._should_use_module_map():
-            result = self._match_module_map(stripped_path, self.config.module_map, [])
+            result = self._match_module_map(
+                stripped_path,
+                cast('dict[str, ModuleDefinition]', self.config.module_map),
+                [],
+            )
             if result:
                 result.stripped_path = stripped_path
                 return result
@@ -376,10 +380,10 @@ class ModuleMapResolver:
             )
 
         if self._should_use_path():
-            module_name = self._extract_from_path(stripped_path)
-            if module_name:
+            path_module = self._extract_from_path(stripped_path)
+            if path_module:
                 return ResolvedModule(
-                    module_path=[module_name],
+                    module_path=[path_module],
                     resolution='path',
                     stripped_path=stripped_path,
                 )
@@ -815,7 +819,7 @@ class SplitModuleEmitter:
                 response_type=endpoint.response_type,
                 pagination_style=pag_config.style,
                 pagination_config=pag_dict,
-                library=library,
+                library=cast("Literal['pandas', 'polars']", library),
                 item_type_ast=item_type_ast,
                 item_type_imports=item_type_imports,
                 docs=endpoint.description,
@@ -1003,7 +1007,7 @@ class SplitModuleEmitter:
                 path=endpoint.path,
                 parameters=endpoint.parameters,
                 request_body_info=endpoint.request_body,
-                library=library,
+                library=cast("Literal['pandas', 'polars']", library),
                 default_path=default_path,
                 docs=endpoint.description,
                 is_async=is_async,

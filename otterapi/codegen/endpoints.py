@@ -21,9 +21,10 @@ Key Features:
 import ast
 import re
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Literal, Self, cast
 
 from otterapi.codegen.ast_utils import (
     ImportDict,
@@ -216,7 +217,7 @@ class FunctionSignatureBuilder:
 
         for param in parameters:
             if param.type:
-                annotation = param.type.annotation_ast
+                annotation = param.type.annotation_ast or _name('Any')
                 self._merge_imports(param.type.annotation_imports)
             else:
                 annotation = _name('Any')
@@ -265,7 +266,7 @@ class FunctionSignatureBuilder:
             return self
 
         if body.type:
-            body_annotation = body.type.annotation_ast
+            body_annotation = body.type.annotation_ast or _name('Any')
             self._merge_imports(body.type.annotation_imports)
         else:
             body_annotation = _name('Any')
@@ -488,6 +489,7 @@ class ParameterASTBuilder:
 
         body_name = 'body'
 
+        body_expr: ast.expr
         if body.is_json and body.type and body.type.type in ('model', 'root'):
             body_expr = _call(
                 func=_attr(_name(body_name), 'model_dump'),
@@ -828,8 +830,12 @@ class EndpointFunctionFactory:
             self._add_import('typing', 'Any')
             return _name('Any')
 
-        self._merge_imports(self.config.response_type.annotation_imports)
-        return self.config.response_type.annotation_ast
+        response_type = self.config.response_type
+        if response_type is None or response_type.annotation_ast is None:
+            self._add_import('typing', 'Any')
+            return _name('Any')
+        self._merge_imports(response_type.annotation_imports)
+        return response_type.annotation_ast
 
     def _build_standalone_body(self) -> list[ast.stmt]:
         """Build the body for a standalone endpoint function.
@@ -884,7 +890,10 @@ class EndpointFunctionFactory:
         )
         parse_call: ast.expr = _call(
             func=_attr('c', parse_method),
-            args=[_name('response'), self.config.response_type.annotation_ast],
+            args=[
+                _name('response'),
+                self.config.response_type.annotation_ast or _name('Any'),
+            ],
         )
         if self.config.is_async:
             parse_call = ast.Await(value=parse_call)
@@ -1310,8 +1319,8 @@ class EndpointFunctionFactory:
     ) -> ast.Dict:
         """Build the ``params`` dict: pagination params plus passthrough query params."""
         pag_config = self.config.pagination_config or {}
-        param_keys = [ast.Constant(value=param1_api_name)]
-        param_values = [_name(param1_name)]
+        param_keys: list[ast.expr | None] = [ast.Constant(value=param1_api_name)]
+        param_values: list[ast.expr] = [_name(param1_name)]
         if not self._omit_page_size():
             param_keys.append(ast.Constant(value=param2_api_name))
             param_values.append(_name(param2_name))
@@ -1348,24 +1357,28 @@ class EndpointFunctionFactory:
                 ast.keyword(arg=None, value=_name('kwargs')),
             ],
         )
+        request_expr: ast.expr = request_call
         if self.config.is_async:
-            request_call = ast.Await(value=request_call)
+            request_expr = ast.Await(value=request_call)
 
         if not self.config.response_type:
-            return [ast.Return(value=request_call)]
+            return [ast.Return(value=request_expr)]
 
         parse_method = (
             '_parse_response_async' if self.config.is_async else '_parse_response'
         )
-        parse_call = _call(
+        parse_call: ast.expr = _call(
             func=_attr('c', parse_method),
-            args=[_name('response'), self.config.response_type.annotation_ast],
+            args=[
+                _name('response'),
+                self.config.response_type.annotation_ast or _name('Any'),
+            ],
         )
         if self.config.is_async:
             parse_call = ast.Await(value=parse_call)
 
         return [
-            _assign(_name('response'), request_call),
+            _assign(_name('response'), request_expr),
             ast.Return(value=parse_call),
         ]
 
@@ -1409,6 +1422,7 @@ class EndpointFunctionFactory:
         """Build a lambda to extract data from a response using a path."""
         page_arg = ast.arg(arg='page', annotation=None)
 
+        body: ast.expr
         if path:
             # Check if path looks like a simple attribute access (no dots)
             if '.' not in path:
@@ -1708,10 +1722,10 @@ def _build_base_request_fn(
     ]
 
     if is_async:
-        request_call = ast.Await(
+        request_call: ast.expr = ast.Await(
             value=_call(
                 func=_attr('client', 'request'),
-                args=[_name('method'), ast.Expr(value=url_fstring)],
+                args=[_name('method'), url_fstring],
                 keywords=request_keywords,
             )
         )
@@ -1719,7 +1733,7 @@ def _build_base_request_fn(
             _assign(target=_name('response'), value=request_call),
             *validation_body,
         ]
-        body = [
+        body: list[ast.stmt] = [
             ast.AsyncWith(
                 items=[
                     ast.withitem(
@@ -1730,13 +1744,15 @@ def _build_base_request_fn(
                 body=inner_body,
             )
         ]
-        func_builder = _async_func
+        func_builder: Callable[..., ast.FunctionDef | ast.AsyncFunctionDef] = (
+            _async_func
+        )
         func_name = 'request_async'
         http_imports = {'httpx': {'AsyncClient'}}
     else:
         request_call = _call(
             func=_name('request'),
-            args=[_name('method'), ast.Expr(value=url_fstring)],
+            args=[_name('method'), url_fstring],
             keywords=request_keywords,
         )
         body = [
@@ -1785,7 +1801,8 @@ def base_request_fn(
     Returns:
         A tuple of (function_ast, imports) for the sync request function.
     """
-    return _build_base_request_fn(is_async=False, base_url_var=base_url_var)
+    fn, imports = _build_base_request_fn(is_async=False, base_url_var=base_url_var)
+    return cast(ast.FunctionDef, fn), imports
 
 
 def base_async_request_fn(
@@ -1802,7 +1819,8 @@ def base_async_request_fn(
     Returns:
         A tuple of (function_ast, imports) for the async request function.
     """
-    return _build_base_request_fn(is_async=True, base_url_var=base_url_var)
+    fn, imports = _build_base_request_fn(is_async=True, base_url_var=base_url_var)
+    return cast(ast.AsyncFunctionDef, fn), imports
 
 
 # =============================================================================
@@ -1998,7 +2016,7 @@ def _build_endpoint_fn_signature(
     parameters: list['Parameter'] | None,
     request_body_info: 'RequestBodyInfo | None',
     imports: ImportDict,
-) -> tuple[list[ast.arg], list[ast.arg], list[ast.expr | None]]:
+) -> tuple[list[ast.arg], list[ast.arg], list[ast.expr]]:
     """Build (args, kwonlyargs, kw_defaults) for an endpoint fn, registering imports in place."""
     if parameters:
         args, kwonlyargs, kw_defaults, param_imports = get_parameters(parameters)
@@ -2009,7 +2027,7 @@ def _build_endpoint_fn_signature(
     if request_body_info:
         body_annotation = (
             request_body_info.type.annotation_ast
-            if request_body_info.type
+            if request_body_info.type and request_body_info.type.annotation_ast
             else _name('Any')
         )
         if request_body_info.type:
@@ -2047,8 +2065,8 @@ def _build_endpoint_request_call(
         prepare_call_from_parameters(parameters, path, request_body_info)
     )
 
-    if response_model:
-        response_model_ast = response_model.annotation_ast
+    if response_model and response_model.annotation_ast is not None:
+        response_model_ast: ast.expr = response_model.annotation_ast
         imports.update(response_model.annotation_imports)
     else:
         response_model_ast = ast.Constant(value=None)
@@ -2086,7 +2104,7 @@ def _resolve_endpoint_return_type(
     response_model: 'Type | None', imports: ImportDict
 ) -> ast.expr:
     """Resolve the endpoint's return annotation, registering imports in place."""
-    if response_model:
+    if response_model and response_model.annotation_ast is not None:
         return response_model.annotation_ast
     imports.setdefault('httpx', set()).add('Response')
     return _name('Response')
@@ -2187,7 +2205,7 @@ def request_fn(
     Returns:
         A tuple of (function_ast, imports) for the sync endpoint function.
     """
-    return _build_endpoint_fn(
+    fn, imports = _build_endpoint_fn(
         name=name,
         method=method,
         path=path,
@@ -2198,6 +2216,7 @@ def request_fn(
         response_infos=response_infos,
         request_body_info=request_body_info,
     )
+    return cast(ast.FunctionDef, fn), imports
 
 
 def async_request_fn(
@@ -2225,7 +2244,7 @@ def async_request_fn(
     Returns:
         A tuple of (function_ast, imports) for the async endpoint function.
     """
-    return _build_endpoint_fn(
+    fn, imports = _build_endpoint_fn(
         name=name,
         method=method,
         path=path,
@@ -2236,6 +2255,7 @@ def async_request_fn(
         response_infos=response_infos,
         request_body_info=request_body_info,
     )
+    return cast(ast.AsyncFunctionDef, fn), imports
 
 
 # =============================================================================

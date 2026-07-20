@@ -6,7 +6,8 @@ and utilities for collecting and organizing imports during code generation.
 
 import ast
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from typing import cast
 
 __all__ = [
     # AST helpers
@@ -83,7 +84,12 @@ def _ann_assign(
     """Build ``target: annotation = value``."""
     if isinstance(target, ast.Name):
         target = ast.Name(id=target.id, ctx=ast.Store())
-    return ast.AnnAssign(target=target, annotation=annotation, value=value, simple=1)
+    return ast.AnnAssign(
+        target=cast('ast.Name | ast.Attribute | ast.Subscript', target),
+        annotation=annotation,
+        value=value,
+        simple=1,
+    )
 
 
 def _assign(target: ast.expr, value: ast.expr) -> ast.Assign:
@@ -124,9 +130,9 @@ def _func(
     args: list[ast.arg],
     body: list[ast.stmt],
     returns: ast.expr | None = None,
-    kwargs: ast.arg = None,
-    kwonlyargs: list[ast.arg] = None,
-    kw_defaults: list[ast.expr] = None,
+    kwargs: ast.arg | None = None,
+    kwonlyargs: Sequence[ast.arg] | None = None,
+    kw_defaults: Sequence[ast.expr | None] | None = None,
 ) -> ast.FunctionDef:
     return ast.FunctionDef(
         name=name,
@@ -134,8 +140,8 @@ def _func(
             posonlyargs=[],
             args=args,
             kwarg=kwargs,
-            kwonlyargs=kwonlyargs or [],
-            kw_defaults=kw_defaults or [],
+            kwonlyargs=list(kwonlyargs) if kwonlyargs else [],
+            kw_defaults=list(kw_defaults) if kw_defaults else [],
             defaults=[],
         ),
         body=body,
@@ -149,9 +155,9 @@ def _async_func(
     args: list[ast.arg],
     body: list[ast.stmt],
     returns: ast.expr | None = None,
-    kwargs: ast.arg = None,
-    kwonlyargs: list[ast.arg] = None,
-    kw_defaults: list[ast.expr] = None,
+    kwargs: ast.arg | None = None,
+    kwonlyargs: Sequence[ast.arg] | None = None,
+    kw_defaults: Sequence[ast.expr | None] | None = None,
 ) -> ast.AsyncFunctionDef:
     return ast.AsyncFunctionDef(
         name=name,
@@ -159,8 +165,8 @@ def _async_func(
             posonlyargs=[],
             args=args,
             kwarg=kwargs,
-            kwonlyargs=kwonlyargs or [],
-            kw_defaults=kw_defaults or [],
+            kwonlyargs=list(kwonlyargs) if kwonlyargs else [],
+            kw_defaults=list(kw_defaults) if kw_defaults else [],
             defaults=[],
         ),
         body=body,

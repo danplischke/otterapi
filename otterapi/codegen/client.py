@@ -890,7 +890,7 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
         body: list[ast.stmt],
         extra_args: list | None = None,
         is_async: bool = False,
-    ) -> ast.stmt:
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef:
         cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
         args_list = [_argument('self')] + (extra_args or [])
         return cls(
@@ -945,7 +945,7 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
 
     # __enter__(self): return self  (no return annotation — inferred from body)
     enter_method = _ctx_method('__enter__', [ast.Return(_name('self'))])
-    enter_method.returns = None  # type: ignore[assignment]
+    enter_method.returns = None
 
     # __exit__(self, *args): self.close()
     exit_method = _ctx_method(
@@ -962,7 +962,7 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
     aenter_method = _ctx_method(
         '__aenter__', [ast.Return(_name('self'))], is_async=True
     )
-    aenter_method.returns = None  # type: ignore[assignment]
+    aenter_method.returns = None
 
     # __aexit__(self, *args): await self.aclose()
     aexit_method = _ctx_method(
@@ -1334,7 +1334,7 @@ def _build_request_json_method(
     )
 
     # Build the request call with all parameters
-    request_call = _call(
+    request_call: ast.expr = _call(
         func=_attr('self', request_method),
         args=[_name('method'), _name('path')],
         keywords=[

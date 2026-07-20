@@ -26,7 +26,7 @@ FIXTURES_ROOT = Path(__file__).parent / 'fixtures' / 'golden'
 
 def _generate(spec_dir: Path, output_dir: Path) -> dict[str, str]:
     config_path = spec_dir / 'config.yaml'
-    overrides = {}
+    overrides: dict = {}
     if config_path.is_file():
         overrides = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
     config = DocumentConfig.model_validate(

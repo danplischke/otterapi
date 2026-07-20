@@ -27,8 +27,12 @@ def _typegen_from(spec: dict) -> TypeGenerator:
 
 def _emit_user(spec: dict) -> str:
     typegen = _typegen_from(spec)
-    user_schema = typegen.openapi.components.schemas['User']
+    assert typegen.openapi is not None and typegen.openapi.components is not None
+    schemas = typegen.openapi.components.schemas
+    assert schemas is not None
+    user_schema = schemas['User']
     user = typegen.schema_to_type(user_schema, 'User')
+    assert user.implementation_ast is not None
     return ast.unparse(ast.fix_missing_locations(user.implementation_ast))
 
 

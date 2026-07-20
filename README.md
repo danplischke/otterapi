@@ -1,6 +1,6 @@
 # 🦦 OtterAPI
 
-> *A cute and intelligent OpenAPI client generator that dives deep into your OpenAPIs*
+> *A cute otter that turns OpenAPI & Swagger specs into type-safe, async Python clients — powered by httpx and Pydantic.*
 
 **OtterAPI** is a sleek Python library that transforms OpenAPI specifications into clean, type-safe client code with Pydantic models and httpx-based HTTP clients.
 

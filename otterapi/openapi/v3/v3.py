@@ -492,7 +492,7 @@ class OpenAPI(BaseModel):
 
     def _convert_components_to_3_1(
         self, warnings: WarningCollector
-    ) -> openapi_v3_1.Components:
+    ) -> openapi_v3_1.Components | None:
         """Convert Components object from OpenAPI 3.0 to 3.1."""
         if not self.components:
             return None
@@ -1103,7 +1103,9 @@ class OpenAPI(BaseModel):
         # Callback is a RootModel, just pass through the root
         return openapi_v3_1.Callback(root=callback_or_ref.root)
 
-    def _convert_paths_to_3_1(self, warnings: WarningCollector) -> openapi_v3_1.Paths:
+    def _convert_paths_to_3_1(
+        self, warnings: WarningCollector
+    ) -> openapi_v3_1.Paths | None:
         """Convert Paths from OpenAPI 3.0 to 3.1."""
         if not self.paths:
             return None

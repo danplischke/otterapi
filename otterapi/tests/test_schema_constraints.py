@@ -30,7 +30,11 @@ def _typegen() -> TypeGenerator:
 
 
 def _kw_pairs(kwargs: list[ast.keyword]) -> dict[str, object]:
-    return {kw.arg: kw.value.value for kw in kwargs}
+    return {
+        kw.arg: kw.value.value
+        for kw in kwargs
+        if kw.arg is not None and isinstance(kw.value, ast.Constant)
+    }
 
 
 class TestSchemaConstraintsToFieldKwargs:
@@ -141,6 +145,7 @@ class TestGeneratedModelEnforcesConstraints:
         # The TypeGenerator can rename inline schemas (e.g. ``UnnamedModel``).
         # Use whatever name it actually picked when looking up the result.
         model_type = typegen.schema_to_type(schema, name)
+        assert model_type.implementation_ast is not None
         source = 'from pydantic import BaseModel, Field\n' + ast.unparse(
             ast.fix_missing_locations(model_type.implementation_ast)
         )

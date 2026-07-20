@@ -10,23 +10,26 @@ on:
       - ".github/workflows/qa.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
-  PYTHON_VERSION_DEFAULT: "3.12"
+  PYTHON_VERSION_DEFAULT: "3.14"
 
 jobs:
   lint:
     name: Lint & Format Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 — https://github.com/actions/checkout/releases/tag/v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 — https://github.com/actions/setup-python/releases/tag/v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2 — https://github.com/astral-sh/setup-uv/releases/tag/v8.3.2
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -41,15 +44,15 @@ jobs:
     name: Type Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 — https://github.com/actions/checkout/releases/tag/v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 — https://github.com/actions/setup-python/releases/tag/v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2 — https://github.com/astral-sh/setup-uv/releases/tag/v8.3.2
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -65,12 +68,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
         include:
           - os: macos-latest
-            python-version: "3.12"
+            python-version: "3.14"
           - os: windows-latest
-            python-version: "3.12"
+            python-version: "3.14"
           # Wave 3.18 (issue #3 item 18): cheap insurance against the
           # encoding-class bugs that hit Windows in PR #2; one extra
           # cross-version run on the most common stack catches them on
@@ -79,16 +82,16 @@ jobs:
             python-version: "3.11"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 — https://github.com/actions/checkout/releases/tag/v7.0.0
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 — https://github.com/actions/setup-python/releases/tag/v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2 — https://github.com/astral-sh/setup-uv/releases/tag/v8.3.2
 
       - name: Install dependencies
         run: uv sync --group dev --group test
@@ -97,8 +100,8 @@ jobs:
         run: uv run pytest otterapi/tests/ -v --cov=otterapi --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0 — https://github.com/codecov/codecov-action/releases/tag/v7.0.0
         with:
           files: coverage.xml
           fail_ci_if_error: false
@@ -112,15 +115,15 @@ jobs:
     # / polars / pyarrow to be installed -- only when the matching
     # helpers are actually called.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 — https://github.com/actions/checkout/releases/tag/v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 — https://github.com/actions/setup-python/releases/tag/v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2 — https://github.com/astral-sh/setup-uv/releases/tag/v8.3.2
 
       - name: Install only the base + dev groups (no test extras)
         run: uv sync --group dev --no-default-groups
@@ -135,15 +138,15 @@ jobs:
     name: Integration Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 — https://github.com/actions/checkout/releases/tag/v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 — https://github.com/actions/setup-python/releases/tag/v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2 — https://github.com/astral-sh/setup-uv/releases/tag/v8.3.2
 
       - name: Install dependencies
         run: uv sync --group dev

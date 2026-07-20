@@ -9,7 +9,7 @@ import fnmatch
 import logging
 import os
 from importlib.resources import files
-from typing import Any
+from typing import Any, Literal, cast
 from urllib.parse import urljoin, urlparse
 
 from upath import UPath
@@ -283,9 +283,10 @@ class Codegen(OpenAPIProcessor):
             )
 
             if is_json_content and selected_media_type.schema_:
+                assert self.typegen is not None
                 response_type = self.typegen.schema_to_type(
                     selected_media_type.schema_,
-                    base_name=f'{sanitize_identifier(operation.operationId)}Response',
+                    base_name=f'{sanitize_identifier(operation.operationId or "")}Response',
                 )
 
             responses[status_code] = ResponseInfo(
@@ -325,7 +326,9 @@ class Codegen(OpenAPIProcessor):
         union_type = Type(
             None,
             None,
-            annotation_ast=_union_expr([t.annotation_ast for t in types]),
+            annotation_ast=_union_expr(
+                [t.annotation_ast for t in types if t.annotation_ast is not None]
+            ),
             implementation_ast=None,
             type='primitive',
         )
@@ -450,14 +453,14 @@ class Codegen(OpenAPIProcessor):
         # function with a duplicate argument. Disambiguate the generated
         # identifier while preserving the wire name (param.name).
         used_names: set[str] = set()
-        for param in all_params:
-            candidate = param.name_sanitized
+        for built_param in all_params:
+            candidate = built_param.name_sanitized
             if candidate in used_names:
                 suffix = 2
                 while f'{candidate}_{suffix}' in used_names:
                     suffix += 1
                 candidate = f'{candidate}_{suffix}'
-                param.name_sanitized = candidate
+                built_param.name_sanitized = candidate
             used_names.add(candidate)
 
         return all_params
@@ -466,12 +469,15 @@ class Codegen(OpenAPIProcessor):
         """Build a Parameter from a resolved OpenAPI parameter object."""
         param_type = None
         if param.schema_:
+            assert self.typegen is not None
             param_type = self.typegen.schema_to_type(param.schema_)
 
         return Parameter(
             name=param.name,
             name_sanitized=sanitize_parameter_field_name(param.name),
-            location=param.in_,
+            location=cast(
+                "Literal['query', 'path', 'header', 'cookie', 'body']", param.in_
+            ),
             required=param.required or False,
             type=param_type,
             description=param.description,
@@ -597,9 +603,10 @@ class Codegen(OpenAPIProcessor):
 
         body_type = None
         if selected_media_type.schema_:
+            assert self.typegen is not None
             body_type = self.typegen.schema_to_type(
                 selected_media_type.schema_,
-                base_name=f'{sanitize_identifier(operation.operationId)}RequestBody',
+                base_name=f'{sanitize_identifier(operation.operationId or "")}RequestBody',
             )
 
         return RequestBodyInfo(
@@ -924,6 +931,7 @@ class Codegen(OpenAPIProcessor):
         Note:
             This method delegates to collect_used_model_names() from builders.model_collector.
         """
+        assert self.typegen is not None
         return collect_used_model_names(endpoints, self.typegen.types)
 
     def _build_endpoint_file_body(
@@ -956,7 +964,7 @@ class Codegen(OpenAPIProcessor):
         has_pagination_methods = False
 
         # Add standalone endpoint functions
-        endpoint_names = set()
+        endpoint_names: set[str] = set()
         for endpoint in endpoints:
             # Track whether paginated DataFrame methods were generated for this endpoint
             generated_paginated_df = False
@@ -1237,7 +1245,7 @@ class Codegen(OpenAPIProcessor):
         )
 
         emitted = False
-        libraries: list[str] = []
+        libraries: list[Literal['pandas', 'polars']] = []
         if self.config.dataframe.pandas:
             libraries.append('pandas')
         if self.config.dataframe.polars:
@@ -1345,7 +1353,7 @@ class Codegen(OpenAPIProcessor):
                     path=endpoint.path,
                     parameters=endpoint.parameters,
                     request_body_info=endpoint.request_body,
-                    library=library,
+                    library=cast("Literal['pandas', 'polars']", library),
                     default_path=df_config.path,
                     docs=endpoint.description,
                     is_async=is_async,
@@ -1490,12 +1498,13 @@ class Codegen(OpenAPIProcessor):
         forward references introduced by ``from __future__ import annotations``
         and self-referential schemas.
         """
+        assert self.typegen is not None
         method = (
             'update_forward_refs'
             if self.typegen.pydantic_version == 1
             else 'model_rebuild'
         )
-        cyclic = getattr(self.typegen, '_cyclic', set())
+        cyclic: set[str] = getattr(self.typegen, '_cyclic', set())
         stmts: list[ast.stmt] = []
         for model_name in sorted(cyclic):
             if model_name in all_names:
@@ -1791,6 +1800,7 @@ class Codegen(OpenAPIProcessor):
         self._add_feature_reexports(body, all_names)
 
         # Re-export model classes from the models module.
+        assert self.typegen is not None
         all_model_names = {
             type_.name
             for type_ in self.typegen.types.values()
@@ -1859,6 +1869,7 @@ class Codegen(OpenAPIProcessor):
             validate_output=self.validate_output,
         )
 
+        assert self.typegen is not None
         emitted = emitter.emit(
             tree=tree,
             typegen_types=self.typegen.types,
@@ -2099,6 +2110,7 @@ class Codegen(OpenAPIProcessor):
             return None
 
         # Find the type definition (typegen.types is keyed by name, not reference)
+        assert self.typegen is not None
         type_def = self.typegen.types.get(type_name)
         if not type_def or not type_def.implementation_ast:
             return None
@@ -2117,7 +2129,7 @@ class Codegen(OpenAPIProcessor):
         name on ``response_type`` directly, so fall back to the 2xx success
         response in ``response_infos``.
         """
-        type_name = endpoint.response_type.name
+        type_name = endpoint.response_type.name if endpoint.response_type else None
         if type_name or not endpoint.response_infos:
             return type_name
 
@@ -2171,6 +2183,7 @@ class Codegen(OpenAPIProcessor):
         imports: dict[str, set[str]] = {}
 
         # Get all available model names
+        assert self.typegen is not None
         available_models = {
             name
             for name, type_ in self.typegen.types.items()
@@ -2222,6 +2235,7 @@ class Codegen(OpenAPIProcessor):
             return None, {}
 
         # Find the type definition (typegen.types is keyed by name, not reference)
+        assert self.typegen is not None
         type_def = self.typegen.types.get(type_name)
         if not type_def or not type_def.implementation_ast:
             return None, {}
