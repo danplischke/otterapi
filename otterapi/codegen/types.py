@@ -117,8 +117,8 @@ class Type:
     reference: str | None  # reference is None if type is 'primitive'
     name: str | None
     type: Literal['primitive', 'root', 'model']
-    annotation_ast: ast.expr | ast.stmt | None = dataclasses.field(default=None)
-    implementation_ast: ast.expr | ast.stmt | None = dataclasses.field(default=None)
+    annotation_ast: ast.expr | None = dataclasses.field(default=None)
+    implementation_ast: ast.stmt | None = dataclasses.field(default=None)
     dependencies: set[str] = dataclasses.field(default_factory=set)
     implementation_imports: dict[str, set[str]] = dataclasses.field(
         default_factory=dict
@@ -131,7 +131,8 @@ class Type:
         return hash(self.name)
 
     def add_dependency(self, type_: 'Type') -> None:
-        self.dependencies.add(type_.name)
+        if type_.name is not None:
+            self.dependencies.add(type_.name)
         self.dependencies.update(type_.dependencies)
 
     def add_implementation_import(self, module: str, name: str | Iterable[str]) -> None:
@@ -571,7 +572,7 @@ class TypeGenerator(OpenAPIProcessor):
         """
         enum_body: list[ast.stmt] = []
         seen_member_names: dict[str, int] = {}
-        for value in schema.enum:
+        for value in schema.enum or []:
             if value is None:
                 continue
             if isinstance(value, str):
@@ -615,7 +616,9 @@ class TypeGenerator(OpenAPIProcessor):
         """
         enum_name = self._resolve_enum_name(schema, name, base_name, field_name)
 
-        enum_values_key = tuple(sorted(str(v) for v in schema.enum if v is not None))
+        enum_values_key = tuple(
+            sorted(str(v) for v in (schema.enum or []) if v is not None)
+        )
         existing = self._find_existing_identical_enum(enum_values_key)
         if existing is not None:
             return existing
@@ -638,7 +641,7 @@ class TypeGenerator(OpenAPIProcessor):
                 )
             return bool(t and hasattr(t, 'value') and t.value == 'string')
 
-        bases = (
+        bases: list[ast.expr] = (
             [_name('str'), _name('Enum')]
             if _type_is_string(schema.type)
             else [_name('Enum')]
@@ -668,7 +671,9 @@ class TypeGenerator(OpenAPIProcessor):
 
     def _create_literal_type(self, schema: Schema) -> Type:
         """Create a Literal type for enum values (fallback)."""
-        literal_values = [ast.Constant(value=v) for v in schema.enum]
+        literal_values: list[ast.expr] = [
+            ast.Constant(value=v) for v in (schema.enum or [])
+        ]
         type_ = Type(
             None,
             sanitize_identifier(schema.title) if schema.title else None,
@@ -706,6 +711,7 @@ class TypeGenerator(OpenAPIProcessor):
 
     def _make_nullable_type(self, base_type: Type) -> Type:
         """Wrap a type annotation to make it nullable (T | None)."""
+        assert base_type.annotation_ast is not None
         nullable_ast = _union_expr([base_type.annotation_ast, ast.Constant(value=None)])
 
         type_ = Type(
@@ -739,10 +745,14 @@ class TypeGenerator(OpenAPIProcessor):
         # Fix: schema.type is a Type enum, need to use .value for string lookup
         type_value = actual_type.value if actual_type else None
         key = (type_value, schema.format or None)
-        mapped = _PRIMITIVE_TYPE_MAP.get(
-            key,
-            _TYPE_FALLBACK.get(type_value, Any),  # unknown format → base type, not Any
-        )
+        mapped: Any
+        if key in _PRIMITIVE_TYPE_MAP:
+            mapped = _PRIMITIVE_TYPE_MAP[key]
+        elif type_value is not None:
+            # unknown format → base type, not Any
+            mapped = _TYPE_FALLBACK.get(type_value, Any)
+        else:
+            mapped = Any
 
         type_ = Type(
             None,
@@ -790,7 +800,8 @@ class TypeGenerator(OpenAPIProcessor):
             sanitized_field_name = sanitized_field_name + '_'
 
         # Determine the annotation - wrap in Union with None if nullable
-        annotation_ast = field_type.annotation_ast
+        assert field_type.annotation_ast is not None
+        annotation_ast: ast.expr = field_type.annotation_ast
         if is_nullable and not self._type_already_nullable(field_type):
             annotation_ast = _union_expr(
                 [field_type.annotation_ast, ast.Constant(value=None)]
@@ -875,6 +886,7 @@ class TypeGenerator(OpenAPIProcessor):
         Pydantic v2 requires ``Literal`` types on the discriminator field.
         If any variant is missing the constraint we fall back to a plain union.
         """
+        assert schema.discriminator is not None
         prop_name = schema.discriminator.propertyName
         variants = schema.anyOf or schema.oneOf or []
         for variant in variants:
@@ -903,12 +915,15 @@ class TypeGenerator(OpenAPIProcessor):
         """
         types_ = [
             self.schema_to_type(t, base_name=base_name)
-            for t in (schema.anyOf or schema.oneOf)
+            for t in (schema.anyOf or schema.oneOf or [])
         ]
 
-        union_ast = _union_expr(types=[t.annotation_ast for t in types_])
+        union_ast = _union_expr(
+            types=[t.annotation_ast for t in types_ if t.annotation_ast is not None]
+        )
 
         extra_imports: dict[str, set[str]] = {}
+        annotation_ast: ast.expr
         if schema.discriminator is not None and self._discriminator_is_literal(schema):
             discriminator_kw = ast.keyword(
                 arg='discriminator',
@@ -949,9 +964,9 @@ class TypeGenerator(OpenAPIProcessor):
 
     def _build_pydantic_model_fields(
         self, schema: Schema, base_name: str | None
-    ) -> tuple[list[ast.AnnAssign], list[Type]]:
+    ) -> tuple[list[ast.stmt], list[Type]]:
         """Build field assignments and resolve their types for each schema property."""
-        body: list[ast.AnnAssign] = []
+        body: list[ast.stmt] = []
         field_types: list[Type] = []
         required_fields = set(schema.required or [])
         for property_name, property_schema in (schema.properties or {}).items():
@@ -1087,22 +1102,22 @@ class TypeGenerator(OpenAPIProcessor):
         if schema.anyOf or schema.oneOf:
             # Named anyOf/oneOf schemas: discard the placeholder because
             # _build_union_variant_type returns an anonymous inline union.
-            if own_placeholder:
+            if own_placeholder and stable_name is not None:
                 self._building.remove(stable_name)
                 del self.types[stable_name]
             return self._build_union_variant_type(schema, base_name)
 
         name = stable_name or 'UnnamedModel'
 
-        bases = [b.name for b in base_bases] or [BaseModel.__name__]
-        bases = [_name(base) for base in bases]
+        base_names = [b.name for b in base_bases if b.name] or [BaseModel.__name__]
+        base_exprs: list[ast.expr] = [_name(base) for base in base_names]
 
         body, field_types = self._build_pydantic_model_fields(schema, base_name)
         body = self._prepend_model_config_and_docstring(body, schema, name)
 
         model = ast.ClassDef(
             name=name,
-            bases=bases,
+            bases=base_exprs,
             keywords=[],
             body=body or [ast.Pass()],
             decorator_list=[],
@@ -1137,13 +1152,13 @@ class TypeGenerator(OpenAPIProcessor):
 
         if not schema.items:
             type_ = Type(
-                None,
-                None,
-                _subscript(
+                reference=None,
+                name=None,
+                type='primitive',
+                annotation_ast=_subscript(
                     list.__name__,
                     ast.Name(id=Any.__name__, ctx=ast.Load()),
                 ),
-                'primitive',
             )
 
             type_.add_annotation_import(module=list.__module__, name=list.__name__)
@@ -1152,6 +1167,7 @@ class TypeGenerator(OpenAPIProcessor):
             return type_
 
         item_type = self.schema_to_type(schema.items, base_name=base_name)
+        assert item_type.annotation_ast is not None
 
         type_ = Type(
             None,
@@ -1188,7 +1204,7 @@ class TypeGenerator(OpenAPIProcessor):
             and not schema.oneOf
         ):
             # Check for additionalProperties to determine value type
-            value_type_ast = ast.Name(id=Any.__name__, ctx=ast.Load())
+            value_type_ast: ast.expr = ast.Name(id=Any.__name__, ctx=ast.Load())
             value_type_imports: dict[str, set[str]] = {Any.__module__: {Any.__name__}}
 
             if (
@@ -1203,6 +1219,7 @@ class TypeGenerator(OpenAPIProcessor):
                     additional_type = self.schema_to_type(
                         schema.additionalProperties, base_name=base_name
                     )
+                    assert additional_type.annotation_ast is not None
                     value_type_ast = additional_type.annotation_ast
                     value_type_imports = additional_type.annotation_imports.copy()
 
@@ -1322,22 +1339,23 @@ class TypeGenerator(OpenAPIProcessor):
         temp_mark: set[str] = set()
         perm_mark: set[str] = set()
 
-        def visit(type_: Type):
-            if type_.name in perm_mark:
+        def visit(type_: Type) -> None:
+            name = type_.name
+            if name is None or name in perm_mark:
                 return
-            if type_.name in temp_mark:
+            if name in temp_mark:
                 # Cycle in the dependency graph — skip to break it gracefully.
                 # Cyclic models are handled at emit time via model_rebuild().
                 return
 
-            temp_mark.add(type_.name)
+            temp_mark.add(name)
 
             for dep_name in type_.dependencies:
                 if dep_name in self.types:
                     visit(self.types[dep_name])
 
-            perm_mark.add(type_.name)
-            temp_mark.remove(type_.name)
+            perm_mark.add(name)
+            temp_mark.remove(name)
             sorted_types.append(type_)
 
         for type_ in self.types.values():

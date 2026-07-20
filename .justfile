@@ -23,7 +23,15 @@ lint:
 	uv tool run ruff check {{pkg_src}} --fix --exit-zero
 
 [group('development')]
-chore: format lint
+typecheck:
+	uv run mypy {{pkg_src}} --ignore-missing-imports
+
+[group('development')]
+deadcode:
+	uv run vulture {{pkg_src}} vulture_whitelist.py
+
+[group('development')]
+chore: format lint typecheck
 
 [group('package')]
 build:

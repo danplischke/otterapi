@@ -9,7 +9,7 @@ This module provides utilities for:
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -383,9 +383,11 @@ class SchemaResolver:
             openapi: The OpenAPI document to resolve references from.
         """
         self.openapi = openapi
-        self._cache: dict[str, tuple[Schema, str]] = {}
+        self._cache: dict[str, tuple[Schema, str | None]] = {}
 
-    def resolve_reference(self, reference: Reference | Schema) -> tuple[Schema, str]:
+    def resolve_reference(
+        self, reference: Reference | Schema
+    ) -> tuple[Schema, str | None]:
         """Resolve a $ref reference to its schema and name.
 
         If the input is already a Schema (not a Reference), it is returned as-is
@@ -422,7 +424,7 @@ class SchemaResolver:
 
         return schema, name
 
-    def _resolve_ref_string(self, ref: str) -> tuple[Schema, str]:
+    def _resolve_ref_string(self, ref: str) -> tuple[Schema, str | None]:
         """Resolve a $ref string to its schema.
 
         Args:
@@ -456,7 +458,7 @@ class SchemaResolver:
 
         raise SchemaReferenceError(ref, 'Unknown reference format')
 
-    def _resolve_local_reference(self, ref: str) -> tuple[Schema, str]:
+    def _resolve_local_reference(self, ref: str) -> tuple[Schema, str | None]:
         """Resolve a local JSON Pointer reference.
 
         Args:
@@ -511,7 +513,9 @@ class SchemaResolver:
             'Unsupported reference path. Only #/components/schemas/... is currently supported.',
         )
 
-    def _get_component_schema(self, schema_name: str, ref: str) -> tuple[Schema, str]:
+    def _get_component_schema(
+        self, schema_name: str, ref: str
+    ) -> tuple[Schema, str | None]:
         """Get a schema from the components/schemas section.
 
         Args:
@@ -547,7 +551,7 @@ class SchemaResolver:
                 f"Schema '{schema_name}' not found. Available schemas: {available}",
             )
 
-        return schemas[schema_name], self._sanitize_name(schema_name)
+        return cast(Schema, schemas[schema_name]), self._sanitize_name(schema_name)
 
     def get_all_schemas(self) -> dict[str, Schema]:
         """Get all schemas defined in the components/schemas section.

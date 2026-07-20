@@ -9,6 +9,7 @@ import ast
 import json
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -550,7 +551,7 @@ class TestCodegen:
         base_url = codegen._resolve_base_url()
 
         assert base_url is not None
-        assert 'petstore.example.com' in base_url
+        assert urlparse(base_url).hostname == 'petstore.example.com'
 
     def test_resolve_base_url_with_config_override(
         self, temp_output_dir, petstore_spec_file

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -953,7 +954,7 @@ def _normalize_module_value(key: str, value: ModuleMapValue) -> ModuleDefinition
 
 
 def _normalize_module_map(
-    module_map: dict[str, ModuleMapValue],
+    module_map: Mapping[str, ModuleMapValue],
 ) -> dict[str, ModuleDefinition]:
     """Recursively normalize module_map values to ModuleDefinition objects."""
     return {

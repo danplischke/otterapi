@@ -12,6 +12,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 import pytest
@@ -937,7 +938,12 @@ class TestExportDispatchExtended:
 # -----------------------------------------------------------------------------
 
 
-def _make_param(name: str, *, required: bool = False, location: str = 'query'):
+def _make_param(
+    name: str,
+    *,
+    required: bool = False,
+    location: Literal['query', 'path', 'header', 'cookie', 'body'] = 'query',
+):
     """Build a minimal Parameter object for AST builder tests."""
     from otterapi.codegen.types import Parameter, Type
 

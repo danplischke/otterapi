@@ -267,15 +267,18 @@ def write_mod(
 class OpenAPIProcessor:
     openapi: OpenAPI | None = None
 
-    def _resolve_reference(self, reference: Reference | Schema) -> tuple[Schema, str]:
+    def _resolve_reference(
+        self, reference: Reference | Schema
+    ) -> tuple[Schema, str | None]:
         if isinstance(reference, Reference):
             if not reference.ref.startswith('#/components/schemas/'):
                 raise ValueError(f'Unsupported reference format: {reference.ref}')
 
             schema_name = reference.ref.split('/')[-1]
-            schemas = self.openapi.components.schemas
+            components = self.openapi.components if self.openapi else None
+            schemas = components.schemas if components else None
 
-            if schema_name not in schemas:
+            if schemas is None or schema_name not in schemas:
                 raise ValueError(
                     f"Referenced schema '{schema_name}' not found in components.schemas"
                 )

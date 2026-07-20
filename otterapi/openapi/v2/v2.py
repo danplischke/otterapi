@@ -519,7 +519,7 @@ class Responses(BaseModelWithVendorExtensions):
 
     model_config = ConfigDict(extra='allow', populate_by_name=True)
 
-    def __getitem__(self, key: str) -> ResponseValue:
+    def __getitem__(self, key: str) -> ResponseValue | None:
         """Allow dict-like access to response codes."""
         return self.__pydantic_extra__.get(key) or getattr(self, key, None)
 
@@ -965,7 +965,7 @@ class Swagger(LenientModelWithVendorExtensions):
     def _apply_operation_parameters(
         self,
         operation: Operation,
-        warnings: list[str],
+        warnings: WarningCollector,
     ) -> tuple[
         list[openapi_v3.Parameter | openapi_v3.Reference] | None,
         openapi_v3.RequestBody | None,
@@ -1002,7 +1002,10 @@ class Swagger(LenientModelWithVendorExtensions):
         return servers
 
     def _convert_operation(
-        self, operation: Operation, warnings: list[str], method: str = None
+        self,
+        operation: Operation,
+        warnings: WarningCollector,
+        method: str | None = None,
     ) -> openapi_v3.Operation:
         """Convert an Operation object."""
         external_docs = None
@@ -1020,7 +1023,7 @@ class Swagger(LenientModelWithVendorExtensions):
             operation.responses,
             operation.produces or self.produces or [MediaType.JSON],
             warnings,
-            method=method,
+            method=method or 'get',
             body_schema=body_schema,
         )
 
@@ -1056,7 +1059,7 @@ class Swagger(LenientModelWithVendorExtensions):
         self,
         parameters: list[Parameter],
         consumes: list[str] | None,
-        warnings: list[str],
+        warnings: WarningCollector,
     ) -> dict[str, Any]:
         """
         Convert parameters list, separating body/formData into requestBody.
@@ -1107,7 +1110,7 @@ class Swagger(LenientModelWithVendorExtensions):
         self,
         param: BodyParameter,
         consumes: list[str] | None,
-        warnings: list[str],
+        warnings: WarningCollector,
     ) -> openapi_v3.RequestBody:
         """Convert body parameter to requestBody."""
         media_types = consumes or [MediaType.JSON]
@@ -1128,7 +1131,7 @@ class Swagger(LenientModelWithVendorExtensions):
         self,
         params: list[NonBodyParameter],
         consumes: list[str] | None,
-        warnings: list[str],
+        warnings: WarningCollector,
     ) -> openapi_v3.RequestBody:
         """Convert formData parameters to requestBody."""
         # Determine media type
@@ -1201,7 +1204,7 @@ class Swagger(LenientModelWithVendorExtensions):
         """Convert parameter properties to a schema object."""
         if param.type == PrimitiveType.FILE:
             schema_type = openapi_v3.Type.string
-            schema_format = 'binary'
+            schema_format: str | None = 'binary'
         else:
             schema_type = openapi_v3.Type(param.type.value)
             schema_format = param.format if param.format else None
@@ -1286,6 +1289,8 @@ class Swagger(LenientModelWithVendorExtensions):
         if collection_format == CollectionFormat.TSV:
             warnings.add('collection_format_tsv')
 
+        if collection_format is None:
+            return None, None
         return format_map.get(collection_format, (None, None))
 
     def _convert_response_extras(
