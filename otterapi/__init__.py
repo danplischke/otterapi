@@ -15,12 +15,12 @@ Quick Start:
     >>> codegen.generate()
 
 CLI Usage:
-    $ otterapi generate --source ./api.yaml --output ./client
-    $ otterapi init  # Create a configuration file interactively
-    $ otterapi validate ./api.yaml  # Validate an OpenAPI spec
+    $ otter generate --source ./api.yaml --output ./client
+    $ otter init  # Create a configuration file interactively
+    $ otter validate ./api.yaml  # Validate an OpenAPI spec
 
 For more information, see the documentation at:
-https://github.com/yourusername/otterapi
+https://github.com/danplischke/otter
 """
 
 from otterapi.codegen.codegen import Codegen

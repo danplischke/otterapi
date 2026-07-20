@@ -370,34 +370,18 @@ def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
     return annotation, False
 
 
-def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
-    """Map a Python/Pydantic annotation to a pyarrow DataType."""
-    inner, _nullable = _unwrap_optional(annotation)
-    # Strip any remaining Annotated wrapper (e.g. inside Optional[AwareDatetime]).
-    inner = _strip_annotated(inner)
-    origin = get_origin(inner)
+def _enum_arrow_type(inner: Any, pa) -> Any:
+    """Map an Enum class to an Arrow type based on its member value types."""
+    members = [m.value for m in inner]
+    if members and all(isinstance(m, int) for m in members):
+        return pa.int64()
+    if members and all(isinstance(m, float) for m in members):
+        return pa.float64()
+    return pa.string()
 
-    if isinstance(inner, type) and issubclass(inner, BaseModel):
-        model_cls: type[BaseModel] = inner
-        return pa.struct(
-            [
-                pa.field(
-                    name,
-                    _python_type_to_arrow(field.annotation, pa),
-                    nullable=_is_nullable(field.annotation),
-                )
-                for name, field in model_cls.model_fields.items()
-            ]
-        )
 
-    if isinstance(inner, type) and issubclass(inner, Enum):
-        members = [m.value for m in inner]
-        if members and all(isinstance(m, int) for m in members):
-            return pa.int64()
-        if members and all(isinstance(m, float) for m in members):
-            return pa.float64()
-        return pa.string()
-
+def _collection_arrow_type(origin: Any, inner: Any, pa) -> Any:
+    """Map a list/tuple/set/dict origin to an Arrow type, or ``None`` if not one."""
     if origin in (list, tuple, set, frozenset):
         args = get_args(inner)
         if not args:
@@ -414,6 +398,11 @@ def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
     if origin is dict:
         return pa.string()  # JSON-encoded fallback (keeps schema simple).
 
+    return None
+
+
+def _scalar_arrow_type(inner: Any, pa) -> Any:
+    """Map a leaf Python type to an Arrow type, or ``None`` if not a known scalar."""
     if inner is str or inner is UUID:
         return pa.string()
     if inner is bytes:
@@ -443,6 +432,40 @@ def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
         return pa.timestamp('us')
     if _kind == 'date':
         return pa.date32()
+
+    return None
+
+
+def _python_type_to_arrow(annotation: Any, pa) -> pa.DataType:
+    """Map a Python/Pydantic annotation to a pyarrow DataType."""
+    inner, _nullable = _unwrap_optional(annotation)
+    # Strip any remaining Annotated wrapper (e.g. inside Optional[AwareDatetime]).
+    inner = _strip_annotated(inner)
+    origin = get_origin(inner)
+
+    if isinstance(inner, type) and issubclass(inner, BaseModel):
+        model_cls: type[BaseModel] = inner
+        return pa.struct(
+            [
+                pa.field(
+                    name,
+                    _python_type_to_arrow(field.annotation, pa),
+                    nullable=_is_nullable(field.annotation),
+                )
+                for name, field in model_cls.model_fields.items()
+            ]
+        )
+
+    if isinstance(inner, type) and issubclass(inner, Enum):
+        return _enum_arrow_type(inner, pa)
+
+    collection = _collection_arrow_type(origin, inner, pa)
+    if collection is not None:
+        return collection
+
+    scalar = _scalar_arrow_type(inner, pa)
+    if scalar is not None:
+        return scalar
 
     return pa.string()
 

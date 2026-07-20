@@ -8,7 +8,7 @@ import json
 import logging
 import traceback
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 import yaml
@@ -32,14 +32,14 @@ error_console = Console(stderr=True)
 def _commented_optional_sections() -> str:
     """Return a YAML block of commented-out optional config sections.
 
-    Appended to ``otter.yml`` by ``otterapi init`` so users discover the
+    Appended to ``otter.yml`` by ``otter init`` so users discover the
     pagination / dataframe / export / module_split / response_unwrap
     knobs by editing rather than by hunting through the README.
     """
     return """
 # ----------------------------------------------------------------------
 # Optional sections -- uncomment to enable. See the README for details:
-#   https://github.com/danplischke/otterapi
+#   https://github.com/danplischke/otter
 # ----------------------------------------------------------------------
 
 # documents:
@@ -155,7 +155,7 @@ def _resolve_codegen_config(
     except FileNotFoundError as e:
         error_console.print(f'[red]Error:[/red] {e}')
         error_console.print(
-            '\n[dim]Hint: Run [bold]otterapi init[/bold] to create a configuration file,[/dim]'
+            '\n[dim]Hint: Run [bold]otter init[/bold] to create a configuration file,[/dim]'
         )
         error_console.print(
             '[dim]or use [bold]--source[/bold] and [bold]--output[/bold] options.[/dim]'
@@ -241,12 +241,12 @@ def generate(
     directly via command-line options.
 
     Examples:
-        otterapi generate
-        otterapi generate --config my-config.yaml
-        otterapi generate -c config.json
-        otterapi generate --source https://api.example.com/openapi.json --output ./client
-        otterapi generate -s ./api.yaml -o ./generated
-        otterapi generate -s ./api.yaml -o ./generated --lenient
+        otter generate
+        otter generate --config my-config.yaml
+        otter generate -c config.json
+        otter generate --source https://api.example.com/openapi.json --output ./client
+        otter generate -s ./api.yaml -o ./generated
+        otter generate -s ./api.yaml -o ./generated --lenient
     """
     setup_logging(verbose, debug)
 
@@ -292,9 +292,9 @@ def init(
     with all the necessary settings.
 
     Examples:
-        otterapi init
-        otterapi init otter.yaml
-        otterapi init config.json --force
+        otter init
+        otter init otter.yaml
+        otter init config.json --force
     """
     config_path = Path(path)
 
@@ -347,9 +347,8 @@ def init(
         content = json.dumps(config_data, indent=2)
     else:
         content = yaml.dump(config_data, default_flow_style=False, sort_keys=False)
-        # Wave 3.17 (issue #3 item 17): append commented-out scaffolds for the
-        # optional sections so users can discover them by editing instead of
-        # cross-referencing the README.
+        # Append commented-out scaffolds for the optional sections so users can
+        # discover them by editing instead of cross-referencing the README.
         content += _commented_optional_sections()
 
     config_path.write_text(content)
@@ -360,7 +359,7 @@ def init(
     console.print(syntax)
 
     console.print(
-        f'\n[dim]Run [bold]otterapi generate -c {path}[/bold] to generate code.[/dim]'
+        f'\n[dim]Run [bold]otter generate -c {path}[/bold] to generate code.[/dim]'
     )
 
 
@@ -377,9 +376,9 @@ def _count_operations(paths) -> int:
     return operations
 
 
-def _summarize_schema(schema) -> dict[str, any]:
+def _summarize_schema(schema) -> dict[str, Any]:
     """Collect descriptive info (title, counts, ...) about a loaded schema."""
-    info: dict[str, any] = {}
+    info: dict[str, Any] = {}
 
     if schema.info:
         info['title'] = schema.info.title
@@ -437,7 +436,7 @@ def _load_schema_for_validation(source: str, progress, task):
 
 
 def _print_validation_report(
-    source: str, info: dict[str, any], warnings: list[str], verbose: bool
+    source: str, info: dict[str, Any], warnings: list[str], verbose: bool
 ) -> None:
     """Print the schema summary table and any operationId warnings."""
     console.print(f'\n[green]✓[/green] Schema is valid: {source}\n')
@@ -473,9 +472,9 @@ def validate(
     generating any code, reporting any errors or warnings found.
 
     Examples:
-        otterapi validate ./api.yaml
-        otterapi validate https://api.example.com/openapi.json
-        otterapi validate ./api.yaml --verbose
+        otter validate ./api.yaml
+        otter validate https://api.example.com/openapi.json
+        otter validate ./api.yaml --verbose
     """
     with Progress(
         SpinnerColumn(),

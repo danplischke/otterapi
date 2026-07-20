@@ -6,9 +6,7 @@ HTTP client injection support.
 """
 
 import ast
-from dataclasses import dataclass, field
 from importlib.resources import files
-from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
     ImportDict,
@@ -20,31 +18,9 @@ from otterapi.codegen.ast_utils import (
     _subscript,
     _union_expr,
 )
-from otterapi.codegen.dataframes import DataFrameMethodConfig
-
-if TYPE_CHECKING:
-    from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type
 
 # Prefix used when building `f'HTTP {status_code} ...'` error messages in generated code
 _HTTP_ERROR_PREFIX = 'HTTP '
-
-
-@dataclass
-class EndpointInfo:
-    """Information about an endpoint for client method generation."""
-
-    name: str
-    async_name: str
-    method: str
-    path: str
-    parameters: list['Parameter'] | None
-    request_body: 'RequestBodyInfo | None'
-    response_type: 'Type | None'
-    response_infos: list['ResponseInfo'] | None
-    description: str | None
-    dataframe_config: DataFrameMethodConfig = field(
-        default_factory=DataFrameMethodConfig
-    )
 
 
 def generate_api_error_class() -> ast.ClassDef:
