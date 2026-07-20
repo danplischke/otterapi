@@ -13,7 +13,8 @@ pattern = "default-unprefixed"
 [project]
 name = "otterapi"
 dynamic = ["version"]
-license = 'MIT'
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Dan Plischke" }]
 description = "A cute little companion that generates type-safe clients from OpenAPI documents."
 readme = "README.md"
