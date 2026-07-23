@@ -76,6 +76,33 @@ V3_1_SPEC = {
 }
 
 
+# A Swagger 2.0 spec whose scalar array items carry a JSON-Schema type
+# array with a ``null`` member (``["string", "null"]``). Swagger 2.0 has no
+# ``type`` array concept, so the v2 -> v3.0 converter must fold the ``null``
+# into ``nullable: true`` instead of discarding it. Regression guard for the
+# bug where the item type collapsed to the first non-null member and the
+# nullability was silently dropped, which would have forced a ``list[Any]``
+# workaround instead of the properly-typed ``list[str | None]``.
+V2_NULLABLE_ITEM_SPEC = {
+    'swagger': '2.0',
+    'info': {'title': 'v2 nullable array items', 'version': '1.0.0'},
+    'paths': {},
+    'definitions': {
+        'User': {
+            'type': 'object',
+            'required': ['id'],
+            'properties': {
+                'id': {'type': 'integer'},
+                'tags': {
+                    'type': 'array',
+                    'items': {'type': ['string', 'null']},
+                },
+            },
+        },
+    },
+}
+
+
 class TestNullableUpgrade:
     def test_v3_0_nullable_emits_optional_annotation(self):
         source = _emit_user(V3_0_SPEC)
@@ -146,3 +173,26 @@ class TestNullableWithoutTypeDoesNotCrash:
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
         }
         assert field_names == {'id', 'maybe'}
+
+
+class TestV2NullableArrayItems:
+    """Regression guard: a Swagger 2.0 scalar array whose items carry a
+    ``["string", "null"]`` type array must survive the v2 -> v3.0 -> v3.1
+    upgrade as ``list[str | None]``.
+
+    The v2 -> v3.0 converter previously collapsed the item type to the first
+    non-null member and discarded ``null`` outright, which meant a
+    null-polluted vendor array could only be tolerated by degrading the item
+    type to ``Any`` (``list[Any]``). Folding ``null`` into ``nullable: true``
+    keeps full typing while remaining null-tolerant.
+    """
+
+    def test_v2_nullable_scalar_array_emits_list_optional(self):
+        source = _emit_user(V2_NULLABLE_ITEM_SPEC)
+        assert 'tags: list[str | None]' in source
+
+    def test_v2_nullable_scalar_array_does_not_degrade_to_any(self):
+        source = _emit_user(V2_NULLABLE_ITEM_SPEC)
+        assert 'list[Any]' not in source
+        # The element type must be preserved, not silently dropped to ``str``.
+        assert 'tags: list[str]' not in source

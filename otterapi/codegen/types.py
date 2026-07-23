@@ -726,6 +726,54 @@ class TypeGenerator(OpenAPIProcessor):
         )
         return type_
 
+    @staticmethod
+    def _make_any_type() -> Type:
+        """Build a bare ``Any`` type (accepts strings, numbers, null, arrays,
+        and objects alike)."""
+        any_type = Type(
+            reference=None,
+            name=None,
+            annotation_ast=_name('Any'),
+            implementation_ast=None,
+            type='primitive',
+        )
+        any_type.add_annotation_import('typing', 'Any')
+        return any_type
+
+    @staticmethod
+    def _is_empty_schema(schema: Schema) -> bool:
+        """True for a schema with no type and no constraining keywords.
+
+        An empty schema (``{}``) means "any value" in JSON Schema / OpenAPI, so
+        it must map to ``Any`` -- which accepts strings, numbers, null, arrays,
+        and objects -- rather than ``dict[str, Any]``, which rejects everything
+        that isn't an object. This is deliberately distinct from an explicit
+        ``type: object`` (correctly ``dict[str, Any]``); only a *missing* type
+        is treated as "any".
+
+        ``additionalProperties`` defaults to ``True`` on the model, so only a
+        schema/reference value or an explicit ``False`` counts as constraining;
+        ``True``/``None`` do not.
+        """
+        if schema.type is not None:
+            return False
+        ap = schema.additionalProperties
+        ap_constrains = isinstance(ap, (Schema, Reference)) or ap is False
+        return not (
+            schema.properties
+            or schema.allOf
+            or schema.anyOf
+            or schema.oneOf
+            or schema.enum
+            or schema.items
+            or schema.prefixItems
+            or schema.contains
+            or schema.patternProperties
+            or schema.propertyNames
+            or schema.not_
+            or ap_constrains
+        )
+
     def _get_primitive_type_ast(
         self,
         schema: Schema,
@@ -1297,20 +1345,17 @@ class TypeGenerator(OpenAPIProcessor):
                 'Any (Pydantic has no direct equivalent).',
                 effective_base_name or field_name or '<inline>',
             )
-            any_type = Type(
-                reference=None,
-                name=None,
-                annotation_ast=_name('Any'),
-                implementation_ast=None,
-                type='primitive',
-            )
-            any_type.add_annotation_import('typing', 'Any')
-            return any_type
+            return self._make_any_type()
 
         if schema.type == DataType.array:
             type_ = self._create_array_type(
                 schema=schema, base_name=effective_base_name
             )
+        elif self._is_empty_schema(schema):
+            # An empty schema (``{}``) means "any value", not an object. Emit
+            # ``Any`` so string/number/null/array elements are accepted; routing
+            # it to ``_create_object_type`` would wrongly yield ``dict[str, Any]``.
+            type_ = self._make_any_type()
         elif schema.type == DataType.object or schema.type is None:
             type_ = self._create_object_type(
                 schema, name=schema_name, base_name=effective_base_name

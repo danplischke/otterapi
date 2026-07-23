@@ -1501,9 +1501,16 @@ class Swagger(LenientModelWithVendorExtensions):
 
         # Determine type
         schema_type = None
+        is_nullable = False
         if schema.type:
             if isinstance(schema.type, list):
-                # Take the first non-null type
+                # Type arrays (JSON Schema / OpenAPI 3.1 style) aren't valid in
+                # OpenAPI 3.0, so we collapse to the first non-null member. Fold
+                # any ``null`` member into ``nullable: true`` rather than
+                # discarding it, so the nullability survives the 3.0 -> 3.1
+                # upgrade (which re-expands it to a type array) and codegen can
+                # render it as ``T | None`` instead of dropping the type.
+                is_nullable = any(t == 'null' for t in schema.type)
                 non_null = [t for t in schema.type if t != 'null']
                 schema_type = openapi_v3.Type(non_null[0]) if non_null else None
             else:
@@ -1514,6 +1521,7 @@ class Swagger(LenientModelWithVendorExtensions):
 
         obj = openapi_v3.Schema(
             type=schema_type,
+            nullable=True if is_nullable else None,
             format=schema.format if schema.format else None,
             title=schema.title if schema.title else None,
             description=schema.description if schema.description else None,
