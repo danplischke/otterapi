@@ -180,17 +180,73 @@ class TestResourceStyle:
         assert 'list_users' not in m.__all__
 
 
+def _generate_tagged(target: Path, **overrides) -> None:
+    config = DocumentConfig.model_validate(
+        {
+            'source': str(TAGGED_SPEC),
+            'output': str(target),
+            'base_url': 'https://example.test',
+            **overrides,
+        }
+    )
+    Codegen(config).generate()
+
+
+class TestSplitClientStyle:
+    """client_style combined with module_split: functions live in split modules,
+    the client methods route to them."""
+
+    def test_split_resource_calls_across_modules(self, tmp_path):
+        _generate_tagged(
+            tmp_path / 'sr',
+            client_style='resource',
+            module_split={'enabled': True, 'strategy': 'tag'},
+        )
+        # Functions live in per-tag module files, not a single endpoints.py.
+        assert (tmp_path / 'sr' / 'users.py').exists()
+        assert (tmp_path / 'sr' / 'orders.py').exists()
+        assert not (tmp_path / 'sr' / 'endpoints.py').exists()
+
+        mod = _import_fresh(tmp_path, 'sr')
+        assert 'Client' in mod.__all__ and 'AsyncClient' in mod.__all__
+        assert 'list_users' not in mod.__all__
+        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+            client = mod.Client(http_client=http)
+            assert [u.name for u in client.users.list()] == ['alice']
+            assert client.orders.list()[0].total == 9.5
+
+    def test_split_client_flat_calls_across_modules(self, tmp_path):
+        _generate_tagged(
+            tmp_path / 'sc',
+            client_style='client',
+            module_split={'enabled': True, 'strategy': 'tag'},
+        )
+        mod = _import_fresh(tmp_path, 'sc')
+        assert hasattr(mod.Client, 'list_users')
+        assert hasattr(mod.Client, 'list_orders')
+        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+            client = mod.Client(http_client=http)
+            assert [u.name for u in client.list_users()] == ['alice']
+
+    @pytest.mark.asyncio
+    async def test_split_resource_async(self, tmp_path):
+        _generate_tagged(
+            tmp_path / 'sra',
+            client_style='resource',
+            module_split={'enabled': True, 'strategy': 'tag'},
+        )
+        mod = _import_fresh(tmp_path, 'sra')
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_tagged_handler)
+        ) as http:
+            client = mod.AsyncClient(async_http_client=http)
+            users = await client.users.list()
+        assert [u.name for u in users] == ['alice']
+
+
 class TestConfigGuards:
     def test_default_style_still_exports_functions(self, tmp_path):
         _generate(tmp_path / 'fn_pkg')
         mod = _import_fresh(tmp_path, 'fn_pkg')
         assert 'list_users' in mod.__all__
         assert 'Client' in mod.__all__
-
-    def test_client_style_with_split_raises(self, tmp_path):
-        with pytest.raises(ValueError, match='not yet supported'):
-            _generate(
-                tmp_path / 'split_pkg',
-                client_style='client',
-                module_split={'enabled': True, 'strategy': 'tag'},
-            )

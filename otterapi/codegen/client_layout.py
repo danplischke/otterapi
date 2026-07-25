@@ -244,12 +244,60 @@ def _build_imports(
     return collector.to_ast(), type_checking_block
 
 
+def _module_alias(dotted: str) -> str:
+    """Import alias for the module a function is called from (``users`` -> ``_ep_users``)."""
+    return '_ep_' + dotted.replace('.', '_')
+
+
+def _module_imports_and_aliases(
+    function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    module_of: dict[str, str] | None,
+    default_module: str,
+) -> tuple[list[ast.ImportFrom], dict[str, str]]:
+    """Build imports for the function modules and a per-function call alias.
+
+    Non-split (``module_of is None``): every function lives in ``default_module``,
+    imported once as ``_endpoints``. Split (``module_of`` maps function name ->
+    dotted module path): each distinct module is imported under its own alias so a
+    method can call ``<alias>.<fn>``.
+    """
+    if module_of is None:
+        alias = '_endpoints'
+        stmt = ast.ImportFrom(
+            module=None,
+            names=[ast.alias(name=default_module, asname=alias)],
+            level=1,
+        )
+        return [stmt], {fn.name: alias for fn in function_defs}
+
+    alias_of: dict[str, str] = {}
+    modules: dict[str, str] = {}
+    for fn in function_defs:
+        dotted = module_of.get(fn.name, default_module)
+        alias = _module_alias(dotted)
+        modules[dotted] = alias
+        alias_of[fn.name] = alias
+
+    stmts: list[ast.ImportFrom] = []
+    for dotted in sorted(modules):
+        parent, _, leaf = dotted.rpartition('.')
+        stmts.append(
+            ast.ImportFrom(
+                module=parent or None,
+                names=[ast.alias(name=leaf, asname=modules[dotted])],
+                level=1,
+            )
+        )
+    return stmts, alias_of
+
+
 def build_client_module_body(
     function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
     resolver: TypeResolver,
     *,
     base_client_name: str,
     endpoints_module: str = 'endpoints',
+    module_of: dict[str, str] | None = None,
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
@@ -261,22 +309,25 @@ def build_client_module_body(
         base_client_name: Name of the client class (in ``client.py``) both client
             classes subclass, e.g. ``Client`` -- imported aliased so it does not
             clash with the generated sync class.
-        endpoints_module: Module (relative to the package) holding the free
-            functions.
+        endpoints_module: Module holding the free functions (non-split default).
+        module_of: Optional map of function name -> dotted module (split mode);
+            when omitted every function is imported from ``endpoints_module``.
         sync_class_name / async_class_name: Generated class names.
 
     Returns:
         ``(module_body, [sync_class_name, async_class_name])``.
     """
-    endpoints_alias = '_endpoints'
+    module_imports, alias_of = _module_imports_and_aliases(
+        function_defs, module_of, endpoints_module
+    )
 
     sync_methods = [
-        _method_from_function(fn, endpoints_alias)
+        _method_from_function(fn, alias_of[fn.name])
         for fn in function_defs
         if not isinstance(fn, ast.AsyncFunctionDef)
     ]
     async_methods = [
-        _method_from_function(fn, endpoints_alias)
+        _method_from_function(fn, alias_of[fn.name])
         for fn in function_defs
         if isinstance(fn, ast.AsyncFunctionDef)
     ]
@@ -314,13 +365,7 @@ def build_client_module_body(
             level=1,
         )
     )
-    body.append(
-        ast.ImportFrom(
-            module=None,
-            names=[ast.alias(name=endpoints_module, asname=endpoints_alias)],
-            level=1,
-        )
-    )
+    body.extend(module_imports)
     if type_checking_block is not None:
         body.append(type_checking_block)
     body.append(_all(sorted([async_class_name, sync_class_name])))
@@ -433,6 +478,7 @@ def build_resource_client_module_body(
     *,
     base_client_name: str,
     endpoints_module: str = 'endpoints',
+    module_of: dict[str, str] | None = None,
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
@@ -441,10 +487,13 @@ def build_resource_client_module_body(
     ``client.users.get(user_id=1)`` instead of ``client.get_user(user_id=1)``:
     functions are grouped into resource sub-clients by ``resource_of`` (produced
     from the ``module_split`` strategy), and method names have the resource token
-    stripped.
+    stripped. ``module_of`` (split mode) routes each method to its function's real
+    module.
     """
-    endpoints_alias = '_endpoints'
     client_value = _attr('self', '_client')
+    module_imports, alias_of = _module_imports_and_aliases(
+        function_defs, module_of, endpoints_module
+    )
 
     # Group function defs by resource, preserving a stable resource order.
     groups: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
@@ -463,11 +512,15 @@ def build_resource_client_module_body(
             list({_base_name(fn) for fn in group}), tokens
         )
 
-        def _methods(is_async: bool) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+        def _methods(
+            is_async: bool,
+            group: list[ast.FunctionDef | ast.AsyncFunctionDef] = group,
+            name_map: dict[str, str] = name_map,
+        ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
             built = [
                 _method_from_function(
                     fn,
-                    endpoints_alias,
+                    alias_of[fn.name],
                     client_value=client_value,
                     method_name=name_map[_base_name(fn)],
                 )
@@ -523,13 +576,7 @@ def build_resource_client_module_body(
             level=1,
         )
     )
-    body.append(
-        ast.ImportFrom(
-            module=None,
-            names=[ast.alias(name=endpoints_module, asname=endpoints_alias)],
-            level=1,
-        )
-    )
+    body.extend(module_imports)
     if type_checking_block is not None:
         body.append(type_checking_block)
     body.append(_all(sorted([async_class_name, sync_class_name])))

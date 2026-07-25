@@ -946,14 +946,23 @@ class Codegen(OpenAPIProcessor):
         return set(names)
 
     def _generate_client_layout_file(
-        self, directory: UPath, endpoints: list[Endpoint]
+        self,
+        directory: UPath,
+        endpoints: list[Endpoint],
+        *,
+        module_of: dict[str, str] | None = None,
+        resource_of: dict[str, str] | None = None,
     ) -> None:
         """Emit ``_clients.py`` with ``Client`` / ``AsyncClient`` classes.
 
-        Their methods delegate to the free functions in ``endpoints.py`` (passing
+        Their methods delegate to the generated free functions (passing
         ``client=self``), giving a class-namespaced surface without the
         ``async_`` name prefix. With ``client_style="resource"`` the methods are
         grouped into resource sub-clients (``client.users.get(...)``).
+
+        ``module_of`` / ``resource_of`` are supplied in split mode so each method
+        calls its function's split module; otherwise every function comes from the
+        single endpoints module.
         """
         assert self.typegen is not None
         resolver = TypeResolver(self.typegen.types)
@@ -964,13 +973,15 @@ class Codegen(OpenAPIProcessor):
         endpoints_module = self.config.endpoints_file.replace('.py', '')
 
         if self.config.client_style == 'resource':
-            resource_of = self._resource_assignments(sink)
+            if resource_of is None:
+                resource_of = self._resource_assignments(sink)
             body, _class_names = build_resource_client_module_body(
                 function_defs,
                 resolver,
                 resource_of,
                 base_client_name='Client',
                 endpoints_module=endpoints_module,
+                module_of=module_of,
             )
         else:
             body, _class_names = build_client_module_body(
@@ -978,6 +989,7 @@ class Codegen(OpenAPIProcessor):
                 resolver,
                 base_client_name='Client',
                 endpoints_module=endpoints_module,
+                module_of=module_of,
             )
         write_mod(
             body,
@@ -1006,6 +1018,26 @@ class Codegen(OpenAPIProcessor):
                 per_endpoint[key] = '_'.join(resolved.module_path) or 'common'
             resource_of[fn_name] = per_endpoint[key]
         return resource_of
+
+    @staticmethod
+    def _split_module_mappings(
+        split_modules: list,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """From emitted split modules, map each function to its module + resource.
+
+        ``module_of`` is the dotted module path used for imports
+        (``identity.users``); ``resource_of`` is the underscore key used to group
+        resource sub-clients (``identity_users``).
+        """
+        module_of: dict[str, str] = {}
+        resource_of: dict[str, str] = {}
+        for module in split_modules:
+            dotted = '.'.join(module.module_path)
+            resource = '_'.join(module.module_path) or 'common'
+            for fn_name in module.endpoint_names:
+                module_of[fn_name] = dotted
+                resource_of[fn_name] = resource
+        return module_of, resource_of
 
     @staticmethod
     def _inject_html_repr_mixin(impl: ast.stmt, all_model_names: set[str]) -> ast.stmt:
@@ -1198,17 +1230,12 @@ class Codegen(OpenAPIProcessor):
         client_name = self._get_client_class_name()
 
         client_style = self.config.client_style
-        if client_style in ('client', 'resource') and self.config.module_split.enabled:
-            raise ValueError(
-                f'client_style={client_style!r} is not yet supported together '
-                'with module_split; use the default client_style="functions" '
-                'with splitting, or disable splitting.'
-            )
 
         # Check if module splitting is enabled
+        split_modules: list = []
         if self.generate_endpoints:
             if self.config.module_split.enabled:
-                split_files = self._generate_split_endpoints(
+                split_files, split_modules = self._generate_split_endpoints(
                     directory, models_file, endpoints, client_name
                 )
                 generated_files.extend(split_files)
@@ -1224,14 +1251,16 @@ class Codegen(OpenAPIProcessor):
         )
         generated_files.extend(client_files)
 
-        # In client_style="client", additionally emit Client / AsyncClient
-        # classes whose methods delegate to the generated free functions.
-        if (
-            self.generate_endpoints
-            and client_style in ('client', 'resource')
-            and not self.config.module_split.enabled
-        ):
-            self._generate_client_layout_file(directory, endpoints)
+        # In client_style="client"/"resource", additionally emit Client /
+        # AsyncClient classes whose methods delegate to the generated free
+        # functions (routed to their split module when splitting is enabled).
+        if self.generate_endpoints and client_style in ('client', 'resource'):
+            module_of, resource_of = (None, None)
+            if self.config.module_split.enabled:
+                module_of, resource_of = self._split_module_mappings(split_modules)
+            self._generate_client_layout_file(
+                directory, endpoints, module_of=module_of, resource_of=resource_of
+            )
             generated_files.append(f'{output_name}/_clients.py')
 
         # Write __init__.py only if not using module splitting (splitting handles its own __init__.py)
@@ -1401,7 +1430,7 @@ class Codegen(OpenAPIProcessor):
         models_file: UPath,
         endpoints: list[Endpoint],
         client_class_name: str,
-    ) -> list[str]:
+    ) -> tuple[list[str], list]:
         """Generate split endpoint modules based on configuration.
 
         Args:
@@ -1411,7 +1440,9 @@ class Codegen(OpenAPIProcessor):
             client_class_name: Name of the client class (e.g., 'SwaggerPetstoreOpenAPI30Client').
 
         Returns:
-            List of relative paths to generated files.
+            A tuple of (relative file paths, emitted modules). The emitted
+            modules carry each module's path + function names, used to route
+            client-style methods to their function's module.
         """
         from otterapi.codegen.splitting import (
             ModuleTreeBuilder,
@@ -1435,6 +1466,7 @@ class Codegen(OpenAPIProcessor):
             export_config=self.config.export,
             generate_sync=self.config.generate_sync,
             generate_async=self.config.generate_async,
+            client_style=self.config.client_style,
             reexport_models=self.config.reexport_models,
             reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
             format_output=self.format_output,
@@ -1457,7 +1489,7 @@ class Codegen(OpenAPIProcessor):
         # Add __init__.py files
         generated_files.append(f'{output_name}/__init__.py')
 
-        return generated_files
+        return generated_files, emitted
 
     def _get_client_class_name(self) -> str:
         """Get the client class name from config or derive from API title."""

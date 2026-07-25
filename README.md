@@ -797,8 +797,11 @@ async with AsyncClient() as api:
     user = await api.users.get(user_id=123)
 ```
 
-The free functions remain in `endpoints.py` as the implementation the methods
-call. (`client` and `resource` are not yet combinable with `module_split`.)
+The free functions remain as the implementation the methods call. `client` and
+`resource` compose with [module splitting](#-module-splitting): the functions are
+split across module files and each method routes to its function's module, while
+`Client` / `AsyncClient` stay the single public entry point. With `resource` the
+resources mirror the split modules.
 
 ### Working with Models
 

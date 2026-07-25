@@ -605,6 +605,7 @@ class SplitModuleEmitter:
         export_config: ExportConfig | None = None,
         generate_sync: bool = True,
         generate_async: bool = True,
+        client_style: str = 'functions',
         reexport_models: bool = False,
         reexport_model_exclude_patterns: list[str] | None = None,
         format_output: bool = True,
@@ -624,6 +625,10 @@ class SplitModuleEmitter:
             export_config: Optional export configuration.
             generate_sync: Whether to emit synchronous endpoint functions.
             generate_async: Whether to emit asynchronous endpoint functions.
+            client_style: Public-API shape. With ``client``/``resource`` the root
+                ``__init__`` exports ``Client`` / ``AsyncClient`` (from
+                ``_clients.py``, written by the caller) instead of re-exporting the
+                per-module free functions.
             reexport_models: Whether to include model names in __all__.
             reexport_model_exclude_patterns: Glob patterns of model names to exclude.
             format_output: Whether to format generated code with ruff/black.
@@ -640,6 +645,7 @@ class SplitModuleEmitter:
         self.export_config = export_config
         self.generate_sync = generate_sync
         self.generate_async = generate_async
+        self.client_style = client_style
         self.reexport_models = reexport_models
         self.reexport_model_exclude_patterns: list[str] = (
             reexport_model_exclude_patterns or []
@@ -857,6 +863,13 @@ class SplitModuleEmitter:
         all_names: list[str] = []
         imported_modules: set[str] = set()
 
+        # In client/resource style the public surface is Client / AsyncClient
+        # (emitted into _clients.py by the caller); the per-module free functions
+        # stay importable from their modules but are not re-exported here.
+        if self.client_style in ('client', 'resource'):
+            self._emit_root_init_base(body, all_names)
+            return
+
         for emitted in self._emitted_modules:
             if len(emitted.module_path) == 1:
                 module_name = emitted.module_path[0]
@@ -898,15 +911,30 @@ class SplitModuleEmitter:
         if all_names is None:
             all_names = []
 
-        # Import and export Client
-        body.append(
-            ast.ImportFrom(
-                module='client',
-                names=[ast.alias(name='Client', asname=None)],
-                level=1,
+        # Import and export the public client(s). In client/resource style the
+        # method-carrying Client / AsyncClient live in _clients.py; otherwise the
+        # infrastructure Client from client.py is the export.
+        if self.client_style in ('client', 'resource'):
+            body.append(
+                ast.ImportFrom(
+                    module='_clients',
+                    names=[
+                        ast.alias(name='AsyncClient', asname=None),
+                        ast.alias(name='Client', asname=None),
+                    ],
+                    level=1,
+                )
             )
-        )
-        all_names.append('Client')
+            all_names.extend(['AsyncClient', 'Client'])
+        else:
+            body.append(
+                ast.ImportFrom(
+                    module='client',
+                    names=[ast.alias(name='Client', asname=None)],
+                    level=1,
+                )
+            )
+            all_names.append('Client')
 
         # Import and export BaseClient
         base_client_name = f'Base{self.client_class_name}'
