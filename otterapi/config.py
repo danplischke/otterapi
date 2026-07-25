@@ -1043,6 +1043,18 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    result_objects: bool = Field(
+        default=False,
+        description=(
+            'When True (with ``client_style="resource"``), a list endpoint returns '
+            'a deferred ``Query`` object instead of separate ``_df`` / ``_pl`` / '
+            '``_iter`` / ``_export`` methods. Terminals materialize it: '
+            '``client.users.list().all()`` / ``.to_pandas()`` / ``.iter()`` / '
+            '``.export(path)``. Requires the relevant feature (dataframe / '
+            'pagination / export) enabled for each terminal.'
+        ),
+    )
+
     resource_naming: Literal['tag', 'path', 'operation_id'] = Field(
         default='tag',
         description=(

@@ -126,6 +126,7 @@ def all_features() -> list[FeatureModule]:
         ExportFeature(),
         ConcurrencyFeature(),
         RetryFeature(),
+        QueryFeature(),
     ]
 
 
@@ -223,3 +224,16 @@ class RetryFeature(FeatureModule):
 
     def is_enabled(self, _config: DocumentConfig) -> bool:
         return True
+
+
+class QueryFeature(FeatureModule):
+    """Emits ``_query.py`` (deferred ``Query`` / ``AsyncQuery`` result objects).
+
+    Only relevant when ``result_objects`` is on and a class-based client style is
+    used (the query objects are what list-endpoint methods return).
+    """
+
+    module_filename = '_query.py'
+
+    def is_enabled(self, config: DocumentConfig) -> bool:
+        return bool(config.result_objects) and config.client_style == 'resource'

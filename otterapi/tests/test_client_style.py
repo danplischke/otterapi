@@ -20,6 +20,19 @@ from otterapi.config import DocumentConfig
 SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'spec.yaml'
 TAGGED_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'tagged' / 'spec.yaml'
 NESTED_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'nested' / 'spec.yaml'
+PAGINATED_SPEC = (
+    Path(__file__).parent / 'fixtures' / 'golden' / 'paginated' / 'spec.yaml'
+)
+
+_PAGES = {
+    0: [{'id': 1, 'name': 'a'}, {'id': 2, 'name': 'b'}],
+    2: [{'id': 3, 'name': 'c'}],
+}
+
+
+def _paginated_handler(request: httpx.Request) -> httpx.Response:
+    offset = int(dict(request.url.params).get('offset', 0))
+    return httpx.Response(200, json=_PAGES.get(offset, []))
 
 
 def _nested_handler(request: httpx.Request) -> httpx.Response:
@@ -47,6 +60,8 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
 def _tagged_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path == '/users':
         return httpx.Response(200, json=[{'id': 1, 'name': 'alice'}])
+    if request.url.path == '/users/1':
+        return httpx.Response(200, json={'id': 1, 'name': 'alice'})
     if request.url.path == '/orders':
         return httpx.Response(200, json=[{'id': 7, 'total': 9.5}])
     return httpx.Response(404, json={'detail': 'unknown route'})
@@ -302,6 +317,88 @@ class TestNestedResources:
         client = mod.Client(base_url='https://example.test')
         # No nested identity.users chain; the tag/hybrid strategy groups flatly.
         assert not hasattr(getattr(client, 'identity', object()), 'users')
+
+
+class TestResultObjects:
+    def _generate_ro(self, target: Path, source: Path, **overrides) -> None:
+        config = DocumentConfig.model_validate(
+            {
+                'source': str(source),
+                'output': str(target),
+                'base_url': 'https://example.test',
+                'client_style': 'resource',
+                'result_objects': True,
+                **overrides,
+            }
+        )
+        Codegen(config).generate()
+
+    def test_query_terminals(self, tmp_path):
+        self._generate_ro(
+            tmp_path / 'ro',
+            PAGINATED_SPEC,
+            pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 2},
+            dataframe={'enabled': True, 'pandas': True},
+            export={'enabled': True, 'formats': ['csv']},
+        )
+        mod = _import_fresh(tmp_path, 'ro')
+        out = tmp_path / 'out.csv'
+        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+            client = mod.Client(http_client=http)
+            assert [r.id for r in client.items.list().all()] == [1, 2, 3]
+            assert client.items.list().to_pandas().shape == (3, 2)
+            assert [r.id for r in client.items.list().iter()] == [1, 2, 3]
+            assert client.items.list().export(str(out)) == 3
+        assert out.exists()
+
+    @pytest.mark.asyncio
+    async def test_query_terminals_async(self, tmp_path):
+        self._generate_ro(
+            tmp_path / 'roa',
+            PAGINATED_SPEC,
+            pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 2},
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        mod = _import_fresh(tmp_path, 'roa')
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_paginated_handler)
+        ) as http:
+            client = mod.AsyncClient(async_http_client=http)
+            assert [r.id for r in await client.items.list().all()] == [1, 2, 3]
+            assert [r.id async for r in client.items.list().iter()] == [1, 2, 3]
+
+    def test_list_returns_query_scalar_stays_plain(self, tmp_path):
+        # A list endpoint collapses its variants into a Query; a scalar endpoint
+        # keeps returning the model directly.
+        self._generate_ro(
+            tmp_path / 'ros',
+            TAGGED_SPEC,
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        mod = _import_fresh(tmp_path, 'ros')
+        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+            client = mod.Client(http_client=http)
+            listed = client.users.list()
+            assert type(listed).__name__ == 'Query'
+            assert hasattr(listed, 'to_pandas')
+            assert [u.name for u in listed.all()] == ['alice']
+            user = client.users.get(userId=1)
+            assert type(user).__name__ == 'User'
+        # The separate _df variant method is gone (collapsed into the Query).
+        assert not hasattr(mod.Client(base_url='x').users, 'list_df')
+
+    def test_requires_resource_style(self, tmp_path):
+        with pytest.raises(ValueError, match='requires client_style'):
+            config = DocumentConfig.model_validate(
+                {
+                    'source': str(TAGGED_SPEC),
+                    'output': str(tmp_path / 'bad'),
+                    'base_url': 'https://example.test',
+                    'client_style': 'client',
+                    'result_objects': True,
+                }
+            )
+            Codegen(config).generate()
 
 
 class TestConfigGuards:

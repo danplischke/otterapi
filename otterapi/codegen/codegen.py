@@ -981,6 +981,7 @@ class Codegen(OpenAPIProcessor):
                 base_client_name='Client',
                 endpoints_module=endpoints_module,
                 module_of=module_of,
+                use_query=self.config.result_objects,
             )
         else:
             body, _class_names = build_client_module_body(
@@ -1257,6 +1258,12 @@ class Codegen(OpenAPIProcessor):
         client_name = self._get_client_class_name()
 
         client_style = self.config.client_style
+
+        if self.config.result_objects and client_style != 'resource':
+            raise ValueError(
+                'result_objects requires client_style="resource"; '
+                f'got client_style={client_style!r}.'
+            )
 
         # Check if module splitting is enabled
         split_modules: list = []

@@ -138,6 +138,7 @@ Each entry under `documents:` supports these fields:
 | `client_class_name` | string | from API title | Override the generated client class name |
 | `client_style` | `functions` \| `client` \| `resource` | `functions` | Shape of the public API. `functions` exposes a standalone function per endpoint/variant; `client` adds `Client` / `AsyncClient` classes with a flat method per endpoint; `resource` groups those methods into resource sub-clients (see [Client Style](#-client-style)) |
 | `resource_naming` | `tag` \| `path` \| `operation_id` | `tag` | How resource sub-clients are derived for `client_style: resource`. `tag` uses the module-split strategy (one level); `path` nests by URL segments; `operation_id` nests by the dotted operationId hierarchy |
+| `result_objects` | bool | `false` | With `client_style: resource`, a list endpoint returns a deferred `Query` object instead of separate `_df`/`_pl`/`_iter`/`_export` methods (see [Client Style](#-client-style)) |
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
@@ -813,6 +814,33 @@ async with AsyncClient() as api:
 user = client.identity.users.get(user_id=123)
 invoices = client.billing.invoices.list()
 ```
+
+#### Result objects
+
+With `result_objects: true` (and `client_style: resource`), a **list** endpoint
+returns a deferred `Query` instead of exposing separate `_df` / `_pl` / `_iter` /
+`_export` methods. The endpoint's arguments are captured once; a terminal method
+materializes it:
+
+```yaml
+    client_style: resource
+    result_objects: true
+```
+
+```python
+q = client.users.list(status="active")   # nothing sent yet
+rows = q.all()                            # list[User]
+df   = q.to_pandas()                      # pandas DataFrame
+for u in q.iter(): ...                    # streamed, page by page
+q.export("users.csv")                     # write to a file
+
+async with AsyncClient() as api:
+    rows = await api.users.list().all()
+    async for u in api.users.list().iter(): ...
+```
+
+Terminals whose feature wasn't enabled at generation time raise a clear error;
+scalar (non-list) endpoints keep returning the model directly.
 
 The free functions remain as the implementation the methods call. `client` and
 `resource` compose with [module splitting](#-module-splitting): the functions are

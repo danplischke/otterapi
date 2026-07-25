@@ -50,7 +50,17 @@ _NAME_IMPORTS: dict[str, tuple[str, str]] = {
     'Literal': ('typing', 'Literal'),
     'Path': ('pathlib', 'Path'),
     'UPath': ('upath', 'UPath'),
+    'Query': ('._query', 'Query'),
+    'AsyncQuery': ('._query', 'AsyncQuery'),
 }
+
+# Endpoint-variant suffix -> the Query constructor keyword that binds it.
+_VARIANT_BINDINGS: tuple[tuple[str, str], ...] = (
+    ('_df', 'to_pandas'),
+    ('_pl', 'to_polars'),
+    ('_iter', 'iterate'),
+    ('_export', 'export'),
+)
 
 
 def _own_scope_yields(node: ast.AST) -> bool:
@@ -483,6 +493,124 @@ def _child_property(
     )
 
 
+def _variant_of(base_name: str) -> tuple[str, str]:
+    """Split a function's (async-stripped) name into ``(family, binding)``.
+
+    ``list_users_df`` -> ``('list_users', 'to_pandas')``; a core function with no
+    variant suffix -> ``('list_users', 'fetch')``.
+    """
+    for suffix, binding in _VARIANT_BINDINGS:
+        if base_name.endswith(suffix):
+            return base_name[: -len(suffix)], binding
+    return base_name, 'fetch'
+
+
+def _group_families(
+    fns: list[ast.FunctionDef | ast.AsyncFunctionDef],
+) -> dict[str, dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]]:
+    """Group an endpoint's variant functions into families.
+
+    ``{family_base: {'sync': {binding: fn}, 'async': {binding: fn}}}``.
+    """
+    families: dict[
+        str, dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]
+    ] = {}
+    for fn in fns:
+        base, binding = _variant_of(_base_name(fn))
+        side = 'async' if isinstance(fn, ast.AsyncFunctionDef) else 'sync'
+        families.setdefault(base, {'sync': {}, 'async': {}})[side][binding] = fn
+    return families
+
+
+def _list_item_type(returns: ast.expr | None) -> ast.expr | None:
+    """Return ``X`` from a ``list[X]`` return annotation, else None."""
+    if (
+        isinstance(returns, ast.Subscript)
+        and isinstance(returns.value, ast.Name)
+        and returns.value.id == 'list'
+    ):
+        return returns.slice
+    return None
+
+
+def _query_method(
+    core_fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    variants: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    call_alias: str,
+    client_value: ast.expr,
+    method_name: str,
+    is_async: bool,
+) -> ast.FunctionDef:
+    """Build a method that returns a deferred ``Query`` / ``AsyncQuery``.
+
+    The method carries the core endpoint's typed signature, captures every
+    argument into a params dict, and binds the family's variant functions to the
+    query's terminals. It is always a plain ``def`` (no I/O happens until a
+    terminal is called).
+    """
+    src = core_fn.args
+    kwonlyargs: list[ast.arg] = []
+    kw_defaults: list[ast.expr | None] = []
+    for arg, default in zip(src.kwonlyargs, src.kw_defaults):
+        if arg.arg == 'client':
+            continue
+        kwonlyargs.append(arg)
+        kw_defaults.append(default)
+
+    new_args = ast.arguments(
+        posonlyargs=list(src.posonlyargs),
+        args=[ast.arg(arg='self', annotation=None), *src.args],
+        vararg=src.vararg,
+        kwonlyargs=kwonlyargs,
+        kw_defaults=kw_defaults,
+        kwarg=src.kwarg,
+        defaults=list(src.defaults),
+    )
+
+    # {'p': p, ...} plus **kwargs -> the arguments every terminal reuses.
+    param_args = [*src.posonlyargs, *src.args, *kwonlyargs]
+    keys: list[ast.expr | None] = [ast.Constant(value=a.arg) for a in param_args]
+    values: list[ast.expr] = [_name(a.arg) for a in param_args]
+    if src.kwarg is not None:
+        keys.append(None)
+        values.append(_name(src.kwarg.arg))
+    params_dict = ast.Dict(keys=keys, values=values)
+
+    query_cls = 'AsyncQuery' if is_async else 'Query'
+    binding_order = ('fetch', 'to_pandas', 'to_polars', 'iterate', 'export')
+    call_keywords = [
+        ast.keyword(arg=binding, value=_attr(call_alias, variants[binding].name))
+        for binding in binding_order
+        if binding in variants
+    ]
+    query_call = _call(
+        func=_name(query_cls),
+        args=[client_value, params_dict],
+        keywords=call_keywords,
+    )
+
+    item = _list_item_type(core_fn.returns)
+    returns = ast.Subscript(
+        value=_name(query_cls),
+        slice=item if item is not None else _name('Any'),
+        ctx=ast.Load(),
+    )
+
+    body: list[ast.stmt] = []
+    docstring = _docstring_stmt(core_fn)
+    if docstring is not None:
+        body.append(docstring)
+    body.append(ast.Return(value=query_call))
+
+    return ast.FunctionDef(
+        name=method_name,
+        args=new_args,
+        body=body,
+        decorator_list=[],
+        returns=returns,
+    )
+
+
 def build_resource_client_module_body(
     function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
     resolver: TypeResolver,
@@ -491,6 +619,7 @@ def build_resource_client_module_body(
     base_client_name: str,
     endpoints_module: str = 'endpoints',
     module_of: dict[str, str] | None = None,
+    use_query: bool = False,
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
@@ -532,12 +661,47 @@ def build_resource_client_module_body(
         tokens: set[str] = set()
         for segment in path:
             tokens |= _resource_tokens(segment)
-        name_map = _build_resource_name_map(
-            list({_base_name(fn) for fn in fns}), tokens
-        )
         # Methods on the client itself delegate with client=self; on a
         # sub-resource with client=self._client.
         client_value: ast.expr = _name('self') if not path else _attr('self', '_client')
+
+        if use_query:
+            # One method per endpoint family; a family with variants collapses
+            # into a single method returning a deferred Query.
+            families = _group_families(fns)
+            name_map = _build_resource_name_map(list(families), tokens)
+            side = 'async' if is_async else 'sync'
+            built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+            for base, family in families.items():
+                variants = family[side]
+                core = variants.get('fetch')
+                if core is None:  # e.g. generate_sync=False leaves no sync core
+                    continue
+                if len(variants) > 1:
+                    built.append(
+                        _query_method(
+                            core,
+                            variants,
+                            alias_of[core.name],
+                            client_value,
+                            name_map[base],
+                            is_async,
+                        )
+                    )
+                else:
+                    built.append(
+                        _method_from_function(
+                            core,
+                            alias_of[core.name],
+                            client_value=client_value,
+                            method_name=name_map[base],
+                        )
+                    )
+            return sorted(built, key=lambda m: m.name)
+
+        name_map = _build_resource_name_map(
+            list({_base_name(fn) for fn in fns}), tokens
+        )
         built = [
             _method_from_function(
                 fn,
