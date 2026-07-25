@@ -28,10 +28,13 @@ from otterapi.codegen.client import (
     generate_base_client_class,
     generate_client_stub,
 )
+from otterapi.codegen.client_layout import build_client_module_body
 from otterapi.codegen.emit import (
     EmitConfig,
     TypeResolver,
+    build_endpoint_sink,
     build_endpoints_module_body,
+    endpoint_function_defs,
 )
 from otterapi.codegen.endpoints import async_request_fn, request_fn
 from otterapi.codegen.schema import SchemaLoader
@@ -939,6 +942,34 @@ class Codegen(OpenAPIProcessor):
         )
         return set(names)
 
+    def _generate_client_layout_file(
+        self, directory: UPath, endpoints: list[Endpoint]
+    ) -> None:
+        """Emit ``_clients.py`` with ``Client`` / ``AsyncClient`` classes.
+
+        Their methods delegate to the free functions in ``endpoints.py`` (passing
+        ``client=self``), giving a class-namespaced surface without the
+        ``async_`` name prefix. Used only when ``client_style="client"``.
+        """
+        assert self.typegen is not None
+        resolver = TypeResolver(self.typegen.types)
+        sink = build_endpoint_sink(
+            endpoints, EmitConfig.from_document(self.config), resolver
+        )
+        function_defs = endpoint_function_defs(sink)
+        body, _class_names = build_client_module_body(
+            function_defs,
+            resolver,
+            base_client_name='Client',
+            endpoints_module=self.config.endpoints_file.replace('.py', ''),
+        )
+        write_mod(
+            body,
+            directory / '_clients.py',
+            format_code=self.format_output,
+            validate_code=self.validate_output,
+        )
+
     @staticmethod
     def _inject_html_repr_mixin(impl: ast.stmt, all_model_names: set[str]) -> ast.stmt:
         """Prepend ``_HtmlReprMixin`` as the first base of a model ClassDef.
@@ -1129,6 +1160,14 @@ class Codegen(OpenAPIProcessor):
         # Generate client class
         client_name = self._get_client_class_name()
 
+        client_style = self.config.client_style
+        if client_style == 'client' and self.config.module_split.enabled:
+            raise ValueError(
+                "client_style='client' is not yet supported together with "
+                'module_split; use the default client_style="functions" with '
+                'splitting, or disable splitting.'
+            )
+
         # Check if module splitting is enabled
         if self.generate_endpoints:
             if self.config.module_split.enabled:
@@ -1147,6 +1186,16 @@ class Codegen(OpenAPIProcessor):
             directory, endpoints, base_url, client_name
         )
         generated_files.extend(client_files)
+
+        # In client_style="client", additionally emit Client / AsyncClient
+        # classes whose methods delegate to the generated free functions.
+        if (
+            self.generate_endpoints
+            and client_style == 'client'
+            and not self.config.module_split.enabled
+        ):
+            self._generate_client_layout_file(directory, endpoints)
+            generated_files.append(f'{output_name}/_clients.py')
 
         # Write __init__.py only if not using module splitting (splitting handles its own __init__.py)
         if not self.config.module_split.enabled:
@@ -1254,15 +1303,22 @@ class Codegen(OpenAPIProcessor):
         body: list[ast.stmt] = []
         all_names: list[str] = []
 
-        # Re-export endpoints, the Client, and the error hierarchy.
-        if endpoint_names:
+        # Re-export endpoints, the Client, and the error hierarchy. In
+        # client_style="client" the public surface is the Client / AsyncClient
+        # classes (whose methods wrap the functions) rather than the free
+        # functions, which stay in endpoints.py as the implementation.
+        client_style = self.config.client_style
+        if endpoint_names and client_style == 'functions':
             self._add_reexport(
                 body,
                 all_names,
                 self.config.endpoints_file.replace('.py', ''),
                 sorted(endpoint_names),
             )
-        self._add_reexport(body, all_names, 'client', ['Client'])
+        if client_style == 'client':
+            self._add_reexport(body, all_names, '_clients', ['AsyncClient', 'Client'])
+        else:
+            self._add_reexport(body, all_names, 'client', ['Client'])
         # BaseClient + the full error hierarchy from _client.py so users can
         # ``from my_pkg import NotFoundError`` without reaching into the
         # underscore-prefixed runtime module.

@@ -830,6 +830,51 @@ def assemble_module_body(
     return final_body
 
 
+def build_endpoint_sink(
+    endpoints: list[Endpoint],
+    config: EmitConfig,
+    resolver: TypeResolver,
+    description: str | None = None,
+) -> EmitSink:
+    """Emit the client preamble + every endpoint's functions into a fresh sink.
+
+    Stops short of import finalization and module assembly so callers can either
+    finish the module (:func:`build_endpoints_module_body`) or consume the raw
+    generated function defs (e.g. the ``client``-style writer, which wraps them
+    in delegating methods).
+    """
+    sink = EmitSink()
+    if description:
+        sink.body.append(ast.Expr(value=ast.Constant(value=description)))
+
+    client_stmts, client_imports = build_default_client_code()
+    sink.body.extend(client_stmts)
+    sink.imports.add_imports(client_imports)
+
+    for endpoint in endpoints:
+        ctx = EndpointContext.build(endpoint, config, resolver)
+        emit_endpoint(ctx, sink)
+
+    return sink
+
+
+def endpoint_function_defs(
+    sink: EmitSink,
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Return only the emitted endpoint function defs from a sink.
+
+    Filters out the client preamble (``_get_client`` etc.) by keeping just the
+    defs whose name was recorded in ``sink.names``.
+    """
+    wanted = set(sink.names)
+    return [
+        stmt
+        for stmt in sink.body
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and stmt.name in wanted
+    ]
+
+
 def build_endpoints_module_body(
     endpoints: list[Endpoint],
     config: EmitConfig,
@@ -845,17 +890,7 @@ def build_endpoints_module_body(
     (:meth:`Codegen._generate_endpoint_file`) and the split writer
     (:meth:`SplitModuleEmitter._emit_module_file`).
     """
-    sink = EmitSink()
-    if description:
-        sink.body.append(ast.Expr(value=ast.Constant(value=description)))
-
-    client_stmts, client_imports = build_default_client_code()
-    sink.body.extend(client_stmts)
-    sink.imports.add_imports(client_imports)
-
-    for endpoint in endpoints:
-        ctx = EndpointContext.build(endpoint, config, resolver)
-        emit_endpoint(ctx, sink)
+    sink = build_endpoint_sink(endpoints, config, resolver, description)
 
     extra_stmts = finalize_file_imports(sink, resolver, endpoints)
     body = assemble_module_body(

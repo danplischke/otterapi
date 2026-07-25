@@ -1029,6 +1029,19 @@ class DocumentConfig(BaseModel):
         None, description='Optional name for a generated client class.'
     )
 
+    client_style: Literal['functions', 'client'] = Field(
+        default='functions',
+        description=(
+            'Shape of the generated public API. "functions" (default) exposes a '
+            'standalone function per endpoint and variant (e.g. ``get_user``, '
+            '``async_get_user``, ``get_user_df``). "client" additionally exposes '
+            '``Client`` and ``AsyncClient`` classes whose methods delegate to '
+            'those functions, giving a class-namespaced surface '
+            '(``client.get_user(...)`` / ``await async_client.get_user(...)``) '
+            'without the ``async_`` name prefix.'
+        ),
+    )
+
     function_naming: Literal['operation_id', 'path'] = Field(
         default='operation_id',
         description=(

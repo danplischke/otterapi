@@ -136,6 +136,7 @@ Each entry under `documents:` supports these fields:
 | `generate_async` | bool | `true` | Generate async endpoint functions |
 | `generate_sync` | bool | `true` | Generate sync endpoint functions |
 | `client_class_name` | string | from API title | Override the generated client class name |
+| `client_style` | `functions` \| `client` | `functions` | Shape of the public API. `functions` exposes a standalone function per endpoint/variant. `client` additionally exposes `Client` / `AsyncClient` classes with methods (see [Client Style](#-client-style)) |
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
@@ -734,6 +735,47 @@ user = client.get_user(user_id=123)
 async def main():
     user = await client.async_get_user(user_id=123)
 ```
+
+### 🎛 Client Style
+
+`client_style` controls the shape of the generated public API.
+
+**`functions` (default)** — a standalone function per endpoint and variant, plus
+an infrastructure `Client` you pass in:
+
+```python
+from client import get_user, async_get_user, list_users_df
+
+user = get_user(user_id=123)
+df = list_users_df()
+```
+
+**`client`** — additionally generates `Client` and `AsyncClient` classes whose
+methods delegate to those functions, giving a class-namespaced surface with clean
+names (no `async_` prefix):
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    client_style: client
+```
+
+```python
+from client import Client, AsyncClient
+
+user = Client(base_url='https://api.example.com').get_user(user_id=123)
+
+async def main():
+    async with AsyncClient() as api:
+        user = await api.get_user(user_id=123)          # no async_ prefix
+        df = await api.list_users_df()
+        async for u in api.list_users_iter():
+            ...
+```
+
+The free functions remain in `endpoints.py` as the implementation the methods
+call. (Not yet combinable with `module_split`.)
 
 ### Working with Models
 
