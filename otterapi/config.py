@@ -1043,6 +1043,19 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    resource_naming: Literal['tag', 'path', 'operation_id'] = Field(
+        default='tag',
+        description=(
+            'How resource sub-clients are derived when ``client_style="resource"``. '
+            '"tag" (default) uses the ``module_split`` strategy (usually one level). '
+            '"path" nests by URL path segments '
+            '(``/identity/users/{id}`` -> ``client.identity.users.get(...)``). '
+            '"operation_id" nests by the dotted/slash hierarchy in each '
+            'operationId (``identity.users.get`` -> ``client.identity.users.get()``). '
+            'Ignored for other client styles.'
+        ),
+    )
+
     function_naming: Literal['operation_id', 'path'] = Field(
         default='operation_id',
         description=(

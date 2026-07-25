@@ -19,6 +19,17 @@ from otterapi.config import DocumentConfig
 
 SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'spec.yaml'
 TAGGED_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'tagged' / 'spec.yaml'
+NESTED_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'nested' / 'spec.yaml'
+
+
+def _nested_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path == '/identity/users':
+        return httpx.Response(200, json=[{'id': 1, 'name': 'alice'}])
+    if request.url.path == '/identity/users/1':
+        return httpx.Response(200, json={'id': 1, 'name': 'alice'})
+    if request.url.path == '/billing/invoices':
+        return httpx.Response(200, json=[{'id': 9, 'amount': 4.2}])
+    return httpx.Response(404, json={'detail': 'unknown route'})
 
 
 def _mock_handler(request: httpx.Request) -> httpx.Response:
@@ -242,6 +253,55 @@ class TestSplitClientStyle:
             client = mod.AsyncClient(async_http_client=http)
             users = await client.users.list()
         assert [u.name for u in users] == ['alice']
+
+
+def _generate_nested(target: Path, resource_naming: str, **overrides) -> None:
+    config = DocumentConfig.model_validate(
+        {
+            'source': str(NESTED_SPEC),
+            'output': str(target),
+            'base_url': 'https://example.test',
+            'client_style': 'resource',
+            'resource_naming': resource_naming,
+            **overrides,
+        }
+    )
+    Codegen(config).generate()
+
+
+class TestNestedResources:
+    @pytest.mark.parametrize('naming', ['path', 'operation_id'])
+    def test_nested_chain_calls(self, tmp_path, naming):
+        _generate_nested(tmp_path / f'nst_{naming}', naming)
+        mod = _import_fresh(tmp_path, f'nst_{naming}')
+        with httpx.Client(transport=httpx.MockTransport(_nested_handler)) as http:
+            client = mod.Client(http_client=http)
+            # Two levels of nesting: client.identity.users.<method>
+            users = client.identity.users.list()
+            one = client.identity.users.get(userId=1)
+            invoices = client.billing.invoices.list()
+        assert [u.name for u in users] == ['alice']
+        assert one.id == 1
+        assert invoices[0].amount == 4.2
+
+    @pytest.mark.asyncio
+    async def test_nested_async(self, tmp_path):
+        _generate_nested(tmp_path / 'nst_a', 'path')
+        mod = _import_fresh(tmp_path, 'nst_a')
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_nested_handler)
+        ) as http:
+            client = mod.AsyncClient(async_http_client=http)
+            users = await client.identity.users.list()
+        assert [u.name for u in users] == ['alice']
+
+    def test_tag_mode_stays_flat(self, tmp_path):
+        # Default resource_naming keeps the single-level grouping.
+        _generate_nested(tmp_path / 'nst_flat', 'tag')
+        mod = _import_fresh(tmp_path, 'nst_flat')
+        client = mod.Client(base_url='https://example.test')
+        # No nested identity.users chain; the tag/hybrid strategy groups flatly.
+        assert not hasattr(getattr(client, 'identity', object()), 'users')
 
 
 class TestConfigGuards:

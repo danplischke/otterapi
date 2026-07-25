@@ -740,6 +740,7 @@ class Codegen(OpenAPIProcessor):
             path=path,
             description=operation.description,
             tags=tags,
+            operation_id=operation.operationId,
             parameters=parameters,
             request_body=request_body_info,
             response_type=response_model,
@@ -951,7 +952,6 @@ class Codegen(OpenAPIProcessor):
         endpoints: list[Endpoint],
         *,
         module_of: dict[str, str] | None = None,
-        resource_of: dict[str, str] | None = None,
     ) -> None:
         """Emit ``_clients.py`` with ``Client`` / ``AsyncClient`` classes.
 
@@ -973,12 +973,11 @@ class Codegen(OpenAPIProcessor):
         endpoints_module = self.config.endpoints_file.replace('.py', '')
 
         if self.config.client_style == 'resource':
-            if resource_of is None:
-                resource_of = self._resource_assignments(sink)
+            resource_path_of = self._resource_path_of(sink)
             body, _class_names = build_resource_client_module_body(
                 function_defs,
                 resolver,
-                resource_of,
+                resource_path_of,
                 base_client_name='Client',
                 endpoints_module=endpoints_module,
                 module_of=module_of,
@@ -998,46 +997,74 @@ class Codegen(OpenAPIProcessor):
             validate_code=self.validate_output,
         )
 
-    def _resource_assignments(self, sink) -> dict[str, str]:
-        """Map each generated function name to a resource key.
+    def _resource_path_of(self, sink) -> dict[str, tuple[str, ...]]:
+        """Map each generated function name to its nested resource path.
 
-        Reuses the ``module_split`` strategy (tags / path / custom / hybrid) to
-        bucket endpoints into resources, without splitting files.
+        The path is a tuple of segments (``('identity', 'users')`` ->
+        ``client.identity.users``), derived per ``resource_naming``. An empty
+        tuple means the method lives directly on the client.
         """
-        from otterapi.codegen.splitting import ModuleMapResolver
-
-        map_resolver = ModuleMapResolver(self.config.module_split)
-        per_endpoint: dict[int, str] = {}
-        resource_of: dict[str, str] = {}
+        mode = self.config.resource_naming
+        per_endpoint: dict[int, tuple[str, ...]] = {}
+        result: dict[str, tuple[str, ...]] = {}
         for fn_name, endpoint in sink.owners.items():
             key = id(endpoint)
             if key not in per_endpoint:
-                resolved = map_resolver.resolve(
-                    endpoint.path, endpoint.method, endpoint.tags
-                )
-                per_endpoint[key] = '_'.join(resolved.module_path) or 'common'
-            resource_of[fn_name] = per_endpoint[key]
-        return resource_of
+                per_endpoint[key] = self._resource_segments(endpoint, mode)
+            result[fn_name] = per_endpoint[key]
+        return result
+
+    def _resource_segments(self, endpoint: Endpoint, mode: str) -> tuple[str, ...]:
+        if mode == 'path':
+            return self._path_resource_segments(endpoint.path)
+        if mode == 'operation_id':
+            return self._operation_id_resource_segments(endpoint)
+        # 'tag' (default): reuse the module_split strategy (usually one level).
+        from otterapi.codegen.splitting import ModuleMapResolver
+
+        resolved = ModuleMapResolver(self.config.module_split).resolve(
+            endpoint.path, endpoint.method, endpoint.tags
+        )
+        return tuple(resolved.module_path) or ('common',)
+
+    def _path_resource_segments(self, path: str) -> tuple[str, ...]:
+        """Nested resource path from URL segments (params dropped, prefix stripped)."""
+        stripped = path
+        for prefix in self.config.module_split.global_strip_prefixes:
+            if prefix and stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :]
+                break
+        segments: list[str] = []
+        for seg in stripped.split('/'):
+            if not seg or (seg.startswith('{') and seg.endswith('}')):
+                continue
+            cleaned = to_snake_case(seg.replace('{', '').replace('}', ''))
+            if cleaned:
+                segments.append(cleaned)
+        return tuple(segments) or ('common',)
 
     @staticmethod
-    def _split_module_mappings(
-        split_modules: list,
-    ) -> tuple[dict[str, str], dict[str, str]]:
-        """From emitted split modules, map each function to its module + resource.
+    def _operation_id_resource_segments(endpoint: Endpoint) -> tuple[str, ...]:
+        """Nested resource path from the operationId hierarchy (``.`` / ``/``).
 
-        ``module_of`` is the dotted module path used for imports
-        (``identity.users``); ``resource_of`` is the underscore key used to group
-        resource sub-clients (``identity_users``).
+        All but the last segment form the resource path; the last is the method
+        basis (stripped from the method name later). A flat operationId (no
+        separator) yields an empty path -> the method lives on the client.
         """
+        op_id = endpoint.operation_id or ''
+        raw = op_id.replace('/', '.').split('.')
+        parts = [to_snake_case(p) for p in raw if p]
+        return tuple(p for p in parts[:-1] if p)
+
+    @staticmethod
+    def _split_module_of(split_modules: list) -> dict[str, str]:
+        """Map each function to the dotted module it was split into (for imports)."""
         module_of: dict[str, str] = {}
-        resource_of: dict[str, str] = {}
         for module in split_modules:
             dotted = '.'.join(module.module_path)
-            resource = '_'.join(module.module_path) or 'common'
             for fn_name in module.endpoint_names:
                 module_of[fn_name] = dotted
-                resource_of[fn_name] = resource
-        return module_of, resource_of
+        return module_of
 
     @staticmethod
     def _inject_html_repr_mixin(impl: ast.stmt, all_model_names: set[str]) -> ast.stmt:
@@ -1255,12 +1282,10 @@ class Codegen(OpenAPIProcessor):
         # AsyncClient classes whose methods delegate to the generated free
         # functions (routed to their split module when splitting is enabled).
         if self.generate_endpoints and client_style in ('client', 'resource'):
-            module_of, resource_of = (None, None)
+            module_of = None
             if self.config.module_split.enabled:
-                module_of, resource_of = self._split_module_mappings(split_modules)
-            self._generate_client_layout_file(
-                directory, endpoints, module_of=module_of, resource_of=resource_of
-            )
+                module_of = self._split_module_of(split_modules)
+            self._generate_client_layout_file(directory, endpoints, module_of=module_of)
             generated_files.append(f'{output_name}/_clients.py')
 
         # Write __init__.py only if not using module splitting (splitting handles its own __init__.py)

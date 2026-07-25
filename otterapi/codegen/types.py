@@ -338,6 +338,7 @@ class Endpoint:
     path: str = ''
     description: str | None = None
     tags: list[str] | None = None  # OpenAPI tags for module splitting
+    operation_id: str | None = None  # raw operationId (for resource_naming)
 
     # Parameters and body
     parameters: list['Parameter'] | None = None

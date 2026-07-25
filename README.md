@@ -137,6 +137,7 @@ Each entry under `documents:` supports these fields:
 | `generate_sync` | bool | `true` | Generate sync endpoint functions |
 | `client_class_name` | string | from API title | Override the generated client class name |
 | `client_style` | `functions` \| `client` \| `resource` | `functions` | Shape of the public API. `functions` exposes a standalone function per endpoint/variant; `client` adds `Client` / `AsyncClient` classes with a flat method per endpoint; `resource` groups those methods into resource sub-clients (see [Client Style](#-client-style)) |
+| `resource_naming` | `tag` \| `path` \| `operation_id` | `tag` | How resource sub-clients are derived for `client_style: resource`. `tag` uses the module-split strategy (one level); `path` nests by URL segments; `operation_id` nests by the dotted operationId hierarchy |
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
@@ -795,6 +796,22 @@ order = client.orders.get(order_id=7)
 
 async with AsyncClient() as api:
     user = await api.users.get(user_id=123)
+```
+
+`resource_naming` controls how the sub-clients are derived and can **nest**:
+
+```yaml
+    client_style: resource
+    resource_naming: path          # or: operation_id
+```
+
+- `tag` (default) — one level, from the module-split strategy.
+- `path` — nests by URL segments: `/identity/users/{id}` → `client.identity.users.get(id)`.
+- `operation_id` — nests by the dotted operationId: `identity.users.get` → `client.identity.users.get()`.
+
+```python
+user = client.identity.users.get(user_id=123)
+invoices = client.billing.invoices.list()
 ```
 
 The free functions remain as the implementation the methods call. `client` and

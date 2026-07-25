@@ -452,10 +452,24 @@ def _resource_class(class_name: str, methods: list[ast.stmt]) -> ast.ClassDef:
     )
 
 
-def _resource_property(attr_name: str, resource_class_name: str) -> ast.FunctionDef:
-    """A ``@property`` on the client returning a fresh resource sub-client."""
+def _resource_class_name(path: tuple[str, ...], is_async: bool) -> str:
+    """Class name for a resource node, e.g. ``('identity','users')`` ->
+    ``_IdentityUsersResource`` (``_AsyncIdentityUsersResource``)."""
+    pascal = _pascal('_'.join(path))
+    return f'_Async{pascal}Resource' if is_async else f'_{pascal}Resource'
+
+
+def _child_property(
+    child_segment: str, child_class_name: str, *, on_client: bool
+) -> ast.FunctionDef:
+    """A ``@property`` returning a child resource, threading the real client.
+
+    On the client itself ``self`` is the client; on a sub-resource the stored
+    ``self._client`` is passed down.
+    """
+    client_expr: ast.expr = _name('self') if on_client else _attr('self', '_client')
     return ast.FunctionDef(
-        name=attr_name,
+        name=child_segment,
         args=ast.arguments(
             posonlyargs=[],
             args=[ast.arg(arg='self')],
@@ -463,18 +477,16 @@ def _resource_property(attr_name: str, resource_class_name: str) -> ast.Function
             kw_defaults=[],
             defaults=[],
         ),
-        body=[
-            ast.Return(value=_call(_name(resource_class_name), args=[_name('self')]))
-        ],
+        body=[ast.Return(value=_call(_name(child_class_name), args=[client_expr]))],
         decorator_list=[_name('property')],
-        returns=_name(resource_class_name),
+        returns=_name(child_class_name),
     )
 
 
 def build_resource_client_module_body(
     function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
     resolver: TypeResolver,
-    resource_of: dict[str, str],
+    resource_path_of: dict[str, tuple[str, ...]],
     *,
     base_client_name: str,
     endpoints_module: str = 'endpoints',
@@ -482,106 +494,127 @@ def build_resource_client_module_body(
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
-    """Build ``_clients.py`` with resource-grouped sub-clients.
+    """Build ``_clients.py`` with (possibly nested) resource sub-clients.
 
-    ``client.users.get(user_id=1)`` instead of ``client.get_user(user_id=1)``:
-    functions are grouped into resource sub-clients by ``resource_of`` (produced
-    from the ``module_split`` strategy), and method names have the resource token
-    stripped. ``module_of`` (split mode) routes each method to its function's real
-    module.
+    ``resource_path_of`` maps each function to its resource path tuple; a
+    single-segment path gives ``client.users.get(...)``, a two-segment path gives
+    ``client.identity.users.get(...)``, and an empty path puts the method directly
+    on the client. Method names have the path's tokens stripped. ``module_of``
+    (split mode) routes each method to its function's real module.
     """
-    client_value = _attr('self', '_client')
     module_imports, alias_of = _module_imports_and_aliases(
         function_defs, module_of, endpoints_module
     )
 
-    # Group function defs by resource, preserving a stable resource order.
-    groups: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    # Functions living at exactly each resource path.
+    functions_at: dict[
+        tuple[str, ...], list[ast.FunctionDef | ast.AsyncFunctionDef]
+    ] = {}
     for fn in function_defs:
-        groups.setdefault(resource_of.get(fn.name, 'common'), []).append(fn)
+        functions_at.setdefault(resource_path_of.get(fn.name, ()), []).append(fn)
+
+    # Every node incl. ancestors, and each node's child segment names.
+    all_paths: set[tuple[str, ...]] = set()
+    for path in functions_at:
+        for i in range(len(path) + 1):
+            all_paths.add(path[:i])
+    children_of: dict[tuple[str, ...], set[str]] = {}
+    for path in all_paths:
+        if path:
+            children_of.setdefault(path[:-1], set()).add(path[-1])
 
     all_methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-    resource_classes: list[ast.stmt] = []
-    sync_properties: list[ast.stmt] = []
-    async_properties: list[ast.stmt] = []
 
-    for resource_key in sorted(groups):
-        group = groups[resource_key]
-        tokens = _resource_tokens(resource_key)
+    def methods_for(
+        path: tuple[str, ...], is_async: bool
+    ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+        fns = functions_at.get(path, [])
+        tokens: set[str] = set()
+        for segment in path:
+            tokens |= _resource_tokens(segment)
         name_map = _build_resource_name_map(
-            list({_base_name(fn) for fn in group}), tokens
+            list({_base_name(fn) for fn in fns}), tokens
         )
+        # Methods on the client itself delegate with client=self; on a
+        # sub-resource with client=self._client.
+        client_value: ast.expr = _name('self') if not path else _attr('self', '_client')
+        built = [
+            _method_from_function(
+                fn,
+                alias_of[fn.name],
+                client_value=client_value,
+                method_name=name_map[_base_name(fn)],
+            )
+            for fn in fns
+            if isinstance(fn, ast.AsyncFunctionDef) is is_async
+        ]
+        return sorted(built, key=lambda m: m.name)
 
-        def _methods(
-            is_async: bool,
-            group: list[ast.FunctionDef | ast.AsyncFunctionDef] = group,
-            name_map: dict[str, str] = name_map,
-        ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-            built = [
-                _method_from_function(
-                    fn,
-                    alias_of[fn.name],
-                    client_value=client_value,
-                    method_name=name_map[_base_name(fn)],
+    def child_props(
+        path: tuple[str, ...], is_async: bool, *, on_client: bool
+    ) -> list[ast.stmt]:
+        return [
+            _child_property(
+                child,
+                _resource_class_name(path + (child,), is_async),
+                on_client=on_client,
+            )
+            for child in sorted(children_of.get(path, set()))
+        ]
+
+    # Sub-resource classes (every non-root node), deepest first so a class is
+    # defined before the parent that references it.
+    resource_classes: list[ast.stmt] = []
+    for path in sorted(all_paths, key=lambda p: (-len(p), p)):
+        if not path:
+            continue
+        for is_async in (False, True):
+            methods = methods_for(path, is_async)
+            all_methods.extend(methods)
+            body = child_props(path, is_async, on_client=False) + methods
+            resource_classes.append(
+                _resource_class(
+                    _resource_class_name(path, is_async), body or [ast.Pass()]
                 )
-                for fn in group
-                if isinstance(fn, ast.AsyncFunctionDef) is is_async
-            ]
-            return sorted(built, key=lambda m: m.name)
+            )
 
-        sync_methods = _methods(is_async=False)
-        async_methods = _methods(is_async=True)
-        all_methods.extend(sync_methods)
-        all_methods.extend(async_methods)
+    # Root: methods + top-level resource accessors live on Client / AsyncClient.
+    def client_class(name: str, is_async: bool) -> ast.ClassDef:
+        methods = methods_for((), is_async)
+        all_methods.extend(methods)
+        body = child_props((), is_async, on_client=True) + methods
+        return ast.ClassDef(
+            name=name,
+            bases=[_name('_BaseClient')],
+            keywords=[],
+            body=body or [ast.Pass()],
+            decorator_list=[],
+        )
 
-        pascal = _pascal(resource_key)
-        sync_cls_name = f'_{pascal}Resource'
-        async_cls_name = f'_Async{pascal}Resource'
-        resource_classes.append(
-            _resource_class(sync_cls_name, sync_methods or [ast.Pass()])
-        )
-        resource_classes.append(
-            _resource_class(async_cls_name, async_methods or [ast.Pass()])
-        )
-        sync_properties.append(_resource_property(resource_key, sync_cls_name))
-        async_properties.append(_resource_property(resource_key, async_cls_name))
+    sync_client = client_class(sync_class_name, is_async=False)
+    async_client = client_class(async_class_name, is_async=True)
 
     imports, type_checking_block = _build_imports(all_methods, resolver)
 
-    sync_client = ast.ClassDef(
-        name=sync_class_name,
-        bases=[_name('_BaseClient')],
-        keywords=[],
-        body=sync_properties or [ast.Pass()],
-        decorator_list=[],
-    )
-    async_client = ast.ClassDef(
-        name=async_class_name,
-        bases=[_name('_BaseClient')],
-        keywords=[],
-        body=async_properties or [ast.Pass()],
-        decorator_list=[],
-    )
-
-    body: list[ast.stmt] = [
+    module_body: list[ast.stmt] = [
         ast.ImportFrom(
             module='__future__', names=[ast.alias(name='annotations')], level=0
         ),
     ]
-    body.extend(imports)
-    body.append(
+    module_body.extend(imports)
+    module_body.append(
         ast.ImportFrom(
             module='client',
             names=[ast.alias(name=base_client_name, asname='_BaseClient')],
             level=1,
         )
     )
-    body.extend(module_imports)
+    module_body.extend(module_imports)
     if type_checking_block is not None:
-        body.append(type_checking_block)
-    body.append(_all(sorted([async_class_name, sync_class_name])))
-    body.extend(resource_classes)
-    body.append(sync_client)
-    body.append(async_client)
+        module_body.append(type_checking_block)
+    module_body.append(_all(sorted([async_class_name, sync_class_name])))
+    module_body.extend(resource_classes)
+    module_body.append(sync_client)
+    module_body.append(async_client)
 
-    return body, [sync_class_name, async_class_name]
+    return module_body, [sync_class_name, async_class_name]
