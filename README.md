@@ -136,7 +136,7 @@ Each entry under `documents:` supports these fields:
 | `generate_async` | bool | `true` | Generate async endpoint functions |
 | `generate_sync` | bool | `true` | Generate sync endpoint functions |
 | `client_class_name` | string | from API title | Override the generated client class name |
-| `client_style` | `functions` \| `client` | `functions` | Shape of the public API. `functions` exposes a standalone function per endpoint/variant. `client` additionally exposes `Client` / `AsyncClient` classes with methods (see [Client Style](#-client-style)) |
+| `client_style` | `functions` \| `client` \| `resource` | `functions` | Shape of the public API. `functions` exposes a standalone function per endpoint/variant; `client` adds `Client` / `AsyncClient` classes with a flat method per endpoint; `resource` groups those methods into resource sub-clients (see [Client Style](#-client-style)) |
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
@@ -774,8 +774,31 @@ async def main():
             ...
 ```
 
+**`resource`** — groups the methods into resource sub-clients, derived from the
+same strategy as [module splitting](#-module-splitting) (tags/path/custom). The
+resource token is stripped from each method name:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    client_style: resource
+```
+
+```python
+from client import Client, AsyncClient
+
+client = Client(base_url='https://api.example.com')
+user = client.users.get(user_id=123)        # -> get_user(...)
+users = client.users.list()                 # -> list_users(...)
+order = client.orders.get(order_id=7)
+
+async with AsyncClient() as api:
+    user = await api.users.get(user_id=123)
+```
+
 The free functions remain in `endpoints.py` as the implementation the methods
-call. (Not yet combinable with `module_split`.)
+call. (`client` and `resource` are not yet combinable with `module_split`.)
 
 ### Working with Models
 

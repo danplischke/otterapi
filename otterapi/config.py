@@ -1029,16 +1029,17 @@ class DocumentConfig(BaseModel):
         None, description='Optional name for a generated client class.'
     )
 
-    client_style: Literal['functions', 'client'] = Field(
+    client_style: Literal['functions', 'client', 'resource'] = Field(
         default='functions',
         description=(
             'Shape of the generated public API. "functions" (default) exposes a '
             'standalone function per endpoint and variant (e.g. ``get_user``, '
             '``async_get_user``, ``get_user_df``). "client" additionally exposes '
-            '``Client`` and ``AsyncClient`` classes whose methods delegate to '
-            'those functions, giving a class-namespaced surface '
-            '(``client.get_user(...)`` / ``await async_client.get_user(...)``) '
-            'without the ``async_`` name prefix.'
+            '``Client`` and ``AsyncClient`` classes with a flat method per '
+            'endpoint (``client.get_user(...)``), without the ``async_`` prefix. '
+            '"resource" groups those methods into resource sub-clients derived '
+            'from the same strategy as ``module_split`` (tags/path/custom), e.g. '
+            '``client.users.get(...)``.'
         ),
     )
 

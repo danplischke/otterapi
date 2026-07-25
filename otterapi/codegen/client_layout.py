@@ -24,7 +24,14 @@ from __future__ import annotations
 import ast
 from typing import TYPE_CHECKING
 
-from otterapi.codegen.ast_utils import ImportCollector, _all, _attr, _call, _name
+from otterapi.codegen.ast_utils import (
+    ImportCollector,
+    _all,
+    _assign,
+    _attr,
+    _call,
+    _name,
+)
 
 if TYPE_CHECKING:
     from otterapi.codegen.emit import TypeResolver
@@ -75,20 +82,34 @@ def _docstring_stmt(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.stmt | No
 
 
 def _method_from_function(
-    fn: ast.FunctionDef | ast.AsyncFunctionDef, endpoints_module_alias: str
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    endpoints_module_alias: str,
+    *,
+    client_value: ast.expr | None = None,
+    method_name: str | None = None,
 ) -> ast.FunctionDef | ast.AsyncFunctionDef:
     """Transform a generated free function into a delegating client method.
 
     Drops the ``client`` keyword arg, prepends ``self``, and forwards every
-    remaining argument to the original function with ``client=self``.
+    remaining argument to the original function, passing ``client_value`` (the
+    owning client instance) as ``client``.
+
+    Args:
+        client_value: Expression bound to ``client`` in the delegated call
+            (default ``self``; resource sub-clients pass ``self._client``).
+        method_name: Override for the method name (default: the function name
+            with any ``async_`` prefix stripped).
     """
     is_async_def = isinstance(fn, ast.AsyncFunctionDef)
     is_generator = _own_scope_yields(fn)
     src = fn.args
+    if client_value is None:
+        client_value = _name('self')
 
-    method_name = fn.name
-    if is_async_def and method_name.startswith(ASYNC_PREFIX):
-        method_name = method_name[len(ASYNC_PREFIX) :]
+    if method_name is None:
+        method_name = fn.name
+        if is_async_def and method_name.startswith(ASYNC_PREFIX):
+            method_name = method_name[len(ASYNC_PREFIX) :]
 
     # Keyword-only args minus ``client`` (kept in lockstep with its default).
     kwonlyargs: list[ast.arg] = []
@@ -110,10 +131,10 @@ def _method_from_function(
     )
 
     # Forward positionals positionally, remaining kwonly by keyword, plus
-    # client=self, plus any **kwargs.
+    # client=<client_value>, plus any **kwargs.
     call_args = [_name(a.arg) for a in (*src.posonlyargs, *src.args)]
     call_keywords = [ast.keyword(arg=a.arg, value=_name(a.arg)) for a in kwonlyargs]
-    call_keywords.append(ast.keyword(arg='client', value=_name('self')))
+    call_keywords.append(ast.keyword(arg='client', value=client_value))
     if src.kwarg is not None:
         call_keywords.append(ast.keyword(arg=None, value=_name(src.kwarg.arg)))
 
@@ -305,5 +326,215 @@ def build_client_module_body(
     body.append(_all(sorted([async_class_name, sync_class_name])))
     body.append(sync_class)
     body.append(async_class)
+
+    return body, [sync_class_name, async_class_name]
+
+
+# =============================================================================
+# Resource-grouped layout (client_style="resource"): client.users.get(...)
+# =============================================================================
+
+
+def _pascal(resource_key: str) -> str:
+    """``identity_users`` -> ``IdentityUsers`` for a resource class name."""
+    return ''.join(part[:1].upper() + part[1:] for part in resource_key.split('_'))
+
+
+def _resource_tokens(resource_key: str) -> set[str]:
+    """Tokens stripped from a method name for a resource (naive singular/plural).
+
+    ``users`` -> ``{'users', 'user'}`` so ``list_users`` becomes ``list`` and
+    ``get_user`` becomes ``get`` under ``client.users``.
+    """
+    tokens: set[str] = set()
+    for comp in resource_key.split('_'):
+        tokens.add(comp)
+        if comp.endswith('s'):
+            tokens.add(comp[:-1])
+        else:
+            tokens.add(comp + 's')
+    return tokens
+
+
+def _build_resource_name_map(fn_bases: list[str], tokens: set[str]) -> dict[str, str]:
+    """Map each function base name to a resource method name.
+
+    Strips the resource tokens; falls back to the full name when stripping would
+    produce an empty, invalid, or already-taken identifier. Deterministic
+    (sorted) so sync and async siblings resolve to the same method name.
+    """
+    name_map: dict[str, str] = {}
+    taken: set[str] = set()
+    for base in sorted(fn_bases):
+        candidate = '_'.join(p for p in base.split('_') if p not in tokens)
+        if not candidate or not candidate.isidentifier() or candidate in taken:
+            candidate = base
+        while candidate in taken:  # pathological; keeps names unique
+            candidate = candidate + '_'
+        name_map[base] = candidate
+        taken.add(candidate)
+    return name_map
+
+
+def _base_name(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Function name with any ``async_`` prefix removed (the resource base name)."""
+    if isinstance(fn, ast.AsyncFunctionDef) and fn.name.startswith(ASYNC_PREFIX):
+        return fn.name[len(ASYNC_PREFIX) :]
+    return fn.name
+
+
+def _resource_class(class_name: str, methods: list[ast.stmt]) -> ast.ClassDef:
+    """A resource sub-client holding ``self._client`` plus delegating methods."""
+    init = ast.FunctionDef(
+        name='__init__',
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg='self'), ast.arg(arg='client')],
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        ),
+        body=[_assign(_attr('self', '_client'), _name('client'))],
+        decorator_list=[],
+        returns=None,
+    )
+    return ast.ClassDef(
+        name=class_name,
+        bases=[],
+        keywords=[],
+        body=[init, *methods],
+        decorator_list=[],
+    )
+
+
+def _resource_property(attr_name: str, resource_class_name: str) -> ast.FunctionDef:
+    """A ``@property`` on the client returning a fresh resource sub-client."""
+    return ast.FunctionDef(
+        name=attr_name,
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg='self')],
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        ),
+        body=[
+            ast.Return(value=_call(_name(resource_class_name), args=[_name('self')]))
+        ],
+        decorator_list=[_name('property')],
+        returns=_name(resource_class_name),
+    )
+
+
+def build_resource_client_module_body(
+    function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    resolver: TypeResolver,
+    resource_of: dict[str, str],
+    *,
+    base_client_name: str,
+    endpoints_module: str = 'endpoints',
+    sync_class_name: str = 'Client',
+    async_class_name: str = 'AsyncClient',
+) -> tuple[list[ast.stmt], list[str]]:
+    """Build ``_clients.py`` with resource-grouped sub-clients.
+
+    ``client.users.get(user_id=1)`` instead of ``client.get_user(user_id=1)``:
+    functions are grouped into resource sub-clients by ``resource_of`` (produced
+    from the ``module_split`` strategy), and method names have the resource token
+    stripped.
+    """
+    endpoints_alias = '_endpoints'
+    client_value = _attr('self', '_client')
+
+    # Group function defs by resource, preserving a stable resource order.
+    groups: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    for fn in function_defs:
+        groups.setdefault(resource_of.get(fn.name, 'common'), []).append(fn)
+
+    all_methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    resource_classes: list[ast.stmt] = []
+    sync_properties: list[ast.stmt] = []
+    async_properties: list[ast.stmt] = []
+
+    for resource_key in sorted(groups):
+        group = groups[resource_key]
+        tokens = _resource_tokens(resource_key)
+        name_map = _build_resource_name_map(
+            list({_base_name(fn) for fn in group}), tokens
+        )
+
+        def _methods(is_async: bool) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+            built = [
+                _method_from_function(
+                    fn,
+                    endpoints_alias,
+                    client_value=client_value,
+                    method_name=name_map[_base_name(fn)],
+                )
+                for fn in group
+                if isinstance(fn, ast.AsyncFunctionDef) is is_async
+            ]
+            return sorted(built, key=lambda m: m.name)
+
+        sync_methods = _methods(is_async=False)
+        async_methods = _methods(is_async=True)
+        all_methods.extend(sync_methods)
+        all_methods.extend(async_methods)
+
+        pascal = _pascal(resource_key)
+        sync_cls_name = f'_{pascal}Resource'
+        async_cls_name = f'_Async{pascal}Resource'
+        resource_classes.append(
+            _resource_class(sync_cls_name, sync_methods or [ast.Pass()])
+        )
+        resource_classes.append(
+            _resource_class(async_cls_name, async_methods or [ast.Pass()])
+        )
+        sync_properties.append(_resource_property(resource_key, sync_cls_name))
+        async_properties.append(_resource_property(resource_key, async_cls_name))
+
+    imports, type_checking_block = _build_imports(all_methods, resolver)
+
+    sync_client = ast.ClassDef(
+        name=sync_class_name,
+        bases=[_name('_BaseClient')],
+        keywords=[],
+        body=sync_properties or [ast.Pass()],
+        decorator_list=[],
+    )
+    async_client = ast.ClassDef(
+        name=async_class_name,
+        bases=[_name('_BaseClient')],
+        keywords=[],
+        body=async_properties or [ast.Pass()],
+        decorator_list=[],
+    )
+
+    body: list[ast.stmt] = [
+        ast.ImportFrom(
+            module='__future__', names=[ast.alias(name='annotations')], level=0
+        ),
+    ]
+    body.extend(imports)
+    body.append(
+        ast.ImportFrom(
+            module='client',
+            names=[ast.alias(name=base_client_name, asname='_BaseClient')],
+            level=1,
+        )
+    )
+    body.append(
+        ast.ImportFrom(
+            module=None,
+            names=[ast.alias(name=endpoints_module, asname=endpoints_alias)],
+            level=1,
+        )
+    )
+    if type_checking_block is not None:
+        body.append(type_checking_block)
+    body.append(_all(sorted([async_class_name, sync_class_name])))
+    body.extend(resource_classes)
+    body.append(sync_client)
+    body.append(async_client)
 
     return body, [sync_class_name, async_class_name]

@@ -324,12 +324,20 @@ class EmitSink:
     has_dataframe: bool = False
     has_pagination: bool = False
     has_export: bool = False
+    #: Maps each emitted function name to the endpoint it was generated for.
+    #: Populated only while :func:`emit_endpoint` is running (the client
+    #: preamble functions have no owner). Used by layout writers that group
+    #: functions by endpoint / resource.
+    owners: dict[str, Endpoint] = field(default_factory=dict)
+    _current_endpoint: Endpoint | None = None
 
     def add(self, fn: ast.stmt, name: str, imports: dict[str, set[str]]) -> None:
         """Append a generated function, record its name, and merge its imports."""
         self.body.append(fn)
         self.names.append(name)
         self.imports.add_imports(imports)
+        if self._current_endpoint is not None:
+            self.owners[name] = self._current_endpoint
 
 
 def build_pagination_config_dict(pag_config: PaginationMethodConfig) -> dict:
@@ -749,6 +757,7 @@ def emit_endpoint(ctx: EndpointContext, sink: EmitSink) -> None:
     The DataFrame-before-export vs export-in-between ordering is exactly why this
     is a hand-written orchestrator rather than a flat feature loop.
     """
+    sink._current_endpoint = ctx.endpoint
     generated_paginated_df = False
     if ctx.pag_config is not None:
         sink.has_pagination = True

@@ -18,6 +18,7 @@ from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
 
 SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'spec.yaml'
+TAGGED_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'tagged' / 'spec.yaml'
 
 
 def _mock_handler(request: httpx.Request) -> httpx.Response:
@@ -29,6 +30,14 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
                 {'id': 2, 'username': 'bob_2', 'age': 28, 'tags': []},
             ],
         )
+    return httpx.Response(404, json={'detail': 'unknown route'})
+
+
+def _tagged_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path == '/users':
+        return httpx.Response(200, json=[{'id': 1, 'name': 'alice'}])
+    if request.url.path == '/orders':
+        return httpx.Response(200, json=[{'id': 7, 'total': 9.5}])
     return httpx.Response(404, json={'detail': 'unknown route'})
 
 
@@ -64,6 +73,21 @@ def client_style_module(tmp_path_factory):
     parent = tmp_path_factory.mktemp('client_style')
     _generate(parent / 'cs_pkg', client_style='client')
     return _import_fresh(parent, 'cs_pkg')
+
+
+@pytest.fixture(scope='module')
+def resource_style_module(tmp_path_factory):
+    parent = tmp_path_factory.mktemp('resource_style')
+    config = DocumentConfig.model_validate(
+        {
+            'source': str(TAGGED_SPEC),
+            'output': str(parent / 'rs_pkg'),
+            'base_url': 'https://example.test',
+            'client_style': 'resource',
+        }
+    )
+    Codegen(config).generate()
+    return _import_fresh(parent, 'rs_pkg')
 
 
 class TestPublicSurface:
@@ -115,6 +139,45 @@ class TestAsyncClient:
             users = await client.list_users()
         assert [u.username for u in users] == ['alice', 'bob_2']
         assert all(isinstance(u, User) for u in users)
+
+
+class TestResourceStyle:
+    def test_resources_grouped_with_stripped_method_names(self, resource_style_module):
+        Client = resource_style_module.Client
+        client = Client(base_url='https://example.test')
+        # Grouped under resource sub-clients ...
+        assert hasattr(client, 'users')
+        assert hasattr(client, 'orders')
+        # ... with the resource token stripped from the method name.
+        assert hasattr(client.users, 'list')
+        assert hasattr(client.users, 'get')
+        assert not hasattr(client.users, 'list_users')
+
+    def test_sync_resource_call_returns_models(self, resource_style_module):
+        Client = resource_style_module.Client
+        User = resource_style_module.User
+        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+            client = Client(http_client=http)
+            users = client.users.list()
+            orders = client.orders.list()
+        assert [u.name for u in users] == ['alice']
+        assert all(isinstance(u, User) for u in users)
+        assert orders[0].total == 9.5
+
+    @pytest.mark.asyncio
+    async def test_async_resource_call_returns_models(self, resource_style_module):
+        AsyncClient = resource_style_module.AsyncClient
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_tagged_handler)
+        ) as http:
+            client = AsyncClient(async_http_client=http)
+            users = await client.users.list()
+        assert [u.name for u in users] == ['alice']
+
+    def test_exports_client_classes(self, resource_style_module):
+        m = resource_style_module
+        assert 'Client' in m.__all__ and 'AsyncClient' in m.__all__
+        assert 'list_users' not in m.__all__
 
 
 class TestConfigGuards:

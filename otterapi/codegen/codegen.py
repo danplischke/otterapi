@@ -28,7 +28,10 @@ from otterapi.codegen.client import (
     generate_base_client_class,
     generate_client_stub,
 )
-from otterapi.codegen.client_layout import build_client_module_body
+from otterapi.codegen.client_layout import (
+    build_client_module_body,
+    build_resource_client_module_body,
+)
 from otterapi.codegen.emit import (
     EmitConfig,
     TypeResolver,
@@ -949,7 +952,8 @@ class Codegen(OpenAPIProcessor):
 
         Their methods delegate to the free functions in ``endpoints.py`` (passing
         ``client=self``), giving a class-namespaced surface without the
-        ``async_`` name prefix. Used only when ``client_style="client"``.
+        ``async_`` name prefix. With ``client_style="resource"`` the methods are
+        grouped into resource sub-clients (``client.users.get(...)``).
         """
         assert self.typegen is not None
         resolver = TypeResolver(self.typegen.types)
@@ -957,18 +961,51 @@ class Codegen(OpenAPIProcessor):
             endpoints, EmitConfig.from_document(self.config), resolver
         )
         function_defs = endpoint_function_defs(sink)
-        body, _class_names = build_client_module_body(
-            function_defs,
-            resolver,
-            base_client_name='Client',
-            endpoints_module=self.config.endpoints_file.replace('.py', ''),
-        )
+        endpoints_module = self.config.endpoints_file.replace('.py', '')
+
+        if self.config.client_style == 'resource':
+            resource_of = self._resource_assignments(sink)
+            body, _class_names = build_resource_client_module_body(
+                function_defs,
+                resolver,
+                resource_of,
+                base_client_name='Client',
+                endpoints_module=endpoints_module,
+            )
+        else:
+            body, _class_names = build_client_module_body(
+                function_defs,
+                resolver,
+                base_client_name='Client',
+                endpoints_module=endpoints_module,
+            )
         write_mod(
             body,
             directory / '_clients.py',
             format_code=self.format_output,
             validate_code=self.validate_output,
         )
+
+    def _resource_assignments(self, sink) -> dict[str, str]:
+        """Map each generated function name to a resource key.
+
+        Reuses the ``module_split`` strategy (tags / path / custom / hybrid) to
+        bucket endpoints into resources, without splitting files.
+        """
+        from otterapi.codegen.splitting import ModuleMapResolver
+
+        map_resolver = ModuleMapResolver(self.config.module_split)
+        per_endpoint: dict[int, str] = {}
+        resource_of: dict[str, str] = {}
+        for fn_name, endpoint in sink.owners.items():
+            key = id(endpoint)
+            if key not in per_endpoint:
+                resolved = map_resolver.resolve(
+                    endpoint.path, endpoint.method, endpoint.tags
+                )
+                per_endpoint[key] = '_'.join(resolved.module_path) or 'common'
+            resource_of[fn_name] = per_endpoint[key]
+        return resource_of
 
     @staticmethod
     def _inject_html_repr_mixin(impl: ast.stmt, all_model_names: set[str]) -> ast.stmt:
@@ -1161,11 +1198,11 @@ class Codegen(OpenAPIProcessor):
         client_name = self._get_client_class_name()
 
         client_style = self.config.client_style
-        if client_style == 'client' and self.config.module_split.enabled:
+        if client_style in ('client', 'resource') and self.config.module_split.enabled:
             raise ValueError(
-                "client_style='client' is not yet supported together with "
-                'module_split; use the default client_style="functions" with '
-                'splitting, or disable splitting.'
+                f'client_style={client_style!r} is not yet supported together '
+                'with module_split; use the default client_style="functions" '
+                'with splitting, or disable splitting.'
             )
 
         # Check if module splitting is enabled
@@ -1191,7 +1228,7 @@ class Codegen(OpenAPIProcessor):
         # classes whose methods delegate to the generated free functions.
         if (
             self.generate_endpoints
-            and client_style == 'client'
+            and client_style in ('client', 'resource')
             and not self.config.module_split.enabled
         ):
             self._generate_client_layout_file(directory, endpoints)
@@ -1315,7 +1352,7 @@ class Codegen(OpenAPIProcessor):
                 self.config.endpoints_file.replace('.py', ''),
                 sorted(endpoint_names),
             )
-        if client_style == 'client':
+        if client_style in ('client', 'resource'):
             self._add_reexport(body, all_names, '_clients', ['AsyncClient', 'Client'])
         else:
             self._add_reexport(body, all_names, 'client', ['Client'])
