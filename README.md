@@ -723,8 +723,11 @@ from client.orders import list_orders, get_order
 
 ### Using the Client Class
 
+In the default `functions` style the `Client` carries configuration and the
+connection pool; you pass it to each endpoint function via `client=`:
+
 ```python
-from client import Client
+from client import Client, get_user, async_get_user
 
 client = Client(
     base_url='https://api.example.com',
@@ -732,11 +735,14 @@ client = Client(
     headers={'Authorization': 'Bearer your-token'},
 )
 
-user = client.get_user(user_id=123)
+user = get_user(user_id=123, client=client)
 
 async def main():
-    user = await client.async_get_user(user_id=123)
+    user = await async_get_user(user_id=123, client=client)
 ```
+
+Prefer a method-based API (`client.get_user(...)`)? Set
+[`client_style`](#-client-style).
 
 ### 🎛 Client Style
 

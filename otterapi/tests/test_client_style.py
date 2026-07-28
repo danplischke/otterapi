@@ -17,12 +17,27 @@ import pytest
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
 
-SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'spec.yaml'
-TAGGED_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'tagged' / 'spec.yaml'
-NESTED_SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'nested' / 'spec.yaml'
-PAGINATED_SPEC = (
-    Path(__file__).parent / 'fixtures' / 'golden' / 'paginated' / 'spec.yaml'
-)
+GOLDEN = Path(__file__).parent / 'fixtures' / 'golden'
+SPEC = GOLDEN / 'constraints' / 'spec.yaml'
+TAGGED_SPEC = GOLDEN / 'tagged' / 'spec.yaml'
+NESTED_SPEC = GOLDEN / 'nested' / 'spec.yaml'
+PAGINATED_SPEC = GOLDEN / 'paginated' / 'spec.yaml'
+ENVELOPE_SPEC = GOLDEN / 'envelope' / 'spec.yaml'
+SHADOW_SPEC = GOLDEN / 'shadow' / 'spec.yaml'
+
+
+def _gen(target: Path, source: Path, **overrides) -> None:
+    Codegen(
+        DocumentConfig.model_validate(
+            {
+                'source': str(source),
+                'output': str(target),
+                'base_url': 'https://example.test',
+                **overrides,
+            }
+        )
+    ).generate()
+
 
 _PAGES = {
     0: [{'id': 1, 'name': 'a'}, {'id': 2, 'name': 'b'}],
@@ -399,6 +414,71 @@ class TestResultObjects:
                 }
             )
             Codegen(config).generate()
+
+
+class TestNameCollisions:
+    def test_resource_name_does_not_shadow_client_member(self, tmp_path):
+        # A resource named like a base-client member (here 'close') must not
+        # override it; it is renamed so client.close() stays callable.
+        _gen(
+            tmp_path / 'sh',
+            SHADOW_SPEC,
+            client_style='resource',
+            resource_naming='path',
+        )
+        mod = _import_fresh(tmp_path, 'sh')
+        client = mod.Client(base_url='https://example.test')
+        assert callable(client.close)
+        assert not isinstance(type(client).__dict__.get('close'), property)
+        assert hasattr(type(client), 'close_')  # the resource moved aside
+
+
+class TestFeatureCombinations:
+    """Combinations that compose across features -- guard against regressions."""
+
+    def test_split_plus_result_objects(self, tmp_path):
+        _gen(
+            tmp_path / 'sro',
+            PAGINATED_SPEC,
+            client_style='resource',
+            result_objects=True,
+            module_split={'enabled': True, 'strategy': 'path'},
+            pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 2},
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        mod = _import_fresh(tmp_path, 'sro')
+        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+            client = mod.Client(http_client=http)
+            q = client.items.list()
+            assert type(q).__name__ == 'Query'
+            assert [r.id for r in q.all()] == [1, 2, 3]
+
+    def test_response_unwrap_plus_resource(self, tmp_path):
+        # The method should return the unwrapped list, not the envelope.
+        _gen(
+            tmp_path / 'unw',
+            ENVELOPE_SPEC,
+            client_style='resource',
+            response_unwrap={'enabled': True, 'data_path': 'data'},
+        )
+        mod = _import_fresh(tmp_path, 'unw')
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={'data': [{'id': 1}, {'id': 2}], 'status': 'ok'}
+            )
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            result = mod.Client(http_client=http).items.list()
+        assert [i.id for i in result] == [1, 2]
+
+    def test_reexport_models_plus_resource(self, tmp_path):
+        _gen(
+            tmp_path / 'rx', TAGGED_SPEC, client_style='resource', reexport_models=True
+        )
+        mod = _import_fresh(tmp_path, 'rx')
+        assert 'Client' in mod.__all__
+        assert 'User' in mod.__all__
 
 
 class TestConfigGuards:

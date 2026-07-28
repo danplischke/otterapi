@@ -62,6 +62,40 @@ _VARIANT_BINDINGS: tuple[tuple[str, str], ...] = (
     ('_export', 'export'),
 )
 
+# Public members of the generated base client. Resource accessors / methods on
+# ``Client`` / ``AsyncClient`` must not shadow these (e.g. a resource named
+# ``close`` would break ``client.close()``).
+_CLIENT_RESERVED_MEMBERS: frozenset[str] = frozenset(
+    {
+        'close',
+        'aclose',
+        'base_url',
+        'headers',
+        'timeout',
+        'max_retries',
+        'backoff_factor',
+        'retry_statuses',
+    }
+)
+
+
+def _avoid_member_collisions(
+    members: list[ast.FunctionDef | ast.AsyncFunctionDef], reserved: frozenset[str]
+) -> None:
+    """Rename members (in place) that collide with reserved names or each other.
+
+    Appends underscores until the name is free, so a resource accessor or method
+    named like a client member does not shadow it. Deterministic, so the sync and
+    async classes rename identically.
+    """
+    taken = set(reserved)
+    for node in members:
+        name = node.name
+        while name in taken:
+            name = name + '_'
+        node.name = name
+        taken.add(name)
+
 
 def _own_scope_yields(node: ast.AST) -> bool:
     """True if *node*'s own scope contains a ``yield`` (i.e. it is a generator).
@@ -345,6 +379,11 @@ def build_client_module_body(
     imports, type_checking_block = _build_imports(
         sync_methods + async_methods, resolver
     )
+
+    # Methods live on Client / AsyncClient, so a method named like a base-client
+    # member (close, headers, ...) must be renamed to avoid shadowing it.
+    _avoid_member_collisions(sync_methods, _CLIENT_RESERVED_MEMBERS)
+    _avoid_member_collisions(async_methods, _CLIENT_RESERVED_MEMBERS)
 
     sync_class = ast.ClassDef(
         name=sync_class_name,
@@ -736,17 +775,20 @@ def build_resource_client_module_body(
             methods = methods_for(path, is_async)
             all_methods.extend(methods)
             body = child_props(path, is_async, on_client=False) + methods
+            _avoid_member_collisions(body, frozenset({'_client'}))
             resource_classes.append(
                 _resource_class(
                     _resource_class_name(path, is_async), body or [ast.Pass()]
                 )
             )
 
-    # Root: methods + top-level resource accessors live on Client / AsyncClient.
+    # Root: methods + top-level resource accessors live on Client / AsyncClient,
+    # so they must not shadow the base client's own members.
     def client_class(name: str, is_async: bool) -> ast.ClassDef:
         methods = methods_for((), is_async)
         all_methods.extend(methods)
         body = child_props((), is_async, on_client=True) + methods
+        _avoid_member_collisions(body, _CLIENT_RESERVED_MEMBERS)
         return ast.ClassDef(
             name=name,
             bases=[_name('_BaseClient')],
