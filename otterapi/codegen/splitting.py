@@ -606,6 +606,7 @@ class SplitModuleEmitter:
         generate_sync: bool = True,
         generate_async: bool = True,
         client_style: str = 'functions',
+        result_objects: bool = False,
         reexport_models: bool = False,
         reexport_model_exclude_patterns: list[str] | None = None,
         format_output: bool = True,
@@ -646,6 +647,7 @@ class SplitModuleEmitter:
         self.generate_sync = generate_sync
         self.generate_async = generate_async
         self.client_style = client_style
+        self.result_objects = result_objects
         self.reexport_models = reexport_models
         self.reexport_model_exclude_patterns: list[str] = (
             reexport_model_exclude_patterns or []
@@ -926,6 +928,18 @@ class SplitModuleEmitter:
                 )
             )
             all_names.extend(['AsyncClient', 'Client'])
+            if self.result_objects:
+                body.append(
+                    ast.ImportFrom(
+                        module='_query',
+                        names=[
+                            ast.alias(name='AsyncQuery', asname=None),
+                            ast.alias(name='Query', asname=None),
+                        ],
+                        level=1,
+                    )
+                )
+                all_names.extend(['AsyncQuery', 'Query'])
         else:
             body.append(
                 ast.ImportFrom(

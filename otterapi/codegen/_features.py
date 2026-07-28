@@ -236,4 +236,7 @@ class QueryFeature(FeatureModule):
     module_filename = '_query.py'
 
     def is_enabled(self, config: DocumentConfig) -> bool:
-        return bool(config.result_objects) and config.client_style == 'resource'
+        return bool(config.result_objects) and config.client_style in (
+            'client',
+            'resource',
+        )

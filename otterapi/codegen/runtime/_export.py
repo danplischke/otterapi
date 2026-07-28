@@ -386,14 +386,18 @@ def _collection_arrow_type(origin: Any, inner: Any, pa) -> Any:
         args = get_args(inner)
         if not args:
             return pa.list_(pa.string())
+        # Bind the first element while the non-empty guard above still applies
+        # (the ``len(args) > 1`` checks below otherwise confuse a type checker
+        # into thinking ``args`` could be empty at the final index).
+        first = args[0]
         if origin is tuple:
             if len(args) == 2 and args[1] is Ellipsis:
                 # tuple[T, ...] - homogeneous variable-length
-                return pa.list_(_python_type_to_arrow(args[0], pa))
+                return pa.list_(_python_type_to_arrow(first, pa))
             if len(args) > 1:
                 # tuple[A, B, ...] - heterogeneous, no native Parquet type
                 return pa.string()
-        return pa.list_(_python_type_to_arrow(args[0], pa))
+        return pa.list_(_python_type_to_arrow(first, pa))
 
     if origin is dict:
         return pa.string()  # JSON-encoded fallback (keeps schema simple).

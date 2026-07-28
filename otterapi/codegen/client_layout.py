@@ -342,6 +342,7 @@ def build_client_module_body(
     base_client_name: str,
     endpoints_module: str = 'endpoints',
     module_of: dict[str, str] | None = None,
+    use_query: bool = False,
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
@@ -365,16 +366,45 @@ def build_client_module_body(
         function_defs, module_of, endpoints_module
     )
 
-    sync_methods = [
-        _method_from_function(fn, alias_of[fn.name])
-        for fn in function_defs
-        if not isinstance(fn, ast.AsyncFunctionDef)
-    ]
-    async_methods = [
-        _method_from_function(fn, alias_of[fn.name])
-        for fn in function_defs
-        if isinstance(fn, ast.AsyncFunctionDef)
-    ]
+    def flat_methods(
+        is_async: bool,
+    ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+        if use_query:
+            # Collapse each endpoint's variants into one Query-returning method.
+            families = _group_families(function_defs)
+            side = 'async' if is_async else 'sync'
+            built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+            for base in sorted(families):
+                variants = families[base][side]
+                core = variants.get('fetch')
+                if core is None:
+                    continue
+                if len(variants) > 1:
+                    built.append(
+                        _query_method(
+                            core,
+                            variants,
+                            alias_of[core.name],
+                            _name('self'),
+                            base,
+                            is_async,
+                        )
+                    )
+                else:
+                    built.append(
+                        _method_from_function(
+                            core, alias_of[core.name], method_name=base
+                        )
+                    )
+            return sorted(built, key=lambda m: m.name)
+        return [
+            _method_from_function(fn, alias_of[fn.name])
+            for fn in function_defs
+            if isinstance(fn, ast.AsyncFunctionDef) is is_async
+        ]
+
+    sync_methods = flat_methods(is_async=False)
+    async_methods = flat_methods(is_async=True)
 
     imports, type_checking_block = _build_imports(
         sync_methods + async_methods, resolver

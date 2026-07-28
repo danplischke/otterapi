@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 DEFAULT_FILENAMES = ['otter.yaml', 'otter.yml', 'otter.json']
@@ -1157,6 +1157,16 @@ class DocumentConfig(BaseModel):
         if not v.endswith('.py'):
             raise ValueError(f'File name must end with .py, got: {v}')
         return v
+
+    @model_validator(mode='after')
+    def _validate_client_options(self) -> DocumentConfig:
+        """Cross-field checks for the client-style options."""
+        if self.result_objects and self.client_style == 'functions':
+            raise ValueError(
+                'result_objects requires client_style="client" or "resource"; '
+                'it has no effect with the default client_style="functions".'
+            )
+        return self
 
 
 class CodegenConfig(BaseSettings):

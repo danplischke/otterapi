@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
@@ -402,18 +403,33 @@ class TestResultObjects:
         # The separate _df variant method is gone (collapsed into the Query).
         assert not hasattr(mod.Client(base_url='x').users, 'list_df')
 
-    def test_requires_resource_style(self, tmp_path):
-        with pytest.raises(ValueError, match='requires client_style'):
-            config = DocumentConfig.model_validate(
+    def test_flat_client_style_result_objects(self, tmp_path):
+        # result_objects also works with the flat client style.
+        self._generate_ro(
+            tmp_path / 'roc',
+            PAGINATED_SPEC,
+            client_style='client',
+            pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 2},
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        mod = _import_fresh(tmp_path, 'roc')
+        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+            q = mod.Client(http_client=http).list_items()
+            assert type(q).__name__ == 'Query'
+            assert [r.id for r in q.all()] == [1, 2, 3]
+
+    def test_requires_class_style(self, tmp_path):
+        # result_objects is rejected at config load with the functions style.
+        with pytest.raises(ValidationError, match='requires client_style'):
+            DocumentConfig.model_validate(
                 {
                     'source': str(TAGGED_SPEC),
                     'output': str(tmp_path / 'bad'),
                     'base_url': 'https://example.test',
-                    'client_style': 'client',
+                    'client_style': 'functions',
                     'result_objects': True,
                 }
             )
-            Codegen(config).generate()
 
 
 class TestNameCollisions:

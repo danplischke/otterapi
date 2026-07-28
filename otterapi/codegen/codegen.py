@@ -990,6 +990,7 @@ class Codegen(OpenAPIProcessor):
                 base_client_name='Client',
                 endpoints_module=endpoints_module,
                 module_of=module_of,
+                use_query=self.config.result_objects,
             )
         write_mod(
             body,
@@ -1259,12 +1260,6 @@ class Codegen(OpenAPIProcessor):
 
         client_style = self.config.client_style
 
-        if self.config.result_objects and client_style != 'resource':
-            raise ValueError(
-                'result_objects requires client_style="resource"; '
-                f'got client_style={client_style!r}.'
-            )
-
         # Check if module splitting is enabled
         split_modules: list = []
         if self.generate_endpoints:
@@ -1415,6 +1410,8 @@ class Codegen(OpenAPIProcessor):
             )
         if client_style in ('client', 'resource'):
             self._add_reexport(body, all_names, '_clients', ['AsyncClient', 'Client'])
+            if self.config.result_objects:
+                self._add_reexport(body, all_names, '_query', ['AsyncQuery', 'Query'])
         else:
             self._add_reexport(body, all_names, 'client', ['Client'])
         # BaseClient + the full error hierarchy from _client.py so users can
@@ -1499,6 +1496,7 @@ class Codegen(OpenAPIProcessor):
             generate_sync=self.config.generate_sync,
             generate_async=self.config.generate_async,
             client_style=self.config.client_style,
+            result_objects=self.config.result_objects,
             reexport_models=self.config.reexport_models,
             reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
             format_output=self.format_output,
