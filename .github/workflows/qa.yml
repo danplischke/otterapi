@@ -83,6 +83,12 @@ jobs:
       - name: Type-check generated clients with pyright
         run: uv run pytest otterapi/tests/test_generated_typecheck.py -m typecheck -v
 
+      # Slow end-to-end proof that the large vendored real-world specs (Stripe,
+      # GitHub) still generate, compile, and import. Runs once here rather than
+      # in every OS/Python matrix cell (see the `test` job's ``-m "not slow"``).
+      - name: Smoke-test real-world specs (generate + import)
+        run: uv run pytest otterapi/tests/test_real_specs_smoke.py -m slow -v
+
   test:
     name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -119,7 +125,9 @@ jobs:
         run: uv sync --group dev --group test
 
       - name: Run tests with coverage
-        run: uv run pytest otterapi/tests/ -v --cov=otterapi --cov-report=xml --cov-report=term-missing
+        # Slow real-world-spec smoke tests run once in the dedicated
+        # ``typecheck-generated`` job, not in every matrix cell.
+        run: uv run pytest otterapi/tests/ -m "not slow" -v --cov=otterapi --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'

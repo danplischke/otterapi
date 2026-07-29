@@ -37,6 +37,7 @@ from otterapi.codegen.ast_utils import (
     _name,
     _subscript,
     _union_expr,
+    annotation_includes_none,
 )
 from otterapi.openapi.constants import MediaType
 
@@ -506,11 +507,16 @@ class ParameterASTBuilder:
         else:
             body_expr = _name(body_name)
 
-        # An optional body may be ``None`` at call time. ``body.model_dump()``
-        # would raise ``AttributeError`` on None, so guard the access and pass
-        # ``None`` through instead (httpx treats ``json=None`` / ``data=None``
-        # as "no body").
-        if serializes_model and not body.required:
+        # The body may be ``None`` at call time -- either because it is optional
+        # (keyword-only, defaults to None) or because its schema is nullable even
+        # though it is required (``body: Model | None`` positional). Either way
+        # ``body.model_dump()`` would raise ``AttributeError`` on None, so guard
+        # the access and pass ``None`` through (httpx reads ``json=None`` /
+        # ``data=None`` as "no body").
+        body_may_be_none = not body.required or (
+            body.type is not None and annotation_includes_none(body.type.annotation_ast)
+        )
+        if serializes_model and body_may_be_none:
             body_expr = ast.IfExp(
                 test=ast.Compare(
                     left=_name(body_name),

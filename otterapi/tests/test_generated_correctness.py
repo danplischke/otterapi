@@ -323,3 +323,187 @@ class TestExportGuardsOptionalRows:
         assert 'def get_things_export(' in src
         # data is required -> base return is a plain list -> no coercion added.
         assert 'or []' not in src
+
+
+class TestRealWorldPatternFixes:
+    """Regressions for bugs distilled from Stripe / GitHub. Each shape crashed
+    generation, produced un-importable code, or type-errored before the fix."""
+
+    def test_enum_string_default_is_wrapped(self, tmp_path):
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'T', 'version': '1'},
+            'paths': {},
+            'components': {
+                'schemas': {
+                    'Widget': {
+                        'type': 'object',
+                        'properties': {
+                            'mode': {
+                                'type': 'string',
+                                'enum': ['ON', 'OFF', 'AUTO'],
+                                'default': 'AUTO',
+                            }
+                        },
+                    }
+                }
+            },
+        }
+        # Reference Widget so it is emitted.
+        spec['paths']['/w'] = {
+            'get': {
+                'operationId': 'getW',
+                'responses': {
+                    '200': {
+                        'description': 'ok',
+                        'content': {
+                            'application/json': {
+                                'schema': {'$ref': '#/components/schemas/Widget'}
+                            }
+                        },
+                    }
+                },
+            }
+        }
+        src = (_generate(tmp_path, spec) / 'models.py').read_text()
+        # Enum default expressed as the enum, not a bare ``str``.
+        assert "Field(default=WidgetMode('AUTO'))" in src
+        assert "default='AUTO'" not in src
+
+    def test_basemodel_reserved_and_underscore_fields_renamed(self, tmp_path):
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'T', 'version': '1'},
+            'paths': {
+                '/w': {
+                    'get': {
+                        'operationId': 'getW',
+                        'responses': {
+                            '200': {
+                                'description': 'ok',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {
+                                            '$ref': '#/components/schemas/Widget'
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+            'components': {
+                'schemas': {
+                    'Widget': {
+                        'type': 'object',
+                        'properties': {
+                            'validate': {'type': 'boolean'},  # shadows BaseModel
+                            '_1': {'type': 'string'},  # leading underscore
+                        },
+                    }
+                }
+            },
+        }
+        src = (_generate(tmp_path, spec) / 'models.py').read_text()
+        # Renamed to a legal identifier, original preserved as alias.
+        assert "validate_: bool | None = Field(default=None, alias='validate')" in src
+        assert "field_1: str | None = Field(default=None, alias='_1')" in src
+
+    def test_recursive_ref_with_title_key_mismatch_generates(self, tmp_path):
+        # Mutually-recursive schemas whose component key (lowercase) differs from
+        # their title (PascalCase) -- the exact shape that recursed forever.
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'T', 'version': '1'},
+            'paths': {
+                '/c': {
+                    'get': {
+                        'operationId': 'getC',
+                        'responses': {
+                            '200': {
+                                'description': 'ok',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {
+                                            '$ref': '#/components/schemas/charge'
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+            'components': {
+                'schemas': {
+                    'charge': {
+                        'type': 'object',
+                        'title': 'Charge',
+                        'properties': {
+                            'transfer': {
+                                'anyOf': [
+                                    {'type': 'string'},
+                                    {'$ref': '#/components/schemas/transfer'},
+                                ]
+                            }
+                        },
+                    },
+                    'transfer': {
+                        'type': 'object',
+                        'title': 'Transfer',
+                        'properties': {
+                            'source': {
+                                'anyOf': [
+                                    {'type': 'string'},
+                                    {'$ref': '#/components/schemas/charge'},
+                                ]
+                            }
+                        },
+                    },
+                }
+            },
+        }
+        # Must terminate (no RecursionError) and emit both models once.
+        src = (_generate(tmp_path, spec) / 'models.py').read_text()
+        assert 'class Charge(' in src
+        assert 'class Transfer(' in src
+
+    def test_nullable_required_body_is_guarded(self, tmp_path):
+        # A required body whose schema is nullable is typed ``Model | None``;
+        # ``model_dump()`` on it must be guarded even though it is required.
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'T', 'version': '1'},
+            'paths': {
+                '/w': {
+                    'post': {
+                        'operationId': 'up',
+                        'requestBody': {
+                            'required': True,
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'nullable': True,
+                                        'allOf': [
+                                            {'$ref': '#/components/schemas/Widget'}
+                                        ],
+                                    }
+                                }
+                            },
+                        },
+                        'responses': {'200': {'description': 'ok'}},
+                    }
+                }
+            },
+            'components': {
+                'schemas': {
+                    'Widget': {
+                        'type': 'object',
+                        'properties': {'name': {'type': 'string'}},
+                    }
+                }
+            },
+        }
+        src = (_generate(tmp_path, spec) / 'endpoints.py').read_text()
+        assert 'body.model_dump() if body is not None else None' in src

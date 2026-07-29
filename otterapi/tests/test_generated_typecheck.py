@@ -117,6 +117,10 @@ MATRIX: dict[str, tuple[str, dict]] = {
         'envelope_optional',
         {**_ALL_FEATURES, 'response_unwrap': {'enabled': True, 'data_path': 'data'}},
     ),
+    # Messy shapes distilled from Stripe/GitHub: mutually-recursive schemas with
+    # title != component key, an enum field with a default, a field named after a
+    # BaseModel attribute, and a deepObject encoding. Each was a real bug.
+    'real_world_patterns': ('real_world_patterns', _ALL_FEATURES),
 }
 
 
