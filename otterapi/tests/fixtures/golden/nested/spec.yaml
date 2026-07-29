@@ -1,0 +1,63 @@
+openapi: 3.0.0
+info:
+  title: Nested API
+  version: 1.0.0
+paths:
+  /identity/users:
+    get:
+      operationId: identity.users.list
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+  /identity/users/{userId}:
+    get:
+      operationId: identity.users.get
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+  /billing/invoices:
+    get:
+      operationId: billing.invoices.list
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invoice'
+components:
+  schemas:
+    User:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+    Invoice:
+      type: object
+      required: [id, amount]
+      properties:
+        id:
+          type: integer
+        amount:
+          type: number

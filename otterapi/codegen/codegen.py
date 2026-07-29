@@ -16,7 +16,6 @@ from upath import UPath
 
 from otterapi.codegen._features import all_features, write_enabled_features
 from otterapi.codegen.ast_utils import (
-    MODELS_MODULE,
     ImportCollector,
     _all,
     _assign,
@@ -29,15 +28,18 @@ from otterapi.codegen.client import (
     generate_base_client_class,
     generate_client_stub,
 )
-from otterapi.codegen.dataframes import (
-    DataFrameMethodConfig,
-    get_dataframe_config_for_endpoint,
+from otterapi.codegen.client_layout import (
+    build_client_module_body,
+    build_resource_client_module_body,
+)
+from otterapi.codegen.emit import (
+    EmitConfig,
+    TypeResolver,
+    build_endpoint_sink,
+    build_endpoints_module_body,
+    endpoint_function_defs,
 )
 from otterapi.codegen.endpoints import async_request_fn, request_fn
-from otterapi.codegen.pagination import (
-    PaginationMethodConfig,
-    get_pagination_config_for_endpoint,
-)
 from otterapi.codegen.schema import SchemaLoader
 from otterapi.codegen.types import (
     Endpoint,
@@ -46,7 +48,6 @@ from otterapi.codegen.types import (
     ResponseInfo,
     Type,
     TypeGenerator,
-    collect_used_model_names,
 )
 from otterapi.codegen.utils import (
     OpenAPIProcessor,
@@ -739,6 +740,7 @@ class Codegen(OpenAPIProcessor):
             path=path,
             description=operation.description,
             tags=tags,
+            operation_id=operation.operationId,
             parameters=parameters,
             request_body=request_body_info,
             response_type=response_model,
@@ -916,551 +918,155 @@ class Codegen(OpenAPIProcessor):
 
         return baseurl
 
-    def _collect_used_model_names(self, endpoints: list[Endpoint]) -> set[str]:
-        """Collect model names that are actually used in endpoint signatures.
-
-        Only collects models that have implementations (defined in models.py)
-        and are referenced in endpoint parameters, request bodies, or responses.
-
-        Args:
-            endpoints: List of Endpoint objects to check for model usage.
-
-        Returns:
-            Set of model names actually used in endpoints.
-
-        Note:
-            This method delegates to collect_used_model_names() from builders.model_collector.
-        """
-        assert self.typegen is not None
-        return collect_used_model_names(endpoints, self.typegen.types)
-
-    def _build_endpoint_file_body(
-        self, endpoints: list[Endpoint]
-    ) -> tuple[list[ast.stmt], ImportCollector, set[str], ast.If | None]:
-        """Build the body of the endpoints file with standalone functions.
-
-        Generates standalone functions with full implementations that use the Client.
-
-        Args:
-            endpoints: List of Endpoint objects to include.
-
-        Returns:
-            Tuple of (body statements, import collector, endpoint names).
-        """
-        from otterapi.codegen.endpoints import build_default_client_code
-
-        body: list[ast.stmt] = []
-        import_collector = ImportCollector()
-
-        # Add default client variable and _get_client() function
-        client_stmts, client_imports = build_default_client_code()
-        body.extend(client_stmts)
-        import_collector.add_imports(client_imports)
-
-        # Track if we need DataFrame type hints
-        has_dataframe_methods = False
-
-        # Track if we need pagination imports
-        has_pagination_methods = False
-
-        # Add standalone endpoint functions
-        endpoint_names: set[str] = set()
-        for endpoint in endpoints:
-            # Track whether paginated DataFrame methods were generated for this endpoint
-            generated_paginated_df = False
-
-            # Check if this endpoint has pagination configured
-            pag_config = None
-            if self.config.pagination.enabled:
-                pag_config = self._get_pagination_config(endpoint)
-
-            # Generate pagination methods if configured, otherwise regular functions
-            if pag_config:
-                has_pagination_methods = True
-                generated_paginated_df = self._emit_paginated_endpoint_methods(
-                    body, import_collector, endpoint_names, endpoint, pag_config
-                )
-                if generated_paginated_df:
-                    has_dataframe_methods = True
-            else:
-                self._emit_standalone_endpoint_pair(
-                    body, import_collector, endpoint_names, endpoint
-                )
-
-            # Non-paginated DataFrame methods (skipped if a paginated DF pair
-            # already covered this endpoint above).
-            if not generated_paginated_df and self._emit_standalone_dataframe_pair(
-                body, import_collector, endpoint_names, endpoint
-            ):
-                has_dataframe_methods = True
-
-            # Non-paginated export methods (paginated case is handled in the
-            # ``if pag_config`` branch above).
-            if not pag_config:
-                self._emit_standalone_export_pair(
-                    body, import_collector, endpoint_names, endpoint
-                )
-
-        type_checking_block = None
-        if has_dataframe_methods:
-            type_checking_block = self._build_dataframe_type_checking_block(
-                import_collector
-            )
-        if has_pagination_methods:
-            self._add_pagination_imports(import_collector)
-
-        return body, import_collector, endpoint_names, type_checking_block
-
-    @staticmethod
-    def _build_pagination_config_dict(pag_config) -> dict:
-        """Build the pagination config dict passed to the endpoint builders."""
-        return {
-            'offset_param': pag_config.offset_param,
-            'limit_param': pag_config.limit_param,
-            'cursor_param': pag_config.cursor_param,
-            'page_param': pag_config.page_param,
-            'per_page_param': pag_config.per_page_param,
-            'data_path': pag_config.data_path,
-            'total_path': pag_config.total_path,
-            'next_cursor_path': pag_config.next_cursor_path,
-            'total_pages_path': pag_config.total_pages_path,
-            'default_page_size': pag_config.default_page_size,
-            'send_page_size': pag_config.send_page_size,
-        }
-
-    def _emit_paginated_endpoint_methods(
-        self,
-        body: list[ast.stmt],
-        import_collector: ImportCollector,
-        endpoint_names: set[str],
-        endpoint: Endpoint,
-        pag_config,
-    ) -> bool:
-        """Emit sync/async paginated functions, iterators, DataFrame and export pairs.
-
-        Returns True if a paginated DataFrame pair was emitted (so the caller
-        can flag ``has_dataframe_methods`` and skip the non-paginated DF block).
-        """
-        from otterapi.codegen.endpoints import (
-            build_standalone_paginated_fn,
-            build_standalone_paginated_iter_fn,
-        )
-
-        item_type_ast, item_type_imports = self._get_item_type_ast(
-            endpoint, pag_config.data_path
-        )
-        pag_dict = self._build_pagination_config_dict(pag_config)
-
-        for is_async, fn_name in self._sync_async_pair(endpoint):
-            fn, imports = build_standalone_paginated_fn(
-                fn_name=fn_name,
-                method=endpoint.method,
-                path=endpoint.path,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                response_type=endpoint.response_type,
-                pagination_style=pag_config.style,
-                pagination_config=pag_dict,
-                item_type_ast=item_type_ast,
-                item_type_imports=item_type_imports,
-                docs=endpoint.description,
-                is_async=is_async,
-            )
-            endpoint_names.add(fn_name)
-            body.append(fn)
-            import_collector.add_imports(imports)
-
-        for is_async, base_fn_name in self._sync_async_pair(endpoint):
-            iter_fn_name = f'{base_fn_name}_iter'
-            iter_fn, iter_imports = build_standalone_paginated_iter_fn(
-                fn_name=iter_fn_name,
-                method=endpoint.method,
-                path=endpoint.path,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                response_type=endpoint.response_type,
-                pagination_style=pag_config.style,
-                pagination_config=pag_dict,
-                item_type_ast=item_type_ast,
-                item_type_imports=item_type_imports,
-                docs=endpoint.description,
-                is_async=is_async,
-            )
-            endpoint_names.add(iter_fn_name)
-            body.append(iter_fn)
-            import_collector.add_imports(iter_imports)
-
-        generated_paginated_df = self._emit_paginated_dataframe_pair(
-            body,
-            import_collector,
-            endpoint_names,
-            endpoint,
-            pag_config,
-            pag_dict,
-            item_type_ast,
-            item_type_imports,
-        )
-
-        self._emit_paginated_export_pair(
-            body,
-            import_collector,
-            endpoint_names,
-            endpoint,
-            item_type_ast,
-            item_type_imports,
-        )
-
-        return generated_paginated_df
-
-    def _emit_standalone_endpoint_pair(
-        self,
-        body: list[ast.stmt],
-        import_collector: ImportCollector,
-        endpoint_names: set[str],
-        endpoint: Endpoint,
-    ) -> None:
-        """Emit the regular (non-paginated) sync and async standalone functions."""
-        from otterapi.codegen.endpoints import build_standalone_endpoint_fn
-
-        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
-        unwrap_type_ast = None
-        unwrap_type_imports = None
-        if should_unwrap and unwrap_path:
-            unwrap_type_ast, unwrap_type_imports = self._get_unwrapped_type_ast(
-                endpoint, unwrap_path
-            )
-
-        response_type_imports = None
-        if endpoint.response_type and endpoint.response_type.annotation_ast:
-            response_type_imports = self._collect_model_imports_from_ast(
-                endpoint.response_type.annotation_ast
-            )
-
-        for is_async, fn_name in self._sync_async_pair(endpoint):
-            fn, imports = build_standalone_endpoint_fn(
-                fn_name=fn_name,
-                method=endpoint.method,
-                path=endpoint.path,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                response_type=endpoint.response_type,
-                response_infos=endpoint.response_infos,
-                docs=endpoint.description,
-                is_async=is_async,
-                unwrap_data_path=unwrap_path if should_unwrap else None,
-                unwrap_type_ast=unwrap_type_ast,
-                unwrap_type_imports=unwrap_type_imports,
-                response_type_imports=response_type_imports,
-            )
-            endpoint_names.add(fn_name)
-            body.append(fn)
-            import_collector.add_imports(imports)
-
-    @staticmethod
-    def _build_dataframe_type_checking_block(
-        import_collector: ImportCollector,
-    ) -> ast.If:
-        """Build the ``if TYPE_CHECKING`` block for DataFrame type hints."""
-        import_collector.add_imports({'typing': {'TYPE_CHECKING'}})
-        import_collector.add_imports({'._dataframe': {'to_pandas', 'to_polars'}})
-        return ast.If(
-            test=_name('TYPE_CHECKING'),
-            body=[
-                ast.Import(names=[ast.alias(name='pandas', asname='pd')]),
-                ast.Import(names=[ast.alias(name='polars', asname='pl')]),
-            ],
-            orelse=[],
-        )
-
-    @staticmethod
-    def _add_pagination_imports(import_collector: ImportCollector) -> None:
-        """Register the shared imports required by generated pagination helpers."""
-        import_collector.add_imports({'collections.abc': {'Iterator', 'AsyncIterator'}})
-        import_collector.add_imports(
-            {
-                '._pagination': {
-                    'paginate_offset',
-                    'paginate_offset_async',
-                    'paginate_cursor',
-                    'paginate_cursor_async',
-                    'paginate_page',
-                    'paginate_page_async',
-                    'iterate_offset',
-                    'iterate_offset_async',
-                    'iterate_cursor',
-                    'iterate_cursor_async',
-                    'iterate_page',
-                    'iterate_page_async',
-                    'extract_path',
-                }
-            }
-        )
-
-    # ------------------------------------------------------------------
-    # Per-feature emitters extracted from ``_build_endpoint_file_body``
-    # ------------------------------------------------------------------
-
-    def _sync_async_pair(self, endpoint: Endpoint) -> list[tuple[bool, str]]:
-        """Return the (is_async, base_fn_name) pair every feature emitter loops over.
-
-        Factoring this out removes the four near-identical inline tuples in
-        the paired emitters below and keeps the "sync first, async second"
-        emission order consistent across DataFrame / export / paginated
-        variants.
-
-        Respects ``generate_sync`` and ``generate_async`` from the document config.
-        """
-        result = []
-        if self.config.generate_sync:
-            result.append((False, endpoint.sync_fn_name))
-        if self.config.generate_async:
-            result.append((True, endpoint.async_fn_name))
-        return result
-
-    def _emit_paginated_dataframe_pair(
-        self,
-        body: list[ast.stmt],
-        import_collector: ImportCollector,
-        endpoint_names: set[str],
-        endpoint: Endpoint,
-        pag_config,
-        pag_dict: dict,
-        item_type_ast,
-        item_type_imports,
-    ) -> bool:
-        """Emit sync+async paginated DataFrame methods (pandas / polars).
-
-        Returns True if any method was emitted (used by the orchestrator to
-        flag ``has_dataframe_methods`` and skip the non-paginated DF block).
-        """
-        if not self.config.dataframe.enabled:
-            return False
-
-        endpoint_df_config = self.config.dataframe.endpoints.get(endpoint.sync_fn_name)
-        if endpoint_df_config and endpoint_df_config.enabled is False:
-            return False
-
-        from otterapi.codegen.endpoints import (
-            build_standalone_paginated_dataframe_fn,
-        )
-
-        emitted = False
-        libraries: list[Literal['pandas', 'polars']] = []
-        if self.config.dataframe.pandas:
-            libraries.append('pandas')
-        if self.config.dataframe.polars:
-            libraries.append('polars')
-
-        for library in libraries:
-            suffix = '_df' if library == 'pandas' else '_pl'
-            for is_async, base_name in self._sync_async_pair(endpoint):
-                fn_name = f'{base_name}{suffix}'
-                fn, imports = build_standalone_paginated_dataframe_fn(
-                    fn_name=fn_name,
-                    method=endpoint.method,
-                    path=endpoint.path,
-                    parameters=endpoint.parameters,
-                    request_body_info=endpoint.request_body,
-                    response_type=endpoint.response_type,
-                    pagination_style=pag_config.style,
-                    pagination_config=pag_dict,
-                    library=library,
-                    item_type_ast=item_type_ast,
-                    item_type_imports=item_type_imports,
-                    docs=endpoint.description,
-                    is_async=is_async,
-                )
-                endpoint_names.add(fn_name)
-                body.append(fn)
-                import_collector.add_imports(imports)
-                emitted = True
-
-        return emitted
-
-    def _emit_paginated_export_pair(
-        self,
-        body: list[ast.stmt],
-        import_collector: ImportCollector,
-        endpoint_names: set[str],
-        endpoint: Endpoint,
-        item_type_ast,
-        item_type_imports,
-    ) -> bool:
-        """Emit sync+async export wrappers around the paginated ``_iter`` fns."""
-        if not self.config.export.enabled or item_type_ast is None:
-            return False
-        should_generate, formats, _path = (
-            self.config.export.should_generate_for_endpoint(
-                endpoint_name=endpoint.sync_fn_name,
-                returns_list=True,
-            )
-        )
-        if not should_generate:
-            return False
-
-        from otterapi.codegen.export import build_standalone_paginated_export_fn
-
-        default_format = formats[0] if formats else 'csv'
-        for is_async, base_name in self._sync_async_pair(endpoint):
-            fn_name = f'{base_name}_export'
-            fn, imports = build_standalone_paginated_export_fn(
-                fn_name=fn_name,
-                target_iter_fn_name=f'{base_name}_iter',
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                item_type_ast=item_type_ast,
-                item_type_imports=item_type_imports,
-                docs=endpoint.description,
-                is_async=is_async,
-                default_format=default_format,
-                default_batch_size=self.config.export.batch_size,
-                pagination_limit_param=self.config.pagination.limit_param,
-            )
-            endpoint_names.add(fn_name)
-            body.append(fn)
-            import_collector.add_imports(imports)
-        return True
-
-    def _emit_standalone_dataframe_pair(
-        self,
-        body: list[ast.stmt],
-        import_collector: ImportCollector,
-        endpoint_names: set[str],
-        endpoint: Endpoint,
-    ) -> bool:
-        """Emit sync+async DataFrame wrappers for a non-paginated endpoint."""
-        if not self.config.dataframe.enabled:
-            return False
-
-        df_config = self._get_dataframe_config(endpoint)
-        if not (df_config.generate_pandas or df_config.generate_polars):
-            return False
-
-        from otterapi.codegen.endpoints import build_standalone_dataframe_fn
-
-        emitted = False
-        for library, generate, suffix in (
-            ('pandas', df_config.generate_pandas, '_df'),
-            ('polars', df_config.generate_polars, '_pl'),
-        ):
-            if not generate:
-                continue
-            for is_async, base_name in self._sync_async_pair(endpoint):
-                fn_name = f'{base_name}{suffix}'
-                fn, imports = build_standalone_dataframe_fn(
-                    fn_name=fn_name,
-                    method=endpoint.method,
-                    path=endpoint.path,
-                    parameters=endpoint.parameters,
-                    request_body_info=endpoint.request_body,
-                    library=cast("Literal['pandas', 'polars']", library),
-                    default_path=df_config.path,
-                    docs=endpoint.description,
-                    is_async=is_async,
-                )
-                endpoint_names.add(fn_name)
-                body.append(fn)
-                import_collector.add_imports(imports)
-                emitted = True
-        return emitted
-
-    def _emit_standalone_export_pair(
-        self,
-        body: list[ast.stmt],
-        import_collector: ImportCollector,
-        endpoint_names: set[str],
-        endpoint: Endpoint,
-    ) -> bool:
-        """Emit sync+async export wrappers for a non-paginated list endpoint."""
-        if not self.config.export.enabled:
-            return False
-        # When response unwrapping is active, the list lives behind the data
-        # path (e.g. envelope.data) rather than directly on the response type,
-        # so resolve the item type through that path.
-        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
-        data_path = unwrap_path if should_unwrap else None
-        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint, data_path)
-        if item_type_ast is None:
-            return False
-        should_generate, formats, _path = (
-            self.config.export.should_generate_for_endpoint(
-                endpoint_name=endpoint.sync_fn_name,
-                returns_list=True,
-            )
-        )
-        if not should_generate:
-            return False
-
-        from otterapi.codegen.export import build_standalone_export_fn
-
-        default_format = formats[0] if formats else 'csv'
-        for is_async, base_name in self._sync_async_pair(endpoint):
-            fn_name = f'{base_name}_export'
-            fn, imports = build_standalone_export_fn(
-                fn_name=fn_name,
-                target_fn_name=base_name,
-                parameters=endpoint.parameters,
-                request_body_info=endpoint.request_body,
-                item_type_ast=item_type_ast,
-                item_type_imports=item_type_imports,
-                docs=endpoint.description,
-                is_async=is_async,
-                default_format=default_format,
-                default_batch_size=self.config.export.batch_size,
-            )
-            endpoint_names.add(fn_name)
-            body.append(fn)
-            import_collector.add_imports(imports)
-        return True
-
     def _generate_endpoint_file(
         self, path: UPath, endpoints: list[Endpoint]
     ) -> set[str]:
-        """Generate the endpoints Python file with delegating functions.
+        """Generate the endpoints Python file with standalone functions.
 
         Returns the set of exported function names so callers can pass them
         directly to ``_generate_init_file`` without recomputing.
+
+        The per-endpoint emission is delegated to the shared, layout-agnostic
+        core in :mod:`otterapi.codegen.emit`, which the split-module writer uses
+        too.
         """
-        body, import_collector, endpoint_names, type_checking_block = (
-            self._build_endpoint_file_body(endpoints)
+        assert self.typegen is not None
+        body, names = build_endpoints_module_body(
+            endpoints,
+            EmitConfig.from_document(self.config),
+            TypeResolver(self.typegen.types),
+            reexport_models=self.config.reexport_models,
+            reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
         )
-
-        import_collector.add_imports({'.client': {'Client'}})
-
-        model_names = self._collect_used_model_names(endpoints)
-        if model_names:
-            for name in model_names:
-                import_collector.add_imports({MODELS_MODULE: {name}})
-
-        final_body: list[ast.stmt] = []
-        final_body.extend(import_collector.to_ast())
-
-        if type_checking_block:
-            final_body.append(type_checking_block)
-
-        all_names: set[str] = set(endpoint_names)
-        if self.config.reexport_models:
-            model_names = import_collector._imports.get(MODELS_MODULE, set())
-            if self.config.reexport_model_exclude_patterns:
-                model_names = {
-                    n
-                    for n in model_names
-                    if not any(
-                        fnmatch.fnmatch(n, pat)
-                        for pat in self.config.reexport_model_exclude_patterns
-                    )
-                }
-            all_names |= model_names
-        final_body.append(_all(sorted(all_names)))
-        final_body.extend(body)
-
         write_mod(
-            final_body,
+            body,
             path,
             format_code=self.format_output,
             validate_code=self.validate_output,
         )
-        return endpoint_names
+        return set(names)
+
+    def _generate_client_layout_file(
+        self,
+        directory: UPath,
+        endpoints: list[Endpoint],
+        *,
+        module_of: dict[str, str] | None = None,
+    ) -> None:
+        """Emit ``_clients.py`` with ``Client`` / ``AsyncClient`` classes.
+
+        Their methods delegate to the generated free functions (passing
+        ``client=self``), giving a class-namespaced surface without the
+        ``async_`` name prefix. With ``client_style="resource"`` the methods are
+        grouped into resource sub-clients (``client.users.get(...)``).
+
+        ``module_of`` / ``resource_of`` are supplied in split mode so each method
+        calls its function's split module; otherwise every function comes from the
+        single endpoints module.
+        """
+        assert self.typegen is not None
+        resolver = TypeResolver(self.typegen.types)
+        sink = build_endpoint_sink(
+            endpoints, EmitConfig.from_document(self.config), resolver
+        )
+        function_defs = endpoint_function_defs(sink)
+        endpoints_module = self.config.endpoints_file.replace('.py', '')
+
+        if self.config.client_style == 'resource':
+            resource_path_of = self._resource_path_of(sink)
+            body, _class_names = build_resource_client_module_body(
+                function_defs,
+                resolver,
+                resource_path_of,
+                base_client_name='Client',
+                endpoints_module=endpoints_module,
+                module_of=module_of,
+                use_query=self.config.result_objects,
+            )
+        else:
+            body, _class_names = build_client_module_body(
+                function_defs,
+                resolver,
+                base_client_name='Client',
+                endpoints_module=endpoints_module,
+                module_of=module_of,
+                use_query=self.config.result_objects,
+            )
+        write_mod(
+            body,
+            directory / '_clients.py',
+            format_code=self.format_output,
+            validate_code=self.validate_output,
+        )
+
+    def _resource_path_of(self, sink) -> dict[str, tuple[str, ...]]:
+        """Map each generated function name to its nested resource path.
+
+        The path is a tuple of segments (``('identity', 'users')`` ->
+        ``client.identity.users``), derived per ``resource_naming``. An empty
+        tuple means the method lives directly on the client.
+        """
+        mode = self.config.resource_naming
+        per_endpoint: dict[int, tuple[str, ...]] = {}
+        result: dict[str, tuple[str, ...]] = {}
+        for fn_name, endpoint in sink.owners.items():
+            key = id(endpoint)
+            if key not in per_endpoint:
+                per_endpoint[key] = self._resource_segments(endpoint, mode)
+            result[fn_name] = per_endpoint[key]
+        return result
+
+    def _resource_segments(self, endpoint: Endpoint, mode: str) -> tuple[str, ...]:
+        if mode == 'path':
+            return self._path_resource_segments(endpoint.path)
+        if mode == 'operation_id':
+            return self._operation_id_resource_segments(endpoint)
+        # 'tag' (default): reuse the module_split strategy (usually one level).
+        from otterapi.codegen.splitting import ModuleMapResolver
+
+        resolved = ModuleMapResolver(self.config.module_split).resolve(
+            endpoint.path, endpoint.method, endpoint.tags
+        )
+        return tuple(resolved.module_path) or ('common',)
+
+    def _path_resource_segments(self, path: str) -> tuple[str, ...]:
+        """Nested resource path from URL segments (params dropped, prefix stripped)."""
+        stripped = path
+        for prefix in self.config.module_split.global_strip_prefixes:
+            if prefix and stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :]
+                break
+        segments: list[str] = []
+        for seg in stripped.split('/'):
+            if not seg or (seg.startswith('{') and seg.endswith('}')):
+                continue
+            cleaned = to_snake_case(seg.replace('{', '').replace('}', ''))
+            if cleaned:
+                segments.append(cleaned)
+        return tuple(segments) or ('common',)
+
+    @staticmethod
+    def _operation_id_resource_segments(endpoint: Endpoint) -> tuple[str, ...]:
+        """Nested resource path from the operationId hierarchy (``.`` / ``/``).
+
+        All but the last segment form the resource path; the last is the method
+        basis (stripped from the method name later). A flat operationId (no
+        separator) yields an empty path -> the method lives on the client.
+        """
+        op_id = endpoint.operation_id or ''
+        raw = op_id.replace('/', '.').split('.')
+        parts = [to_snake_case(p) for p in raw if p]
+        return tuple(p for p in parts[:-1] if p)
+
+    @staticmethod
+    def _split_module_of(split_modules: list) -> dict[str, str]:
+        """Map each function to the dotted module it was split into (for imports)."""
+        module_of: dict[str, str] = {}
+        for module in split_modules:
+            dotted = '.'.join(module.module_path)
+            for fn_name in module.endpoint_names:
+                module_of[fn_name] = dotted
+        return module_of
 
     @staticmethod
     def _inject_html_repr_mixin(impl: ast.stmt, all_model_names: set[str]) -> ast.stmt:
@@ -1652,10 +1258,13 @@ class Codegen(OpenAPIProcessor):
         # Generate client class
         client_name = self._get_client_class_name()
 
+        client_style = self.config.client_style
+
         # Check if module splitting is enabled
+        split_modules: list = []
         if self.generate_endpoints:
             if self.config.module_split.enabled:
-                split_files = self._generate_split_endpoints(
+                split_files, split_modules = self._generate_split_endpoints(
                     directory, models_file, endpoints, client_name
                 )
                 generated_files.extend(split_files)
@@ -1670,6 +1279,16 @@ class Codegen(OpenAPIProcessor):
             directory, endpoints, base_url, client_name
         )
         generated_files.extend(client_files)
+
+        # In client_style="client"/"resource", additionally emit Client /
+        # AsyncClient classes whose methods delegate to the generated free
+        # functions (routed to their split module when splitting is enabled).
+        if self.generate_endpoints and client_style in ('client', 'resource'):
+            module_of = None
+            if self.config.module_split.enabled:
+                module_of = self._split_module_of(split_modules)
+            self._generate_client_layout_file(directory, endpoints, module_of=module_of)
+            generated_files.append(f'{output_name}/_clients.py')
 
         # Write __init__.py only if not using module splitting (splitting handles its own __init__.py)
         if not self.config.module_split.enabled:
@@ -1777,15 +1396,24 @@ class Codegen(OpenAPIProcessor):
         body: list[ast.stmt] = []
         all_names: list[str] = []
 
-        # Re-export endpoints, the Client, and the error hierarchy.
-        if endpoint_names:
+        # Re-export endpoints, the Client, and the error hierarchy. In
+        # client_style="client" the public surface is the Client / AsyncClient
+        # classes (whose methods wrap the functions) rather than the free
+        # functions, which stay in endpoints.py as the implementation.
+        client_style = self.config.client_style
+        if endpoint_names and client_style == 'functions':
             self._add_reexport(
                 body,
                 all_names,
                 self.config.endpoints_file.replace('.py', ''),
                 sorted(endpoint_names),
             )
-        self._add_reexport(body, all_names, 'client', ['Client'])
+        if client_style in ('client', 'resource'):
+            self._add_reexport(body, all_names, '_clients', ['AsyncClient', 'Client'])
+            if self.config.result_objects:
+                self._add_reexport(body, all_names, '_query', ['AsyncQuery', 'Query'])
+        else:
+            self._add_reexport(body, all_names, 'client', ['Client'])
         # BaseClient + the full error hierarchy from _client.py so users can
         # ``from my_pkg import NotFoundError`` without reaching into the
         # underscore-prefixed runtime module.
@@ -1831,7 +1459,7 @@ class Codegen(OpenAPIProcessor):
         models_file: UPath,
         endpoints: list[Endpoint],
         client_class_name: str,
-    ) -> list[str]:
+    ) -> tuple[list[str], list]:
         """Generate split endpoint modules based on configuration.
 
         Args:
@@ -1841,7 +1469,9 @@ class Codegen(OpenAPIProcessor):
             client_class_name: Name of the client class (e.g., 'SwaggerPetstoreOpenAPI30Client').
 
         Returns:
-            List of relative paths to generated files.
+            A tuple of (relative file paths, emitted modules). The emitted
+            modules carry each module's path + function names, used to route
+            client-style methods to their function's module.
         """
         from otterapi.codegen.splitting import (
             ModuleTreeBuilder,
@@ -1863,6 +1493,10 @@ class Codegen(OpenAPIProcessor):
             pagination_config=self.config.pagination,
             response_unwrap_config=self.config.response_unwrap,
             export_config=self.config.export,
+            generate_sync=self.config.generate_sync,
+            generate_async=self.config.generate_async,
+            client_style=self.config.client_style,
+            result_objects=self.config.result_objects,
             reexport_models=self.config.reexport_models,
             reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
             format_output=self.format_output,
@@ -1885,7 +1519,7 @@ class Codegen(OpenAPIProcessor):
         # Add __init__.py files
         generated_files.append(f'{output_name}/__init__.py')
 
-        return generated_files
+        return generated_files, emitted
 
     def _get_client_class_name(self) -> str:
         """Get the client class name from config or derive from API title."""
@@ -1986,266 +1620,3 @@ class Codegen(OpenAPIProcessor):
             generated_files.append(f'{output_name}/client.py')
 
         return generated_files
-
-    def _get_dataframe_config(self, endpoint: Endpoint) -> DataFrameMethodConfig:
-        """Get the DataFrame method configuration for an endpoint.
-
-        Args:
-            endpoint: The endpoint to check.
-
-        Returns:
-            DataFrameMethodConfig with generation flags and path.
-
-        Note:
-            This method delegates to get_dataframe_config_for_endpoint() from dataframe_utils.
-            When response unwrapping is active, the unwrapped data type is the
-            endpoint's real return type, so it is passed through for list
-            detection -- otherwise non-paginated envelope list endpoints (e.g.
-            ``ResponseWithStatusEnvelope*``) would be misclassified and lose
-            their DataFrame variants.
-        """
-        unwrap_type_ast = None
-        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
-        if should_unwrap and unwrap_path:
-            unwrap_type_ast, _ = self._get_unwrapped_type_ast(endpoint, unwrap_path)
-
-        return get_dataframe_config_for_endpoint(
-            endpoint, self.config.dataframe, unwrap_type_ast=unwrap_type_ast
-        )
-
-    def _get_pagination_config(
-        self, endpoint: Endpoint
-    ) -> PaginationMethodConfig | None:
-        """Get the pagination method configuration for an endpoint.
-
-        Args:
-            endpoint: The endpoint to check.
-
-        Returns:
-            PaginationMethodConfig if pagination is configured, None otherwise.
-        """
-        return get_pagination_config_for_endpoint(
-            endpoint.sync_fn_name,
-            self.config.pagination,
-            endpoint.parameters,
-        )
-
-    def _get_item_type_ast(
-        self, endpoint: Endpoint, data_path: str | None = None
-    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
-        """Extract the item type AST from a list response type.
-
-        For example, if response_type is list[User], returns the AST for User.
-        For paginated endpoints with envelope response types (e.g.,
-        PaginatedResponse with a 'data' field), this method uses data_path
-        to look up the field type from the response model.
-
-        Args:
-            endpoint: The endpoint to check.
-            data_path: Optional path to the data field in envelope response types
-                (e.g., "data"). If provided and the response type is not directly
-                a list, this will look up the field type from the response model.
-
-        Returns:
-            A tuple of (ast_expression, imports) where:
-            - ast_expression: The AST for the item type, or None if not determinable.
-            - imports: Dictionary of imports needed for the item type.
-        """
-        if not endpoint.response_type or not endpoint.response_type.annotation_ast:
-            return None, {}
-
-        ann = endpoint.response_type.annotation_ast
-
-        # First, check if the response type itself is list[X]
-        item_type, imports = self._extract_list_item_type(ann)
-        if item_type is not None:
-            return item_type, imports
-
-        # If data_path is provided, try to extract item type from envelope response
-        if data_path:
-            field_type_ast = self._get_field_type_from_response(endpoint, data_path)
-            item_type, imports = self._extract_list_item_type(field_type_ast)
-            if item_type is not None:
-                return item_type, imports
-
-        return None, {}
-
-    def _extract_list_item_type(
-        self, type_ast: ast.expr | None
-    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
-        """Extract the item type AST and imports if ``type_ast`` is ``list[X]``."""
-        if (
-            isinstance(type_ast, ast.Subscript)
-            and isinstance(type_ast.value, ast.Name)
-            and type_ast.value.id == 'list'
-        ):
-            item_type = type_ast.slice
-            return item_type, self._collect_model_imports_from_ast(item_type)
-        return None, {}
-
-    def _get_field_type_from_response(
-        self, endpoint: Endpoint, field_path: str
-    ) -> ast.expr | None:
-        """Extract the type AST for a field from the response model.
-
-        For union response types (e.g., SuccessResponse | ErrorResponse),
-        this method looks for the 2xx success response in response_infos
-        to find the correct type.
-
-        Args:
-            endpoint: The endpoint to check.
-            field_path: The dotted path to the field (e.g., "data").
-
-        Returns:
-            The AST expression for the field type, or None if not found.
-        """
-        if not endpoint.response_type:
-            return None
-
-        # Get the first part of the path (for nested paths like "data.items")
-        field_name = field_path.split('.')[0]
-
-        type_name = self._resolve_response_type_name(endpoint)
-        if not type_name:
-            return None
-
-        # Find the type definition (typegen.types is keyed by name, not reference)
-        assert self.typegen is not None
-        type_def = self.typegen.types.get(type_name)
-        if not type_def or not type_def.implementation_ast:
-            return None
-
-        impl = type_def.implementation_ast
-        if not isinstance(impl, ast.ClassDef):
-            return None
-
-        return self._find_field_annotation(impl, field_name)
-
-    @staticmethod
-    def _resolve_response_type_name(endpoint: Endpoint) -> str | None:
-        """Resolve the model name backing an endpoint's response type.
-
-        Union response types (e.g. ``SuccessResponse | ErrorResponse``) have no
-        name on ``response_type`` directly, so fall back to the 2xx success
-        response in ``response_infos``.
-        """
-        type_name = endpoint.response_type.name if endpoint.response_type else None
-        if type_name or not endpoint.response_infos:
-            return type_name
-
-        for response_info in endpoint.response_infos:
-            if 200 <= response_info.status_code < 300 and response_info.type:
-                return response_info.type.name
-
-        return None
-
-    @staticmethod
-    def _find_field_annotation(
-        class_def: ast.ClassDef, field_name: str
-    ) -> ast.expr | None:
-        """Find the annotation AST for a field declared in a class body."""
-        for stmt in class_def.body:
-            if (
-                isinstance(stmt, ast.AnnAssign)
-                and isinstance(stmt.target, ast.Name)
-                and stmt.target.id == field_name
-            ):
-                return stmt.annotation
-        return None
-
-    def _get_unwrap_config(self, endpoint: Endpoint) -> tuple[bool, str | None]:
-        """Get the response unwrap configuration for an endpoint.
-
-        Args:
-            endpoint: The endpoint to check.
-
-        Returns:
-            A tuple of (should_unwrap, data_path).
-        """
-        return self.config.response_unwrap.get_unwrap_config_for_endpoint(
-            endpoint.sync_fn_name
-        )
-
-    def _collect_model_imports_from_ast(
-        self, annotation_ast: ast.expr
-    ) -> dict[str, set[str]]:
-        """Collect model imports needed for an AST annotation.
-
-        Walks the AST and finds all Name nodes that correspond to
-        model types in typegen.types, then collects their annotation imports.
-
-        Args:
-            annotation_ast: The annotation AST to scan for model references.
-
-        Returns:
-            Dictionary mapping module names to sets of import names.
-        """
-        imports: dict[str, set[str]] = {}
-
-        # Get all available model names
-        assert self.typegen is not None
-        available_models = {
-            name
-            for name, type_ in self.typegen.types.items()
-            if type_.implementation_ast is not None
-        }
-
-        # Walk the AST to find Name nodes
-        for node in ast.walk(annotation_ast):
-            if isinstance(node, ast.Name) and node.id in available_models:
-                # This is a model reference - add it to imports
-                # Models are imported from the models module
-                if MODELS_MODULE not in imports:
-                    imports[MODELS_MODULE] = set()
-                imports[MODELS_MODULE].add(node.id)
-
-        return imports
-
-    def _get_unwrapped_type_ast(
-        self,
-        endpoint: Endpoint,
-        data_path: str,
-    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
-        """Extract the type AST for the unwrapped data field.
-
-        Looks up the response type model in typegen and finds the field
-        matching the data_path to determine its type.
-
-        For union response types (e.g., SuccessResponse | ErrorResponse),
-        this method looks for the 2xx success response in response_infos
-        to find the correct type to unwrap.
-
-        Args:
-            endpoint: The endpoint to check.
-            data_path: The dotted path to the data field (e.g., "data").
-
-        Returns:
-            A tuple of (ast_expression, imports) where:
-            - ast_expression: The AST for the unwrapped type, or None if not found.
-            - imports: Dictionary of imports needed for the unwrapped type.
-        """
-        if not endpoint.response_type:
-            return None, {}
-
-        # Get the first part of the path (for nested paths like "data.items")
-        field_name = data_path.split('.')[0]
-
-        type_name = self._resolve_response_type_name(endpoint)
-        if not type_name:
-            return None, {}
-
-        # Find the type definition (typegen.types is keyed by name, not reference)
-        assert self.typegen is not None
-        type_def = self.typegen.types.get(type_name)
-        if not type_def or not type_def.implementation_ast:
-            return None, {}
-
-        impl = type_def.implementation_ast
-        if not isinstance(impl, ast.ClassDef):
-            return None, {}
-
-        annotation = self._find_field_annotation(impl, field_name)
-        if annotation is None:
-            return None, {}
-
-        return annotation, self._collect_model_imports_from_ast(annotation)

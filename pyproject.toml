@@ -72,6 +72,11 @@ dev = [
     "twine>=6.2.0",
     "vulture>=2.14",
 ]
+# Isolated so the normal test matrix does not pull in pyright (and its node
+# runtime); a dedicated CI job installs this to run the generated-output gate.
+typecheck = [
+    "pyright>=1.1.400",
+]
 
 [tool.hatch.build.targets.wheel]
 only-include = ["otterapi", "/README.md"]
@@ -141,6 +146,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "typecheck: type-checks generated output with pyright (needs the typecheck group)",
 ]
 filterwarnings = [
     "error",

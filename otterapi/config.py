@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 DEFAULT_FILENAMES = ['otter.yaml', 'otter.yml', 'otter.json']
@@ -1029,6 +1029,45 @@ class DocumentConfig(BaseModel):
         None, description='Optional name for a generated client class.'
     )
 
+    client_style: Literal['functions', 'client', 'resource'] = Field(
+        default='functions',
+        description=(
+            'Shape of the generated public API. "functions" (default) exposes a '
+            'standalone function per endpoint and variant (e.g. ``get_user``, '
+            '``async_get_user``, ``get_user_df``). "client" additionally exposes '
+            '``Client`` and ``AsyncClient`` classes with a flat method per '
+            'endpoint (``client.get_user(...)``), without the ``async_`` prefix. '
+            '"resource" groups those methods into resource sub-clients derived '
+            'from the same strategy as ``module_split`` (tags/path/custom), e.g. '
+            '``client.users.get(...)``.'
+        ),
+    )
+
+    result_objects: bool = Field(
+        default=False,
+        description=(
+            'When True (with ``client_style="resource"``), a list endpoint returns '
+            'a deferred ``Query`` object instead of separate ``_df`` / ``_pl`` / '
+            '``_iter`` / ``_export`` methods. Terminals materialize it: '
+            '``client.users.list().all()`` / ``.to_pandas()`` / ``.iter()`` / '
+            '``.export(path)``. Requires the relevant feature (dataframe / '
+            'pagination / export) enabled for each terminal.'
+        ),
+    )
+
+    resource_naming: Literal['tag', 'path', 'operation_id'] = Field(
+        default='tag',
+        description=(
+            'How resource sub-clients are derived when ``client_style="resource"``. '
+            '"tag" (default) uses the ``module_split`` strategy (usually one level). '
+            '"path" nests by URL path segments '
+            '(``/identity/users/{id}`` -> ``client.identity.users.get(...)``). '
+            '"operation_id" nests by the dotted/slash hierarchy in each '
+            'operationId (``identity.users.get`` -> ``client.identity.users.get()``). '
+            'Ignored for other client styles.'
+        ),
+    )
+
     function_naming: Literal['operation_id', 'path'] = Field(
         default='operation_id',
         description=(
@@ -1118,6 +1157,16 @@ class DocumentConfig(BaseModel):
         if not v.endswith('.py'):
             raise ValueError(f'File name must end with .py, got: {v}')
         return v
+
+    @model_validator(mode='after')
+    def _validate_client_options(self) -> DocumentConfig:
+        """Cross-field checks for the client-style options."""
+        if self.result_objects and self.client_style == 'functions':
+            raise ValueError(
+                'result_objects requires client_style="client" or "resource"; '
+                'it has no effect with the default client_style="functions".'
+            )
+        return self
 
 
 class CodegenConfig(BaseSettings):

@@ -249,16 +249,21 @@ def _build_export_dispatch(
     item_type_ast: ast.expr,
     is_async: bool,
     consumes_async_iter: bool,
+    target_returns_optional: bool = False,
 ) -> list[ast.stmt]:
     """Build the function body for an export wrapper.
 
     Body shape:
-        rows = <target>(...)            # or `await ...`
+        rows = <target>(...)            # or `await ...`  (`or []` if optional)
         return export(rows, output_path, model=<Item>, format=format,
                       batch_size=batch_size)
 
     For async + paginated case, ``rows`` is an AsyncIterator and we route
     through ``export_async`` (and ``await`` it).
+
+    When the wrapped function can return ``None`` (an unwrapped-envelope list
+    field that is not ``required`` is typed ``list[X] | None``), ``rows`` is
+    coerced with ``or []`` so ``export`` never iterates ``None``.
     """
     target_call: ast.expr = _call(
         func=_name(target_fn_name),
@@ -268,6 +273,11 @@ def _build_export_dispatch(
     if is_async and not consumes_async_iter:
         # ``await get_users_async(...)`` returns the materialized list.
         target_call = ast.Await(value=target_call)
+
+    # A materialized list may be None; an iterator never is. Guard only the
+    # former so behaviour for the common (non-optional) case is unchanged.
+    if target_returns_optional and not consumes_async_iter:
+        target_call = ast.BoolOp(op=ast.Or(), values=[target_call, ast.List(elts=[])])
 
     rows_assign = _assign(_name('rows'), target_call)
 
@@ -303,6 +313,7 @@ def _build_export_function(
     is_paginated: bool,
     default_format: str,
     default_batch_size: int,
+    target_returns_optional: bool = False,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Shared builder body for both standalone + paginated export wrappers."""
     # Local import avoids a circular dependency at module load.
@@ -359,6 +370,7 @@ def _build_export_function(
         item_type_ast=item_type_ast,
         is_async=is_async,
         consumes_async_iter=is_async and is_paginated,
+        target_returns_optional=target_returns_optional,
     )
 
     docstring = (
@@ -406,13 +418,16 @@ def build_standalone_export_fn(
     is_async: bool,
     default_format: str = 'csv',
     default_batch_size: int = 1000,
+    target_returns_optional: bool = False,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an export wrapper around a non-paginated list endpoint.
 
     The wrapper mirrors ``target_fn_name``'s signature, adds keyword-only
     ``output_path`` / ``format`` / ``batch_size`` arguments, calls the
     underlying endpoint, and pipes the resulting list into the runtime
-    ``export(...)`` writer. Returns the row count.
+    ``export(...)`` writer. Returns the row count. When the underlying endpoint
+    can return ``None`` (``target_returns_optional``), the result is coerced to
+    an empty list so ``export`` never iterates ``None``.
     """
     return _build_export_function(
         fn_name=fn_name,
@@ -426,6 +441,7 @@ def build_standalone_export_fn(
         is_paginated=False,
         default_format=default_format,
         default_batch_size=default_batch_size,
+        target_returns_optional=target_returns_optional,
     )
 
 

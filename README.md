@@ -136,6 +136,9 @@ Each entry under `documents:` supports these fields:
 | `generate_async` | bool | `true` | Generate async endpoint functions |
 | `generate_sync` | bool | `true` | Generate sync endpoint functions |
 | `client_class_name` | string | from API title | Override the generated client class name |
+| `client_style` | `functions` \| `client` \| `resource` | `functions` | Shape of the public API. `functions` exposes a standalone function per endpoint/variant; `client` adds `Client` / `AsyncClient` classes with a flat method per endpoint; `resource` groups those methods into resource sub-clients (see [Client Style](#-client-style)) |
+| `resource_naming` | `tag` \| `path` \| `operation_id` | `tag` | How resource sub-clients are derived for `client_style: resource`. `tag` uses the module-split strategy (one level); `path` nests by URL segments; `operation_id` nests by the dotted operationId hierarchy |
+| `result_objects` | bool | `false` | With `client_style: client` or `resource`, a list endpoint returns a deferred `Query` object instead of separate `_df`/`_pl`/`_iter`/`_export` methods (see [Client Style](#-client-style)) |
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
@@ -720,8 +723,11 @@ from client.orders import list_orders, get_order
 
 ### Using the Client Class
 
+In the default `functions` style the `Client` carries configuration and the
+connection pool; you pass it to each endpoint function via `client=`:
+
 ```python
-from client import Client
+from client import Client, get_user, async_get_user
 
 client = Client(
     base_url='https://api.example.com',
@@ -729,11 +735,125 @@ client = Client(
     headers={'Authorization': 'Bearer your-token'},
 )
 
-user = client.get_user(user_id=123)
+user = get_user(user_id=123, client=client)
 
 async def main():
-    user = await client.async_get_user(user_id=123)
+    user = await async_get_user(user_id=123, client=client)
 ```
+
+Prefer a method-based API (`client.get_user(...)`)? Set
+[`client_style`](#-client-style).
+
+### 🎛 Client Style
+
+`client_style` controls the shape of the generated public API.
+
+**`functions` (default)** — a standalone function per endpoint and variant, plus
+an infrastructure `Client` you pass in:
+
+```python
+from client import get_user, async_get_user, list_users_df
+
+user = get_user(user_id=123)
+df = list_users_df()
+```
+
+**`client`** — additionally generates `Client` and `AsyncClient` classes whose
+methods delegate to those functions, giving a class-namespaced surface with clean
+names (no `async_` prefix):
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    client_style: client
+```
+
+```python
+from client import Client, AsyncClient
+
+user = Client(base_url='https://api.example.com').get_user(user_id=123)
+
+async def main():
+    async with AsyncClient() as api:
+        user = await api.get_user(user_id=123)          # no async_ prefix
+        df = await api.list_users_df()
+        async for u in api.list_users_iter():
+            ...
+```
+
+**`resource`** — groups the methods into resource sub-clients, derived from the
+same strategy as [module splitting](#-module-splitting) (tags/path/custom). The
+resource token is stripped from each method name:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    client_style: resource
+```
+
+```python
+from client import Client, AsyncClient
+
+client = Client(base_url='https://api.example.com')
+user = client.users.get(user_id=123)        # -> get_user(...)
+users = client.users.list()                 # -> list_users(...)
+order = client.orders.get(order_id=7)
+
+async with AsyncClient() as api:
+    user = await api.users.get(user_id=123)
+```
+
+`resource_naming` controls how the sub-clients are derived and can **nest**:
+
+```yaml
+    client_style: resource
+    resource_naming: path          # or: operation_id
+```
+
+- `tag` (default) — one level, from the module-split strategy.
+- `path` — nests by URL segments: `/identity/users/{id}` → `client.identity.users.get(id)`.
+- `operation_id` — nests by the dotted operationId: `identity.users.get` → `client.identity.users.get()`.
+
+```python
+user = client.identity.users.get(user_id=123)
+invoices = client.billing.invoices.list()
+```
+
+#### Result objects
+
+With `result_objects: true` (with `client_style: client` or `resource`), a
+**list** endpoint returns a deferred `Query` instead of exposing separate
+`_df` / `_pl` / `_iter` / `_export` methods. The endpoint's arguments are captured
+once; a terminal method materializes it. `Query` / `AsyncQuery` are exported from
+the package for type hints:
+
+```yaml
+    client_style: resource
+    result_objects: true
+```
+
+```python
+q = client.users.list(status="active")   # nothing sent yet
+rows = q.all()                            # list[User]
+df   = q.to_pandas()                      # pandas DataFrame
+for u in q.iter(): ...                    # streamed, page by page
+q.export("users.csv")                     # write to a file
+
+async with AsyncClient() as api:
+    rows = await api.users.list().all()
+    async for u in api.users.list().iter(): ...
+```
+
+Terminals whose feature wasn't enabled at generation time raise a clear error;
+scalar (non-list) endpoints keep returning the model directly.
+
+The free functions remain as the implementation the methods call. `client` and
+`resource` compose with [module splitting](#-module-splitting): the functions are
+split across module files and each method routes to its function's module, while
+`Client` / `AsyncClient` stay the single public entry point. With `resource` the
+resources mirror the split modules.
 
 ### Working with Models
 

@@ -1654,6 +1654,22 @@ def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandl
     )
 
 
+def _unreachable_retry_raise() -> ast.stmt:
+    """A ``raise`` after the retry loop that the loop never actually reaches.
+
+    The final attempt always returns or raises, but a type checker cannot prove
+    that, so it flags the ``-> Response`` method as possibly falling off the end.
+    This makes the exhausted-loop path explicit (and impossible).
+    """
+    return ast.Raise(
+        exc=_call(
+            _name('RuntimeError'),
+            args=[ast.Constant(value='retry loop exhausted without returning')],
+        ),
+        cause=None,
+    )
+
+
 def _build_sync_request_body(
     url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
 ) -> list[ast.stmt]:
@@ -1706,7 +1722,7 @@ def _build_sync_request_body(
         orelse=[],
     )
 
-    return [filtered_params_stmt, for_loop]
+    return [filtered_params_stmt, for_loop, _unreachable_retry_raise()]
 
 
 def _build_async_request_body(
@@ -1796,7 +1812,7 @@ def _build_async_request_body(
         orelse=[],
     )
 
-    return [filtered_params_stmt, for_loop]
+    return [filtered_params_stmt, for_loop, _unreachable_retry_raise()]
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:

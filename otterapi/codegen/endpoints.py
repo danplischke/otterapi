@@ -37,6 +37,7 @@ from otterapi.codegen.ast_utils import (
     _name,
     _subscript,
     _union_expr,
+    annotation_includes_none,
 )
 from otterapi.openapi.constants import MediaType
 
@@ -489,24 +490,42 @@ class ParameterASTBuilder:
 
         body_name = 'body'
 
+        # A model body is serialized with ``body.model_dump()``; anything else
+        # (multipart, raw/primitive JSON, form without a model) passes through.
+        serializes_model = bool(
+            body.type
+            and body.type.type in ('model', 'root')
+            and (body.is_json or body.is_form)
+        )
+
         body_expr: ast.expr
-        if body.is_json and body.type and body.type.type in ('model', 'root'):
+        if serializes_model:
             body_expr = _call(
                 func=_attr(_name(body_name), 'model_dump'),
                 args=[],
             )
-        elif body.is_multipart:
-            body_expr = _name(body_name)
-        elif body.is_form:
-            if body.type and body.type.type in ('model', 'root'):
-                body_expr = _call(
-                    func=_attr(_name(body_name), 'model_dump'),
-                    args=[],
-                )
-            else:
-                body_expr = _name(body_name)
         else:
             body_expr = _name(body_name)
+
+        # The body may be ``None`` at call time -- either because it is optional
+        # (keyword-only, defaults to None) or because its schema is nullable even
+        # though it is required (``body: Model | None`` positional). Either way
+        # ``body.model_dump()`` would raise ``AttributeError`` on None, so guard
+        # the access and pass ``None`` through (httpx reads ``json=None`` /
+        # ``data=None`` as "no body").
+        body_may_be_none = not body.required or (
+            body.type is not None and annotation_includes_none(body.type.annotation_ast)
+        )
+        if serializes_model and body_may_be_none:
+            body_expr = ast.IfExp(
+                test=ast.Compare(
+                    left=_name(body_name),
+                    ops=[ast.IsNot()],
+                    comparators=[ast.Constant(value=None)],
+                ),
+                body=body_expr,
+                orelse=ast.Constant(value=None),
+            )
 
         return body_expr, body.httpx_param_name
 
@@ -873,8 +892,13 @@ class EndpointFunctionFactory:
             self._merge_imports(self.config.response_type_imports)
 
         if self._is_raw_response_type(self.config.response_type):
-            # Raw types (Response / bytes / str) skip Pydantic parsing.
-            return builder.add_return(_request_call()).build()
+            # Raw responses skip Pydantic parsing. A ``str`` (text/plain) or
+            # ``bytes`` (octet-stream) response type must still be extracted
+            # from the httpx Response -- returning the Response object itself
+            # would contradict the declared return type.
+            return builder.add_return(
+                self._raw_response_return_expr(_request_call())
+            ).build()
 
         # JSON response: request, parse, optionally unwrap.
         builder.add_method_call_assignment(
@@ -913,6 +937,23 @@ class EndpointFunctionFactory:
         if isinstance(elt, ast.Name):
             return elt.id in ('Response', 'bytes', 'str', 'None')
         return isinstance(elt, ast.Constant) and elt.value is None
+
+    def _raw_response_return_expr(self, request_call: ast.expr) -> ast.expr:
+        """Turn the raw ``_request`` call into the declared raw return value.
+
+        ``str`` (text/plain) becomes ``<response>.text`` and ``bytes``
+        (octet-stream) becomes ``<response>.content``; every other raw type
+        (``Response`` itself, or a union) returns the httpx Response unchanged.
+        Only a bare ``str`` / ``bytes`` annotation is unwrapped -- a union such
+        as ``str | None`` keeps the Response so we never guess wrongly.
+        """
+        ann = self.config.response_type.annotation_ast
+        if isinstance(ann, ast.Name):
+            if ann.id == 'str':
+                return _attr(request_call, 'text')
+            if ann.id == 'bytes':
+                return _attr(request_call, 'content')
+        return request_call
 
     def _is_raw_response_type(self, response_type: 'Type') -> bool:
         """Check if the response type is a raw type that doesn't need JSON parsing.

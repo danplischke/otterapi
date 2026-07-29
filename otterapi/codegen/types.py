@@ -52,6 +52,17 @@ _PYTHON_BUILTIN_TYPE_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Attributes/methods pydantic's ``BaseModel`` already defines. A field named
+# after one of these shadows the parent attribute -- pydantic v2 emits a
+# ``UserWarning`` at class-definition time (an error under ``filterwarnings =
+# error``) and type-checkers flag the incompatible override -- so such fields
+# are suffixed with ``_`` and keep the original name as an alias. Derived from
+# the live class so it tracks the installed pydantic version (covers ``dict``,
+# ``json``, ``copy``, ``validate``, ``schema``, ``model_*`` and friends).
+_PYDANTIC_RESERVED_NAMES: frozenset[str] = frozenset(
+    name for name in dir(BaseModel) if not name.startswith('_')
+)
+
 __all__ = [
     'Type',
     'Parameter',
@@ -338,6 +349,7 @@ class Endpoint:
     path: str = ''
     description: str | None = None
     tags: list[str] | None = None  # OpenAPI tags for module splitting
+    operation_id: str | None = None  # raw operationId (for resource_naming)
 
     # Parameters and body
     parameters: list['Parameter'] | None = None
@@ -436,6 +448,11 @@ class TypeGenerator(OpenAPIProcessor):
     _building: list[str] = dataclasses.field(default_factory=list, init=False)
     # Names of models that participate in a reference cycle (need model_rebuild).
     _cyclic: set[str] = dataclasses.field(default_factory=set, init=False)
+    # Names of *union* schemas (anyOf/oneOf) currently being expanded. A named
+    # union is inlined (it has no cached class to break a cycle on), so a variant
+    # that refs back to it would recurse forever; this tracks in-progress unions
+    # so the re-entry can fall back to ``Any`` instead.
+    _building_unions: set[str] = dataclasses.field(default_factory=set, init=False)
 
     @staticmethod
     def _rename_type(type_: Type, new_name: str) -> None:
@@ -709,9 +726,24 @@ class TypeGenerator(OpenAPIProcessor):
             return None
         return schema.type
 
+    @staticmethod
+    def _is_none_annotation(node: ast.expr | None) -> bool:
+        """True for a bare ``None`` annotation in either AST form.
+
+        A ``null``-typed schema is emitted as ``ast.Name('None')`` (see
+        ``_PRIMITIVE_TYPE_MAP``); ``ast.Constant(None)`` also occurs. Wrapping
+        either in ``| None`` yields the invalid ``None | None``.
+        """
+        return (isinstance(node, ast.Constant) and node.value is None) or (
+            isinstance(node, ast.Name) and node.id == 'None'
+        )
+
     def _make_nullable_type(self, base_type: Type) -> Type:
         """Wrap a type annotation to make it nullable (T | None)."""
         assert base_type.annotation_ast is not None
+        # A ``null``-typed base is already None; ``None | None`` is invalid.
+        if self._is_none_annotation(base_type.annotation_ast):
+            return base_type
         nullable_ast = _union_expr([base_type.annotation_ast, ast.Constant(value=None)])
 
         type_ = Type(
@@ -834,6 +866,13 @@ class TypeGenerator(OpenAPIProcessor):
 
         sanitized_field_name = sanitize_parameter_field_name(field_name)
 
+        # pydantic forbids field names with a leading underscore (they are
+        # treated as private attributes and rejected at class creation). A
+        # property like ``_1`` must be renamed to a valid identifier; the
+        # original is preserved as the alias below.
+        if sanitized_field_name.startswith('_'):
+            sanitized_field_name = 'field' + sanitized_field_name
+
         # Detect field-name / type-name clash: if the sanitized field name is
         # the same as a registered type name OR a Python builtin type name,
         # Pydantic's schema resolver picks up the field descriptor (FieldInfo)
@@ -844,28 +883,53 @@ class TypeGenerator(OpenAPIProcessor):
         if (
             sanitized_field_name in self.types
             or sanitized_field_name in _PYTHON_BUILTIN_TYPE_NAMES
+            or sanitized_field_name in _PYDANTIC_RESERVED_NAMES
         ):
             sanitized_field_name = sanitized_field_name + '_'
 
-        # Determine the annotation - wrap in Union with None if nullable
+        # Resolve the default first: an optional (not-required) field with no
+        # explicit default gets ``default=None`` and can therefore hold None at
+        # runtime, which the annotation must admit (see ``defaults_to_none``).
         assert field_type.annotation_ast is not None
         annotation_ast: ast.expr = field_type.annotation_ast
-        if is_nullable and not self._type_already_nullable(field_type):
-            annotation_ast = _union_expr(
-                [field_type.annotation_ast, ast.Constant(value=None)]
-            )
 
         value = None
+        defaults_to_none = False
         if field_schema.default is not None and isinstance(
             field_schema.default, (str, int, float, bool)
         ):
-            field_keywords.append(
-                ast.keyword(arg='default', value=ast.Constant(field_schema.default))
-            )
+            default_ast: ast.expr = ast.Constant(field_schema.default)
+            # An enum-typed field needs its default expressed as the enum, not a
+            # bare scalar: ``mode: Mode = Field(default='ALWAYS')`` is a ``str``
+            # where the annotation wants ``Mode``. Wrap it as ``Mode('ALWAYS')``
+            # so it type-checks (pydantic already coerces at runtime). Guard on
+            # the value being a declared member so a malformed spec default does
+            # not raise at import time -- fall back to the raw constant instead.
+            if (
+                field_schema.enum
+                and field_type.name
+                and field_schema.default in field_schema.enum
+            ):
+                default_ast = _call(
+                    func=_name(field_type.name),
+                    args=[ast.Constant(field_schema.default)],
+                )
+            field_keywords.append(ast.keyword(arg='default', value=default_ast))
         elif field_schema.default is None and not is_required:
             # Only add default=None for optional (not required) fields
             # Nullable but required fields should NOT have a default
             field_keywords.append(ast.keyword(arg='default', value=ast.Constant(None)))
+            defaults_to_none = True
+
+        # Wrap the annotation in ``| None`` when the schema is nullable OR when
+        # the field defaults to None: an omitted optional field is ``None`` at
+        # runtime, so a bare ``T`` annotation is a lie the type-checker rejects.
+        if (is_nullable or defaults_to_none) and not self._type_already_nullable(
+            field_type
+        ):
+            annotation_ast = _union_expr(
+                [field_type.annotation_ast, ast.Constant(value=None)]
+            )
 
         if sanitized_field_name != field_name:
             field_keywords.append(
@@ -902,6 +966,11 @@ class TypeGenerator(OpenAPIProcessor):
         ``X | None`` (BinOp chain) form generated by ``_union_expr``.
         """
         annotation = type_.annotation_ast
+        # A bare ``None`` annotation (from a ``null``-typed schema) is already
+        # None -- wrapping it would produce the invalid ``None | None``, which
+        # raises ``TypeError`` when pydantic evaluates the annotation.
+        if TypeGenerator._is_none_annotation(annotation):
+            return True
         # Union[..., None] form
         if isinstance(annotation, ast.Subscript):
             if (
@@ -1153,6 +1222,18 @@ class TypeGenerator(OpenAPIProcessor):
             if own_placeholder and stable_name is not None:
                 self._building.remove(stable_name)
                 del self.types[stable_name]
+            # Recursive-union guard: an inlined union has no cached class for the
+            # $ref cycle guard to break on, so a variant that (transitively) refs
+            # back to this same union recurses forever. Track in-progress union
+            # names and fall back to ``Any`` for the self-referential arm.
+            if stable_name is not None:
+                if stable_name in self._building_unions:
+                    return self._make_any_type()
+                self._building_unions.add(stable_name)
+                try:
+                    return self._build_union_variant_type(schema, base_name)
+                finally:
+                    self._building_unions.discard(stable_name)
             return self._build_union_variant_type(schema, base_name)
 
         name = stable_name or 'UnnamedModel'
@@ -1311,6 +1392,22 @@ class TypeGenerator(OpenAPIProcessor):
             schema, schema_name or name, base_name=base_name
         )
 
+    def _referenced_type_name(self, ref: Reference) -> str | None:
+        """Registry name a ``$ref``-ed schema is stored under.
+
+        ``_create_object_type`` prefers a schema's ``title`` over its ``$ref``
+        key when naming the generated model, so the two can differ (Stripe:
+        key ``charge``, title ``Charge``). The cycle guard must know that
+        title name or it misses the cache and rebuilds recursive schemas
+        forever. Returns ``None`` for refs that cannot be resolved.
+        """
+        try:
+            resolved, ref_based = self._resolve_reference(ref)
+        except ValueError:
+            return None
+        title = getattr(resolved, 'title', None)
+        return sanitize_identifier(title) if title else ref_based
+
     def schema_to_type(
         self,
         schema: Schema | Reference,
@@ -1320,13 +1417,18 @@ class TypeGenerator(OpenAPIProcessor):
         if isinstance(schema, Reference):
             ref_name = schema.ref.split('/')[-1]
             sanitized_ref_name = sanitize_identifier(ref_name)
-            if sanitized_ref_name in self.types:
-                # If the cached type is still being built, this is a cycle.
-                if sanitized_ref_name in self._building:
-                    # Mark the whole in-progress chain — every model on the
-                    # stack is part of the cycle that just closed.
-                    self._cyclic.update(self._building)
-                return self.types[sanitized_ref_name]
+            # A named schema is registered under either its ``$ref`` key or a
+            # title-derived name -- e.g. Stripe's component key ``charge``
+            # carries title ``Charge`` -- so check both. Missing the cache here
+            # makes a mutually-recursive ``$ref`` rebuild the model forever
+            # instead of breaking on the cached (possibly still-building) type.
+            for cache_key in (sanitized_ref_name, self._referenced_type_name(schema)):
+                if cache_key and cache_key in self.types:
+                    # If the cached type is still being built, this is a cycle;
+                    # mark the whole in-progress chain that just closed.
+                    if cache_key in self._building:
+                        self._cyclic.update(self._building)
+                    return self.types[cache_key]
 
         schema, schema_name = self._resolve_reference(schema)
 

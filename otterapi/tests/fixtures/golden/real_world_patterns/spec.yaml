@@ -1,0 +1,82 @@
+openapi: 3.0.0
+info:
+  title: Real-world patterns
+  version: 1.0.0
+# A compact spec reproducing the messy shapes that real specs (Stripe, GitHub)
+# surfaced and that the small happy-path fixtures never exercised:
+#   * mutually-recursive schemas whose component key (lowercase) differs from
+#     their title (PascalCase) -- caused infinite recursion in type generation;
+#   * an enum field with a default -- was emitted as a bare str default;
+#   * a field named after a pydantic BaseModel attribute (``schema``);
+#   * a request-body encoding with ``style: deepObject`` -- crashed the
+#     OpenAPI 3.0 -> 3.1 upgrade.
+paths:
+  /charges:
+    get:
+      operationId: listCharges
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/charge'
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Widget'
+            encoding:
+              tags:
+                style: deepObject
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+components:
+  schemas:
+    charge:
+      type: object
+      title: Charge
+      properties:
+        id:
+          type: string
+        transfer:
+          anyOf:
+            - type: string
+            - $ref: '#/components/schemas/transfer'
+    transfer:
+      type: object
+      title: Transfer
+      properties:
+        id:
+          type: string
+        source_charge:
+          anyOf:
+            - type: string
+            - $ref: '#/components/schemas/charge'
+    Widget:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        mode:
+          type: string
+          enum: [ON, OFF, AUTO]
+          default: AUTO
+        schema:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
