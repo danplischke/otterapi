@@ -25,6 +25,7 @@ import ast
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
+    MODELS_MODULE,
     ImportCollector,
     _all,
     _assign,
@@ -48,8 +49,10 @@ _NAME_IMPORTS: dict[str, tuple[str, str]] = {
     'AsyncIterator': ('collections.abc', 'AsyncIterator'),
     'Any': ('typing', 'Any'),
     'Literal': ('typing', 'Literal'),
+    'Annotated': ('typing', 'Annotated'),
     'Path': ('pathlib', 'Path'),
     'UPath': ('upath', 'UPath'),
+    'Field': ('pydantic', 'Field'),
     'Query': ('._query', 'Query'),
     'AsyncQuery': ('._query', 'AsyncQuery'),
 }
@@ -217,39 +220,41 @@ def _method_from_function(
     )
 
 
-def _annotation_names(
-    methods: list[ast.FunctionDef | ast.AsyncFunctionDef],
-) -> tuple[set[str], list[ast.expr]]:
-    """Collect referenced names and every annotation AST across the methods.
+def _collect_annotation_names(ann: ast.expr, names: set[str]) -> None:
+    """Collect ``Name`` ids and ``Attribute`` bases from an annotation.
 
-    Returns ``(names, annotations)`` where *names* is the set of bare
-    ``ast.Name`` ids and ``ast.Attribute`` bases (e.g. ``pd`` from
-    ``pd.DataFrame``), and *annotations* is the list of annotation expressions
-    (for model-name resolution).
+    Descends into stringized (forward-ref) sub-annotations -- e.g. the DataFrame
+    return type is the constant ``"pd.DataFrame"`` and the ``pd`` inside it would
+    otherwise be invisible, so its import would be missed.
     """
+    for node in ast.walk(ann):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            names.add(node.value.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            try:
+                inner = ast.parse(node.value, mode='eval').body
+            except SyntaxError:
+                continue
+            _collect_annotation_names(inner, names)
+
+
+def _method_annotation_names(
+    methods: list[ast.FunctionDef | ast.AsyncFunctionDef],
+) -> set[str]:
+    """Every name referenced by the methods' argument and return annotations."""
     names: set[str] = set()
-    annotations: list[ast.expr] = []
     for method in methods:
-        arg_iter = [
-            *method.args.posonlyargs,
-            *method.args.args,
-            *method.args.kwonlyargs,
-        ]
+        args = [*method.args.posonlyargs, *method.args.args, *method.args.kwonlyargs]
         if method.args.kwarg is not None:
-            arg_iter.append(method.args.kwarg)
-        collected = [a.annotation for a in arg_iter if a.annotation is not None]
+            args.append(method.args.kwarg)
+        for arg in args:
+            if arg.annotation is not None:
+                _collect_annotation_names(arg.annotation, names)
         if method.returns is not None:
-            collected.append(method.returns)
-        annotations.extend(collected)
-        for ann in collected:
-            for node in ast.walk(ann):
-                if isinstance(node, ast.Name):
-                    names.add(node.id)
-                elif isinstance(node, ast.Attribute) and isinstance(
-                    node.value, ast.Name
-                ):
-                    names.add(node.value.id)
-    return names, annotations
+            _collect_annotation_names(method.returns, names)
+    return names
 
 
 def _build_imports(
@@ -262,11 +267,11 @@ def _build_imports(
     ``TYPE_CHECKING`` guard (they are optional runtime deps used only in
     annotations).
     """
-    names, annotations = _annotation_names(methods)
+    names = _method_annotation_names(methods)
 
     collector = ImportCollector()
-    for ann in annotations:
-        collector.add_imports(resolver.collect_model_imports_from_ast(ann))
+    for model_name in names & resolver.model_names():
+        collector.add_imports({MODELS_MODULE: {model_name}})
     for name in names:
         mapping = _NAME_IMPORTS.get(name)
         if mapping is not None:

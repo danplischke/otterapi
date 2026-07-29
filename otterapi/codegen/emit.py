@@ -242,16 +242,20 @@ class TypeResolver:
 
     # -- imports ---------------------------------------------------------------
 
+    def model_names(self) -> set[str]:
+        """Names of every generated model (those with an implementation)."""
+        return {
+            name
+            for name, type_ in self._types.items()
+            if type_.implementation_ast is not None
+        }
+
     def collect_model_imports_from_ast(
         self, annotation_ast: ast.expr
     ) -> dict[str, set[str]]:
         """Collect ``.models`` imports for every model name referenced in an AST."""
         imports: dict[str, set[str]] = {}
-        available_models = {
-            name
-            for name, type_ in self._types.items()
-            if type_.implementation_ast is not None
-        }
+        available_models = self.model_names()
         for node in ast.walk(annotation_ast):
             if isinstance(node, ast.Name) and node.id in available_models:
                 imports.setdefault(MODELS_MODULE, set()).add(node.id)
