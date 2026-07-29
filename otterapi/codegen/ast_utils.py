@@ -71,6 +71,70 @@ def _optional_expr(inner: ast.expr) -> ast.Subscript:
     return _subscript('Optional', inner)
 
 
+def annotation_includes_none(type_ast: 'ast.expr | None') -> bool:
+    """True if the annotation admits ``None``.
+
+    Recognises ``X | None`` (BinOp chain), ``Optional[X]`` and
+    ``Union[..., None]`` (Subscript forms), and a bare ``None`` constant.
+    """
+    if type_ast is None:
+        return False
+    if isinstance(type_ast, ast.Constant) and type_ast.value is None:
+        return True
+    if isinstance(type_ast, ast.BinOp) and isinstance(type_ast.op, ast.BitOr):
+        return annotation_includes_none(type_ast.left) or annotation_includes_none(
+            type_ast.right
+        )
+    if isinstance(type_ast, ast.Subscript) and isinstance(type_ast.value, ast.Name):
+        if type_ast.value.id == 'Optional':
+            return True
+        if type_ast.value.id == 'Union':
+            elts = (
+                type_ast.slice.elts
+                if isinstance(type_ast.slice, ast.Tuple)
+                else [type_ast.slice]
+            )
+            return any(annotation_includes_none(elt) for elt in elts)
+    return False
+
+
+def strip_optional(type_ast: ast.expr) -> ast.expr:
+    """Unwrap a single ``| None`` / ``Optional[...]`` layer, else return as-is.
+
+    ``list[X] | None`` -> ``list[X]``, ``Optional[list[X]]`` -> ``list[X]``,
+    ``Union[list[X], None]`` -> ``list[X]``. A genuine multi-type union
+    (``A | B``) is returned unchanged. Optional list fields are the norm -- a
+    not-``required`` array property is typed ``list[X] | None`` -- so list
+    detection must see through the wrapper.
+    """
+    # ``X | None`` (BinOp chain produced by ``_union_expr``): drop a None arm.
+    if isinstance(type_ast, ast.BinOp) and isinstance(type_ast.op, ast.BitOr):
+        left_none = (
+            isinstance(type_ast.left, ast.Constant) and type_ast.left.value is None
+        )
+        right_none = (
+            isinstance(type_ast.right, ast.Constant) and type_ast.right.value is None
+        )
+        if right_none and not left_none:
+            return type_ast.left
+        if left_none and not right_none:
+            return type_ast.right
+        return type_ast
+    # ``Optional[X]`` or ``Union[X, None]`` (Subscript forms).
+    if isinstance(type_ast, ast.Subscript) and isinstance(type_ast.value, ast.Name):
+        if type_ast.value.id == 'Optional':
+            return type_ast.slice
+        if type_ast.value.id == 'Union' and isinstance(type_ast.slice, ast.Tuple):
+            non_none = [
+                elt
+                for elt in type_ast.slice.elts
+                if not (isinstance(elt, ast.Constant) and elt.value is None)
+            ]
+            if len(non_none) == 1:
+                return non_none[0]
+    return type_ast
+
+
 def _argument(name: str, value: ast.expr | None = None) -> ast.arg:
     return ast.arg(
         arg=name,

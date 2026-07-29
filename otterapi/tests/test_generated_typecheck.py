@@ -32,6 +32,17 @@ if importlib.util.find_spec('pyright') is None:  # pragma: no cover
 
 GOLDEN = Path(__file__).parent / 'fixtures' / 'golden'
 
+
+def _spec_path(spec: str) -> Path:
+    """Resolve a golden fixture's spec file (``.yaml`` / ``.yml`` / ``.json``)."""
+    base = GOLDEN / spec
+    for name in ('spec.yaml', 'spec.yml', 'spec.json'):
+        candidate = base / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f'no spec file found in {base}')
+
+
 _ALL_FEATURES = {
     'dataframe': {'enabled': True, 'pandas': True, 'polars': True},
     'export': {'enabled': True, 'formats': ['csv', 'jsonl', 'parquet']},
@@ -86,6 +97,26 @@ MATRIX: dict[str, tuple[str, dict]] = {
         'discriminator',
         {**_NO_EXPORT, 'client_style': 'resource'},
     ),
+    # Real-world specs. These are far messier than the hand-crafted fixtures
+    # (optional fields, scalar responses, optional bodies, allOf/enum models,
+    # multi-tag surfaces) and were what surfaced the base-codegen type bugs the
+    # small fixtures missed -- so they exercise the whole pipeline end to end.
+    'petstore': ('petstore', _ALL_FEATURES),
+    'petstore_client': ('petstore', {**_ALL_FEATURES, 'client_style': 'client'}),
+    'petstore_resource': ('petstore', {**_ALL_FEATURES, 'client_style': 'resource'}),
+    # Swagger 2.0 -- also exercises the 2.0 -> OpenAPI 3.x upgrade path.
+    'petstore_v2': ('petstore_v2', _ALL_FEATURES),
+    'petstore_v2_resource': (
+        'petstore_v2',
+        {**_ALL_FEATURES, 'client_style': 'resource'},
+    ),
+    # Response unwrapping over an envelope whose `data` list is optional
+    # (`list[Item] | None`): gates optional list detection + the export
+    # None-guard, which the required-data envelope never exercises.
+    'envelope_optional': (
+        'envelope_optional',
+        {**_ALL_FEATURES, 'response_unwrap': {'enabled': True, 'data_path': 'data'}},
+    ),
 }
 
 
@@ -93,7 +124,7 @@ def _generate_matrix(root: Path) -> None:
     for name, (spec, overrides) in MATRIX.items():
         config = DocumentConfig.model_validate(
             {
-                'source': str(GOLDEN / spec / 'spec.yaml'),
+                'source': str(_spec_path(spec)),
                 'output': str(root / name),
                 'base_url': 'https://example.test',
                 **overrides,

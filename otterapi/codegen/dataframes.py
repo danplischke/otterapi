@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
+from otterapi.codegen.ast_utils import strip_optional
+
 if TYPE_CHECKING:
     from otterapi.codegen.types import Endpoint, Type
     from otterapi.config import DataFrameConfig
@@ -88,7 +90,13 @@ def annotation_ast_returns_list(annotation_ast: 'ast.expr | None') -> bool:
 
     Returns:
         True if the annotation is a ``list[...]`` subscript, False otherwise.
+
+    Sees through an optional wrapper so ``list[X] | None`` (the type of a
+    not-``required`` array field) is still recognised as a list.
     """
+    if annotation_ast is None:
+        return False
+    annotation_ast = strip_optional(annotation_ast)
     if isinstance(annotation_ast, ast.Subscript):
         if isinstance(annotation_ast.value, ast.Name) and (
             annotation_ast.value.id == 'list'

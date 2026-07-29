@@ -848,15 +848,14 @@ class TypeGenerator(OpenAPIProcessor):
         ):
             sanitized_field_name = sanitized_field_name + '_'
 
-        # Determine the annotation - wrap in Union with None if nullable
+        # Resolve the default first: an optional (not-required) field with no
+        # explicit default gets ``default=None`` and can therefore hold None at
+        # runtime, which the annotation must admit (see ``defaults_to_none``).
         assert field_type.annotation_ast is not None
         annotation_ast: ast.expr = field_type.annotation_ast
-        if is_nullable and not self._type_already_nullable(field_type):
-            annotation_ast = _union_expr(
-                [field_type.annotation_ast, ast.Constant(value=None)]
-            )
 
         value = None
+        defaults_to_none = False
         if field_schema.default is not None and isinstance(
             field_schema.default, (str, int, float, bool)
         ):
@@ -867,6 +866,17 @@ class TypeGenerator(OpenAPIProcessor):
             # Only add default=None for optional (not required) fields
             # Nullable but required fields should NOT have a default
             field_keywords.append(ast.keyword(arg='default', value=ast.Constant(None)))
+            defaults_to_none = True
+
+        # Wrap the annotation in ``| None`` when the schema is nullable OR when
+        # the field defaults to None: an omitted optional field is ``None`` at
+        # runtime, so a bare ``T`` annotation is a lie the type-checker rejects.
+        if (is_nullable or defaults_to_none) and not self._type_already_nullable(
+            field_type
+        ):
+            annotation_ast = _union_expr(
+                [field_type.annotation_ast, ast.Constant(value=None)]
+            )
 
         if sanitized_field_name != field_name:
             field_keywords.append(

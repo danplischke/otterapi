@@ -49,6 +49,8 @@ from otterapi.codegen.ast_utils import (
     ImportCollector,
     _all,
     _name,
+    annotation_includes_none,
+    strip_optional,
 )
 from otterapi.codegen.dataframes import get_dataframe_config_for_endpoint
 from otterapi.codegen.endpoints import (
@@ -142,7 +144,13 @@ class TypeResolver:
 
     @staticmethod
     def _list_item_type(type_ast: ast.expr | None) -> ast.expr | None:
-        """Return the item-type AST if ``type_ast`` is ``list[ItemType]``, else None."""
+        """Return the item-type AST if ``type_ast`` is ``list[ItemType]``, else None.
+
+        Sees through an optional wrapper so ``list[X] | None`` still yields ``X``.
+        """
+        if type_ast is None:
+            return None
+        type_ast = strip_optional(type_ast)
         if (
             isinstance(type_ast, ast.Subscript)
             and isinstance(type_ast.value, ast.Name)
@@ -706,6 +714,12 @@ class ExportFeature(EndpointFeature):
         if not should_generate:
             return False
 
+        # The wrapper calls the base function and pipes its result into
+        # ``export``. When that result can be None (an unwrapped list field
+        # typed ``list[X] | None``, or a nullable list response), tell the
+        # builder to coerce it to ``[]`` so export never iterates None.
+        target_returns_optional = self._base_return_is_optional(ctx, data_path)
+
         ep = ctx.endpoint
         default_format = formats[0] if formats else 'csv'
         for is_async, base_name in ctx.name_pairs:
@@ -721,9 +735,25 @@ class ExportFeature(EndpointFeature):
                 is_async=is_async,
                 default_format=default_format,
                 default_batch_size=cfg.export.batch_size,
+                target_returns_optional=target_returns_optional,
             )
             sink.add(fn, fn_name, imports)
         return True
+
+    @staticmethod
+    def _base_return_is_optional(ctx: EndpointContext, data_path: str | None) -> bool:
+        """Whether the wrapped non-paginated function can return ``None``.
+
+        Mirrors how the base function's return type is derived: the unwrapped
+        field annotation when unwrapping, else the raw response annotation.
+        """
+        if data_path:
+            annotation, _ = ctx.resolver.unwrapped_type_ast(ctx.endpoint, data_path)
+        elif ctx.endpoint.response_type:
+            annotation = ctx.endpoint.response_type.annotation_ast
+        else:
+            annotation = None
+        return annotation_includes_none(annotation)
 
 
 # The coupled triad, shared as stateless singletons.
