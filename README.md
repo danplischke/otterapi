@@ -121,6 +121,11 @@ documents:
     output: ./client
 ```
 
+> `format_output` only controls *cosmetic* formatting (line wrapping, quote
+> style). The import block of every generated module is computed from the
+> names the module actually references, so generated code never carries unused
+> imports — with or without ruff/black installed.
+
 ### Document Options
 
 Each entry under `documents:` supports these fields:

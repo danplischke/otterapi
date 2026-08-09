@@ -26,6 +26,9 @@ __all__ = [
     '_all',
     # Import collection
     'ImportCollector',
+    # Import pruning
+    'collect_referenced_names',
+    'prune_unused_imports',
     # Shared constants / type aliases
     'MODELS_MODULE',
     'ImportDict',
@@ -281,3 +284,237 @@ class ImportCollector:
     def clear(self) -> None:
         """Clear all collected imports."""
         self._imports.clear()
+
+
+# =============================================================================
+# Import Pruning
+# =============================================================================
+#
+# Imports are collected optimistically: a builder registers everything a
+# feature *might* reference (every pagination helper, both DataFrame
+# back-ends, ...) and a type contributes the imports of its whole subtree
+# (``Type.copy_imports_from_sub_types``), because at collection time nobody
+# knows which of those names survive into the emitted AST.  That is the right
+# trade-off -- under-importing produces a NameError, over-importing only
+# produces noise -- but it means the collected set is a *superset* of what the
+# module actually uses.
+#
+# ``prune_unused_imports`` closes the gap by diffing the collected imports
+# against the names the assembled module body really references, so the
+# generator itself emits an exact import block (no external formatter or
+# linter involved).
+
+
+def _names_in_forward_ref(value: str) -> set[str]:
+    """Return the names referenced by a string annotation such as ``'pd.DataFrame'``.
+
+    Non-parsable strings (docstring fragments, media types, URL templates)
+    yield an empty set.
+    """
+    try:
+        parsed = ast.parse(value, mode='eval')
+    except SyntaxError:
+        return set()
+    return {node.id for node in ast.walk(parsed) if isinstance(node, ast.Name)}
+
+
+def _names_in_annotation(annotation: ast.expr | None) -> set[str]:
+    """Return every name an annotation references, resolving string forward refs.
+
+    Handles nested forward references such as ``list['pd.DataFrame']`` by
+    walking the whole annotation expression.
+    """
+    if annotation is None:
+        return set()
+
+    found: set[str] = set()
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found |= _names_in_forward_ref(node.value)
+    return found
+
+
+def _string_elements(node: ast.expr | None) -> set[str]:
+    """Return the string constants of a tuple/list literal (used for ``__all__``)."""
+    if not isinstance(node, ast.Tuple | ast.List):
+        return set()
+    return {
+        elt.value
+        for elt in node.elts
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+    }
+
+
+class _ReferenceCollector(ast.NodeVisitor):
+    """Collects every name an AST body *references* (as opposed to *binds*).
+
+    Import statements are skipped: they bind names rather than reference them,
+    so counting them would make every import justify itself.
+    """
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    # -- imports bind, they do not reference -----------------------------
+    def visit_Import(self, node: ast.Import) -> None:
+        return
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        return
+
+    # -- plain references -------------------------------------------------
+    def visit_Name(self, node: ast.Name) -> None:
+        self.names.add(node.id)
+
+    # -- annotations may be string forward references ---------------------
+    def visit_arg(self, node: ast.arg) -> None:
+        self.names |= _names_in_annotation(node.annotation)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.names |= _names_in_annotation(node.annotation)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.names |= _names_in_annotation(node.returns)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.names |= _names_in_annotation(node.returns)
+        self.generic_visit(node)
+
+    # -- ``__all__`` re-exports names as strings --------------------------
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if any(
+            isinstance(target, ast.Name) and target.id == '__all__'
+            for target in node.targets
+        ):
+            self.names |= _string_elements(node.value)
+        self.generic_visit(node)
+
+
+def collect_referenced_names(body: Sequence[ast.stmt]) -> set[str]:
+    """Return every name referenced by *body*, ignoring import statements.
+
+    A name counts as referenced when it appears as an ``ast.Name``, inside a
+    string forward reference in an annotation (``-> 'pd.DataFrame'``), or as a
+    string entry of an ``__all__`` tuple (a re-export is a real use).
+
+    Args:
+        body: The statements of the module being emitted.
+
+    Returns:
+        The set of referenced names.
+    """
+    collector = _ReferenceCollector()
+    for stmt in body:
+        collector.visit(stmt)
+    return collector.names
+
+
+def _alias_bound_name(alias: ast.alias, *, dotted: bool) -> str:
+    """Return the local name an ``ast.alias`` binds.
+
+    Args:
+        alias: The alias node.
+        dotted: True for ``import a.b.c`` (binds ``a``), False for
+            ``from x import a.b`` -- which cannot happen -- i.e. ``from``-imports.
+    """
+    if alias.asname:
+        return alias.asname
+    return alias.name.split('.')[0] if dotted else alias.name
+
+
+def _filter_import(
+    stmt: ast.Import | ast.ImportFrom, used: set[str]
+) -> ast.stmt | None:
+    """Drop the aliases of *stmt* that bind unused names.
+
+    Returns the trimmed statement, or None when nothing is left. ``__future__``
+    imports and star imports are always kept: the first is a compiler
+    directive, the second binds names this module cannot see.
+    """
+    if isinstance(stmt, ast.ImportFrom):
+        if stmt.module == '__future__':
+            return stmt
+        if any(alias.name == '*' for alias in stmt.names):
+            return stmt
+
+    dotted = isinstance(stmt, ast.Import)
+    kept = [
+        alias for alias in stmt.names if _alias_bound_name(alias, dotted=dotted) in used
+    ]
+    if not kept:
+        return None
+    if len(kept) == len(stmt.names):
+        return stmt
+
+    if isinstance(stmt, ast.Import):
+        return ast.Import(names=kept)
+    return ast.ImportFrom(module=stmt.module, names=kept, level=stmt.level)
+
+
+def _is_type_checking_block(stmt: ast.stmt) -> bool:
+    """True for ``if TYPE_CHECKING:`` blocks, whose imports are prunable too."""
+    return (
+        isinstance(stmt, ast.If)
+        and isinstance(stmt.test, ast.Name)
+        and stmt.test.id == 'TYPE_CHECKING'
+        and not stmt.orelse
+    )
+
+
+def _prune_once(body: list[ast.stmt], used: set[str]) -> list[ast.stmt]:
+    """Run a single pruning pass over *body* given the *used* name set."""
+    pruned: list[ast.stmt] = []
+    for stmt in body:
+        if isinstance(stmt, ast.Import | ast.ImportFrom):
+            kept_stmt = _filter_import(stmt, used)
+            if kept_stmt is not None:
+                pruned.append(kept_stmt)
+        elif _is_type_checking_block(stmt):
+            block = cast('ast.If', stmt)
+            inner = _prune_once(block.body, used)
+            if len(inner) == len(block.body) and all(
+                a is b for a, b in zip(inner, block.body, strict=True)
+            ):
+                pruned.append(block)  # unchanged -- keep identity for the fixed point
+            elif inner:
+                pruned.append(ast.If(test=block.test, body=inner, orelse=[]))
+        else:
+            pruned.append(stmt)
+    return pruned
+
+
+def prune_unused_imports(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Remove imports whose bound names are never referenced by *body*.
+
+    Only module-level imports and imports nested directly inside an
+    ``if TYPE_CHECKING:`` block are considered -- those are the two places
+    codegen emits them.  ``from __future__ import ...`` and star imports are
+    never touched.
+
+    Pruning runs to a fixed point because removals cascade: dropping the last
+    import out of a ``TYPE_CHECKING`` block removes the block, which in turn
+    makes ``TYPE_CHECKING`` itself unused.
+
+    Args:
+        body: The assembled module body. Not mutated.
+
+    Returns:
+        A new list of statements with unused imports removed.
+    """
+    current = list(body)
+    # Each iteration can only shrink the body, so this terminates; the bound
+    # is a safety net rather than a real limit.
+    for _ in range(len(current) + 1):
+        used = collect_referenced_names(current)
+        pruned = _prune_once(current, used)
+        if len(pruned) == len(current) and all(
+            a is b for a, b in zip(pruned, current, strict=True)
+        ):
+            return pruned
+        current = pruned
+    return current

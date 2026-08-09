@@ -2271,10 +2271,9 @@ def build_default_client_code() -> tuple[list[ast.stmt], ImportDict]:
     when none is provided.
 
     Returns:
-        A tuple of (statements, imports) - currently empty.
+        A tuple of (statements, imports) - both empty.
     """
     imports: ImportDict = {}
-    imports.setdefault('typing', set()).add('Union')
 
     # No global state needed - endpoints use `client or Client()`
     return [], imports

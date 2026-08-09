@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from upath import UPath
 
+from otterapi.codegen.ast_utils import prune_unused_imports
 from otterapi.openapi.v3_2 import OpenAPI, Reference, Schema
 
 __all__ = ('is_url', 'sanitize_identifier', 'to_snake_case')
@@ -218,22 +219,30 @@ def write_mod(
     path: UPath | Path | str,
     format_code: bool = True,
     validate_code: bool = True,
+    prune_imports: bool = True,
 ) -> None:
     """Write a list of AST statements to a Python file.
 
     This method:
-    1. Creates an AST Module from the statements
-    2. Fixes missing locations in the AST
-    3. Unparses the AST to Python source code
-    4. Optionally validates the code by compiling it
-    5. Optionally formats the code with ruff/black
-    6. Writes the code to the specified file
+    1. Optionally drops imports the module body never references
+    2. Creates an AST Module from the statements
+    3. Fixes missing locations in the AST
+    4. Unparses the AST to Python source code
+    5. Optionally validates the code by compiling it
+    6. Optionally formats the code with ruff/black
+    7. Writes the code to the specified file
+
+    Import collection during codegen is deliberately optimistic (see
+    ``prune_unused_imports``), so the pruning step in 1. is what makes the
+    emitted import block exact.  It is part of generation, not formatting:
+    the output is identical whether or not ruff/black are installed.
 
     Args:
         body: List of AST statement nodes to write.
         path: Path where the file should be written.
         format_code: Whether to format the code with ruff/black. Defaults to True.
         validate_code: Whether to validate the code by compiling it. Defaults to True.
+        prune_imports: Whether to drop unreferenced imports. Defaults to True.
 
     Raises:
         SyntaxError: If the generated code is not valid Python (when validate_code=True).
@@ -241,6 +250,9 @@ def write_mod(
     """
     # Convert path to string for consistency
     path = UPath(path)
+
+    if prune_imports:
+        body = prune_unused_imports(body)
 
     # Create and prepare the AST module
     mod = ast.Module(body=body, type_ignores=[])
