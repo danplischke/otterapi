@@ -290,19 +290,12 @@ class ImportCollector:
 # Import Pruning
 # =============================================================================
 #
-# Imports are collected optimistically: a builder registers everything a
-# feature *might* reference (every pagination helper, both DataFrame
-# back-ends, ...) and a type contributes the imports of its whole subtree
-# (``Type.copy_imports_from_sub_types``), because at collection time nobody
-# knows which of those names survive into the emitted AST.  That is the right
-# trade-off -- under-importing produces a NameError, over-importing only
-# produces noise -- but it means the collected set is a *superset* of what the
-# module actually uses.
-#
-# ``prune_unused_imports`` closes the gap by diffing the collected imports
-# against the names the assembled module body really references, so the
-# generator itself emits an exact import block (no external formatter or
-# linter involved).
+# Imports are collected optimistically -- a builder registers everything a
+# feature *might* reference, and a type contributes its whole subtree's
+# imports -- because at collection time nobody knows which names survive into
+# the emitted AST. Under-importing is a NameError, over-importing is only
+# noise, so the collected set is deliberately a superset. Pruning reconciles
+# it against the assembled body once that body exists.
 
 
 def _names_in_forward_ref(value: str) -> set[str]:
@@ -357,18 +350,15 @@ class _ReferenceCollector(ast.NodeVisitor):
     def __init__(self) -> None:
         self.names: set[str] = set()
 
-    # -- imports bind, they do not reference -----------------------------
     def visit_Import(self, node: ast.Import) -> None:
         return
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         return
 
-    # -- plain references -------------------------------------------------
     def visit_Name(self, node: ast.Name) -> None:
         self.names.add(node.id)
 
-    # -- annotations may be string forward references ---------------------
     def visit_arg(self, node: ast.arg) -> None:
         self.names |= _names_in_annotation(node.annotation)
         self.generic_visit(node)
@@ -385,7 +375,6 @@ class _ReferenceCollector(ast.NodeVisitor):
         self.names |= _names_in_annotation(node.returns)
         self.generic_visit(node)
 
-    # -- ``__all__`` re-exports names as strings --------------------------
     def visit_Assign(self, node: ast.Assign) -> None:
         if any(
             isinstance(target, ast.Name) and target.id == '__all__'
@@ -419,8 +408,7 @@ def _alias_bound_name(alias: ast.alias, *, dotted: bool) -> str:
 
     Args:
         alias: The alias node.
-        dotted: True for ``import a.b.c`` (binds ``a``), False for
-            ``from x import a.b`` -- which cannot happen -- i.e. ``from``-imports.
+        dotted: True for plain ``import a.b.c``, which binds only ``a``.
     """
     if alias.asname:
         return alias.asname
@@ -507,8 +495,7 @@ def prune_unused_imports(body: list[ast.stmt]) -> list[ast.stmt]:
         A new list of statements with unused imports removed.
     """
     current = list(body)
-    # Each iteration can only shrink the body, so this terminates; the bound
-    # is a safety net rather than a real limit.
+    # Every pass either shrinks the body or stops, so the bound is a backstop.
     for _ in range(len(current) + 1):
         used = collect_referenced_names(current)
         pruned = _prune_once(current, used)

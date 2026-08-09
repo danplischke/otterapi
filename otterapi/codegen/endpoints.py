@@ -77,6 +77,7 @@ __all__ = [
     'build_body_params',
     'prepare_call_from_parameters',
     'build_default_client_code',
+    'pagination_owned_param_names',
     # Convenience functions
     'build_standalone_endpoint_fn',
     'build_delegating_endpoint_fn',
@@ -116,6 +117,52 @@ class PaginationStyle(Enum):
     OFFSET = 'offset'
     CURSOR = 'cursor'
     PAGE = 'page'
+
+
+# Per style: the pagination_config keys naming the spec's paging parameters,
+# each with the name it conventionally defaults to.
+_PAGINATION_PARAM_KEYS: dict[PaginationStyle, tuple[tuple[str, str], ...]] = {
+    PaginationStyle.OFFSET: (('offset_param', 'offset'), ('limit_param', 'limit')),
+    PaginationStyle.CURSOR: (('cursor_param', 'cursor'), ('limit_param', 'limit')),
+    PaginationStyle.PAGE: (('page_param', 'page'), ('per_page_param', 'per_page')),
+}
+
+
+def pagination_owned_param_names(
+    pagination_style: PaginationStyle | str | None,
+    pagination_config: dict | None,
+) -> set[str]:
+    """Return the raw OpenAPI parameter names a paginated function drives itself.
+
+    A paginated function (and its ``_iter`` / ``_df`` / ``_export`` variants)
+    replaces the spec's own paging parameters with its own
+    ``offset``/``cursor``/``page`` + ``page_size`` + ``max_items`` knobs, so
+    those spec parameters must be dropped from the generated signature.
+
+    Which parameters those are depends on the style -- ``page`` pagination is
+    driven by ``page``/``per_page``, not ``offset``/``limit`` -- so every
+    builder resolves them through this one helper rather than assuming.
+
+    Args:
+        pagination_style: The resolved pagination style, or None when the
+            endpoint is not paginated.
+        pagination_config: The resolved pagination config dict (parameter
+            names as they appear in the spec).
+
+    Returns:
+        The set of spec parameter names owned by the paginator. Empty when the
+        endpoint is not paginated.
+    """
+    if pagination_style is None:
+        return set()
+    if isinstance(pagination_style, str):
+        pagination_style = PaginationStyle(pagination_style)
+
+    config = pagination_config or {}
+    return {
+        config.get(key) or fallback
+        for key, fallback in _PAGINATION_PARAM_KEYS.get(pagination_style, ())
+    }
 
 
 def clean_docstring(docstring: str) -> str:
@@ -692,33 +739,14 @@ class EndpointFunctionFactory:
         """Build the function signature using FunctionSignatureBuilder."""
         builder = FunctionSignatureBuilder()
 
-        # For pagination, we need to filter out the pagination parameters
-        # since we'll add our own pagination-specific parameters
         if self.config.pagination_style and self.config.pagination_config:
-            pag_config = self.config.pagination_config
-            skip_params = set()
-            if self.config.pagination_style == PaginationStyle.OFFSET:
-                skip_params = {
-                    pag_config.get('offset_param'),
-                    pag_config.get('limit_param'),
-                }
-            elif self.config.pagination_style == PaginationStyle.CURSOR:
-                skip_params = {
-                    pag_config.get('cursor_param'),
-                    pag_config.get('limit_param'),
-                }
-            elif self.config.pagination_style == PaginationStyle.PAGE:
-                skip_params = {
-                    pag_config.get('page_param'),
-                    pag_config.get('per_page_param'),
-                }
-
+            skip_params = pagination_owned_param_names(
+                self.config.pagination_style, self.config.pagination_config
+            )
             filtered_params = [
                 p for p in (self.config.parameters or []) if p.name not in skip_params
             ]
             builder.add_parameters(filtered_params)
-
-            # Add pagination-specific parameters
             self._add_pagination_parameters(builder)
         else:
             builder.add_parameters(self.config.parameters)

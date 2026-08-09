@@ -1079,6 +1079,7 @@ class SplitModuleEmitter:
         body: list[ast.stmt],
         import_collector: ImportCollector,
         endpoint_names: list[str],
+        pag_config: PaginationMethodConfig,
     ) -> bool:
         """Emit sync+async export wrappers around the paginated ``_iter`` fns."""
         if (
@@ -1116,6 +1117,8 @@ class SplitModuleEmitter:
                 is_async=is_async,
                 default_format=default_format,
                 default_batch_size=self.export_config.batch_size,
+                pagination_style=pag_config.style,
+                pagination_config=self._build_pagination_config_dict(pag_config),
             )
             endpoint_names.append(fn_name)
             body.append(fn)
@@ -1208,6 +1211,7 @@ class SplitModuleEmitter:
                 body,
                 import_collector,
                 endpoint_names,
+                pag_config,
             )
         else:
             generated_paginated_df = False
