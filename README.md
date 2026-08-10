@@ -107,7 +107,7 @@ These sit at the root of your config file, outside of `documents:`.
 | `documents` | list | — | List of OpenAPI documents to process (required) |
 | `generate_endpoints` | bool | `true` | Whether to generate endpoint functions |
 | `format_output` | bool | `true` | Format generated code with ruff/black |
-| `validate_output` | bool | `true` | Validate generated code syntax after writing |
+| `validate_output` | bool | `true` | Validate generated code: syntax, plus every referenced name resolving to an import or definition |
 | `create_py_typed` | bool | `true` | Create `py.typed` marker files |
 | `lenient` | bool | `false` | Drop unrecognized, invalid fields instead of failing (see [Strict vs Lenient Validation](#-strict-vs-lenient-validation)) |
 
@@ -124,7 +124,9 @@ documents:
 > `format_output` only controls *cosmetic* formatting (line wrapping, quote
 > style). The import block of every generated module is computed from the
 > names the module actually references, so generated code never carries unused
-> imports — with or without ruff/black installed.
+> imports — with or without ruff/black installed. `validate_output` checks the
+> other direction: generation fails rather than emitting a module that
+> references a name nothing imports or defines.
 
 ### Document Options
 

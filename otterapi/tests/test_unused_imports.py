@@ -19,12 +19,15 @@ import pytest
 import yaml
 
 from otterapi.codegen.ast_utils import (
+    collect_bound_names,
     collect_referenced_names,
+    find_unresolved_names,
     prune_unused_imports,
 )
 from otterapi.codegen.codegen import Codegen
 from otterapi.codegen.utils import write_mod
 from otterapi.config import DocumentConfig
+from otterapi.exceptions import CodeGenerationError
 
 FIXTURES_ROOT = Path(__file__).parent / 'fixtures' / 'golden'
 
@@ -193,6 +196,17 @@ class TestPruneUnusedImports:
         source = 'def f():\n    from typing import Any\n    return 1\n'
         assert 'from typing import Any' in _prune_source(source)
 
+    def test_literal_value_does_not_keep_a_same_named_import(self):
+        """Literal['Status'] is a value, not a forward reference to Status."""
+        source = (
+            'from typing import Literal\n'
+            'from .models import Status\n'
+            "def f(x: Literal['Status']): ...\n"
+        )
+        result = _prune_source(source)
+        assert 'from .models import Status' not in result
+        assert 'Literal' in result
+
 
 # ---------------------------------------------------------------------------
 # write_mod integration
@@ -213,6 +227,111 @@ class TestWriteModPruning:
         target = tmp_path / 'mod.py'
         write_mod(body, target, format_code=False, prune_imports=False)
         assert 'Union' in target.read_text(encoding='utf-8')
+
+
+# ---------------------------------------------------------------------------
+# find_unresolved_names: the opposite failure -- a forgotten import
+# ---------------------------------------------------------------------------
+
+
+class TestFindUnresolvedNames:
+    """Tests for find_unresolved_names()."""
+
+    def test_flags_missing_import(self):
+        body = ast.parse('def f(x: Pet) -> Order: ...\n').body
+        assert find_unresolved_names(body) == {'Pet', 'Order'}
+
+    def test_imported_names_resolve(self):
+        body = ast.parse('from .models import Pet\n\ndef f(x: Pet): ...\n').body
+        assert find_unresolved_names(body) == set()
+
+    def test_builtins_resolve(self):
+        body = ast.parse('def f(x: int) -> str:\n    return str(len(x))\n').body
+        assert find_unresolved_names(body) == set()
+
+    def test_locals_and_parameters_resolve(self):
+        source = (
+            'def f(client=None, **kwargs):\n'
+            '    c = client\n'
+            '    rows = [item for item in c]\n'
+            '    with open("x") as fh:\n'
+            '        return fh, rows, kwargs\n'
+        )
+        assert find_unresolved_names(ast.parse(source).body) == set()
+
+    def test_annassign_target_is_a_binding_even_with_load_ctx(self):
+        """Codegen hand-builds nodes and ast.unparse ignores ctx, so a field
+        target may carry Load. It still binds the name."""
+        field = ast.AnnAssign(
+            target=ast.Name(id='total', ctx=ast.Load()),
+            annotation=ast.Name(id='int', ctx=ast.Load()),
+            value=None,
+            simple=1,
+        )
+        model = ast.ClassDef(
+            name='M', bases=[], keywords=[], body=[field], decorator_list=[]
+        )
+        assert 'total' in collect_bound_names([model])
+        assert find_unresolved_names([model]) == set()
+
+    def test_literal_values_are_not_references(self):
+        source = (
+            'from typing import Literal\n'
+            "def f(status: Literal['pending', 'sold']): ...\n"
+        )
+        assert find_unresolved_names(ast.parse(source).body) == set()
+
+    def test_annotated_metadata_strings_are_not_references(self):
+        source = (
+            'from typing import Annotated\n'
+            'from pydantic import Field\n'
+            "def f(x: Annotated[str, Field(description='Status')]): ...\n"
+        )
+        assert find_unresolved_names(ast.parse(source).body) == set()
+
+    def test_broken_all_reexport_is_flagged(self):
+        body = ast.parse("from .models import Pet\n__all__ = ('Pet', 'Ghost')\n").body
+        assert find_unresolved_names(body) == {'Ghost'}
+
+    def test_star_import_stands_the_check_down(self):
+        """A star import binds names this module cannot see."""
+        body = ast.parse("from .pet import *\n__all__ = ('Anything',)\n").body
+        assert find_unresolved_names(body) == set()
+
+    def test_string_forward_reference_resolves_against_type_checking_block(self):
+        source = (
+            'from typing import TYPE_CHECKING\n'
+            'if TYPE_CHECKING:\n'
+            '    import pandas as pd\n'
+            "def f() -> 'pd.DataFrame': ...\n"
+        )
+        assert find_unresolved_names(ast.parse(source).body) == set()
+
+
+class TestWriteModNameValidation:
+    """write_mod() refuses to emit a module with unresolvable names."""
+
+    def test_raises_on_missing_import(self, tmp_path: Path):
+        body = ast.parse('def f(x: Pet): ...\n').body
+        target = tmp_path / 'mod.py'
+        with pytest.raises(CodeGenerationError, match='Pet'):
+            write_mod(body, target, format_code=False)
+        assert not target.exists()
+
+    def test_opt_out_via_validate_code(self, tmp_path: Path):
+        body = ast.parse('def f(x: Pet): ...\n').body
+        target = tmp_path / 'mod.py'
+        write_mod(body, target, format_code=False, validate_code=False)
+        assert 'Pet' in target.read_text(encoding='utf-8')
+
+    def test_checks_after_pruning_not_before(self, tmp_path: Path):
+        """Pruning runs first, so a name only kept by a pruned import still fails."""
+        body = ast.parse(
+            'from typing import Any\n\ndef f(x: Any) -> Missing: ...\n'
+        ).body
+        target = tmp_path / 'mod.py'
+        with pytest.raises(CodeGenerationError, match='Missing'):
+            write_mod(body, target, format_code=False)
 
 
 # ---------------------------------------------------------------------------

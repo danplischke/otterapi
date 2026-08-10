@@ -5,6 +5,7 @@ and utilities for collecting and organizing imports during code generation.
 """
 
 import ast
+import builtins
 import sys
 from collections.abc import Iterable, Sequence
 from typing import cast
@@ -28,6 +29,8 @@ __all__ = [
     'ImportCollector',
     # Import pruning
     'collect_referenced_names',
+    'collect_bound_names',
+    'find_unresolved_names',
     'prune_unused_imports',
     # Shared constants / type aliases
     'MODELS_MODULE',
@@ -311,22 +314,70 @@ def _names_in_forward_ref(value: str) -> set[str]:
     return {node.id for node in ast.walk(parsed) if isinstance(node, ast.Name)}
 
 
+def _plain_names(node: ast.expr) -> set[str]:
+    """Return the ``ast.Name`` ids in *node*, without interpreting strings."""
+    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+
+
+def _subscript_base(value: ast.expr) -> str | None:
+    """Return the name of a subscript base: ``Literal`` for ``t.Literal[...]``."""
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute):
+        return value.attr
+    return None
+
+
 def _names_in_annotation(annotation: ast.expr | None) -> set[str]:
     """Return every name an annotation references, resolving string forward refs.
 
-    Handles nested forward references such as ``list['pd.DataFrame']`` by
-    walking the whole annotation expression.
+    A string is a forward reference only where a *type* may appear. Inside
+    ``Literal[...]`` and in ``Annotated[...]`` metadata, strings are ordinary
+    values -- ``Literal['pending']`` does not reference anything named
+    ``pending``, and ``Field(description='Status')`` does not reference
+    ``Status`` -- so those positions contribute their plain names only.
     """
     if annotation is None:
         return set()
 
-    found: set[str] = set()
-    for node in ast.walk(annotation):
-        if isinstance(node, ast.Name):
-            found.add(node.id)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            found |= _names_in_forward_ref(node.value)
-    return found
+    if isinstance(annotation, ast.Constant):
+        if isinstance(annotation.value, str):
+            return _names_in_forward_ref(annotation.value)
+        return set()
+
+    if isinstance(annotation, ast.Name):
+        return {annotation.id}
+
+    if isinstance(annotation, ast.Subscript):
+        found = _names_in_annotation(annotation.value)
+        base = _subscript_base(annotation.value)
+        if base == 'Literal':
+            return found | _plain_names(annotation.slice)
+        if base == 'Annotated':
+            elts = (
+                annotation.slice.elts
+                if isinstance(annotation.slice, ast.Tuple)
+                else [annotation.slice]
+            )
+            if elts:
+                found |= _names_in_annotation(elts[0])
+            for metadata in elts[1:]:
+                found |= _plain_names(metadata)
+            return found
+        return found | _names_in_annotation(annotation.slice)
+
+    if isinstance(annotation, ast.Tuple | ast.List):
+        found = set()
+        for elt in annotation.elts:
+            found |= _names_in_annotation(elt)
+        return found
+
+    if isinstance(annotation, ast.BinOp):
+        return _names_in_annotation(annotation.left) | _names_in_annotation(
+            annotation.right
+        )
+
+    return _plain_names(annotation)
 
 
 def _string_elements(node: ast.expr | None) -> set[str]:
@@ -401,6 +452,128 @@ def collect_referenced_names(body: Sequence[ast.stmt]) -> set[str]:
     for stmt in body:
         collector.visit(stmt)
     return collector.names
+
+
+def _assignment_target_names(target: ast.expr | None) -> set[str]:
+    """Return the names an assignment target binds.
+
+    Recurses through tuple/list/starred unpacking. Attribute and subscript
+    targets bind nothing new, so they contribute nothing.
+    """
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _assignment_target_names(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        names: set[str] = set()
+        for elt in target.elts:
+            names |= _assignment_target_names(elt)
+        return names
+    return set()
+
+
+def collect_bound_names(body: Sequence[ast.stmt]) -> set[str]:
+    """Return every name *body* binds, at any scope.
+
+    Bindings are found structurally rather than by ``ast.Name.ctx``: codegen
+    builds nodes by hand and ``ast.unparse`` ignores ``ctx``, so an assignment
+    target may well carry ``Load``. Trusting ``ctx`` here would report
+    perfectly good code as undefined.
+
+    Deliberately scope-blind: a local in one function counts as bound for the
+    whole module. That over-approximates, which is the safe direction for
+    ``find_unresolved_names`` -- it can let a genuine miss hide behind a
+    same-named local, but it can never flag correct code.
+
+    Args:
+        body: The statements of the module being emitted.
+
+    Returns:
+        The set of bound names.
+    """
+    bound: set[str] = set()
+
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    bound |= _assignment_target_names(target)
+            elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
+                bound |= _assignment_target_names(node.target)
+            elif isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
+                bound |= _assignment_target_names(node.target)
+            elif isinstance(node, ast.withitem):
+                bound |= _assignment_target_names(node.optional_vars)
+            elif isinstance(node, ast.Name) and isinstance(
+                node.ctx, ast.Store | ast.Del
+            ):
+                bound.add(node.id)
+            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                bound.add(node.name)
+                args = node.args
+                bound.update(
+                    a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)
+                )
+                bound.update(a.arg for a in (args.vararg, args.kwarg) if a)
+            elif isinstance(node, ast.Lambda):
+                args = node.args
+                bound.update(
+                    a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)
+                )
+                bound.update(a.arg for a in (args.vararg, args.kwarg) if a)
+            elif isinstance(node, ast.ClassDef):
+                bound.add(node.name)
+            elif isinstance(node, ast.Import | ast.ImportFrom):
+                dotted = isinstance(node, ast.Import)
+                bound.update(
+                    _alias_bound_name(alias, dotted=dotted)
+                    for alias in node.names
+                    if alias.name != '*'
+                )
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+            elif isinstance(node, ast.Global | ast.Nonlocal):
+                bound.update(node.names)
+            elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
+                bound.add(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                bound.add(node.rest)
+
+    return bound
+
+
+def _has_star_import(body: Sequence[ast.stmt]) -> bool:
+    """True if *body* contains ``from x import *``, which binds unknowable names."""
+    return any(
+        isinstance(stmt, ast.ImportFrom)
+        and any(alias.name == '*' for alias in stmt.names)
+        for stmt in body
+    )
+
+
+def find_unresolved_names(body: Sequence[ast.stmt]) -> set[str]:
+    """Return names *body* references but never binds -- i.e. missing imports.
+
+    This is the counterpart to pruning: pruning only ever removes, so it cannot
+    notice that a builder forgot to register an import. That failure mode is
+    the damaging one -- it reaches the user as a ``NameError`` in their client
+    rather than as noise -- so it is worth failing generation over.
+
+    Returns an empty set for modules containing a star import, whose bindings
+    this module cannot see.
+
+    Args:
+        body: The statements of the module being emitted.
+
+    Returns:
+        The set of unresolved names, empty when everything resolves.
+    """
+    if _has_star_import(body):
+        return set()
+
+    referenced = collect_referenced_names(body)
+    bound = collect_bound_names(body)
+    return referenced - bound - set(dir(builtins))
 
 
 def _alias_bound_name(alias: ast.alias, *, dotted: bool) -> str:

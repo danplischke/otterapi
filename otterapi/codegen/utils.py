@@ -8,7 +8,8 @@ from urllib.parse import urlparse
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import prune_unused_imports
+from otterapi.codegen.ast_utils import find_unresolved_names, prune_unused_imports
+from otterapi.exceptions import CodeGenerationError
 from otterapi.openapi.v3_2 import OpenAPI, Reference, Schema
 
 __all__ = ('is_url', 'sanitize_identifier', 'to_snake_case')
@@ -153,6 +154,27 @@ def validate_python_syntax(content: str) -> None:
     compile(content, '<generated>', 'exec')
 
 
+def validate_name_resolution(body: list[ast.stmt], filename: str) -> None:
+    """Fail if *body* references names it never binds.
+
+    Args:
+        body: The module body about to be written.
+        filename: Name of the file being generated, for the error message.
+
+    Raises:
+        CodeGenerationError: If any referenced name is unresolvable.
+    """
+    unresolved = find_unresolved_names(body)
+    if unresolved:
+        names = ', '.join(sorted(unresolved))
+        raise CodeGenerationError(
+            f'{filename} references undefined names: {names}. '
+            'This means a codegen builder emitted a reference without '
+            'registering the matching import.',
+            context=filename,
+        )
+
+
 def _add_blank_lines(source: str) -> str:
     """Add blank lines after certain blocks for better readability.
 
@@ -228,7 +250,7 @@ def write_mod(
     2. Creates an AST Module from the statements
     3. Fixes missing locations in the AST
     4. Unparses the AST to Python source code
-    5. Optionally validates the code by compiling it
+    5. Optionally validates the code by compiling it and resolving its names
     6. Optionally formats the code with ruff/black
     7. Writes the code to the specified file
 
@@ -237,15 +259,21 @@ def write_mod(
     emitted import block exact.  It is part of generation, not formatting:
     the output is identical whether or not ruff/black are installed.
 
+    Pruning only ever removes, so step 5. covers the opposite failure -- a
+    builder that forgot to register an import, which would otherwise surface
+    as a ``NameError`` in the user's client.
+
     Args:
         body: List of AST statement nodes to write.
         path: Path where the file should be written.
         format_code: Whether to format the code with ruff/black. Defaults to True.
-        validate_code: Whether to validate the code by compiling it. Defaults to True.
+        validate_code: Whether to validate the generated code. Defaults to True.
         prune_imports: Whether to drop unreferenced imports. Defaults to True.
 
     Raises:
         SyntaxError: If the generated code is not valid Python (when validate_code=True).
+        CodeGenerationError: If the generated code references names it never
+            binds (when validate_code=True).
         OSError: If the file cannot be written.
     """
     # Convert path to string for consistency
@@ -253,6 +281,9 @@ def write_mod(
 
     if prune_imports:
         body = prune_unused_imports(body)
+
+    if validate_code:
+        validate_name_resolution(body, path.name)
 
     # Create and prepare the AST module
     mod = ast.Module(body=body, type_ignores=[])
