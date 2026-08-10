@@ -441,7 +441,8 @@ def build_standalone_paginated_export_fn(
     is_async: bool,
     default_format: str = 'csv',
     default_batch_size: int = 1000,
-    pagination_limit_param: str = 'limit',
+    pagination_style: str | None = None,
+    pagination_config: dict | None = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an export wrapper around a paginated endpoint's ``_iter`` variant.
 
@@ -450,15 +451,24 @@ def build_standalone_paginated_export_fn(
     iterator, and pipes items into ``export(...)`` (sync) or
     ``export_async(...)`` (async). Memory stays bounded by ``batch_size``.
 
-    The raw OpenAPI ``limit`` parameter (or ``pagination_limit_param``) is
-    intentionally excluded: the ``_iter`` function manages page size
-    internally via ``page_size`` / ``max_items``.
+    The spec's own paging parameters are excluded, because ``_iter`` drives
+    them internally via ``page_size`` / ``max_items``. Which ones those are
+    depends on the style, so they are resolved through the same helper
+    ``_iter``'s own signature uses -- forwarding them would produce a wrapper
+    whose arguments ``_iter`` does not accept.
+
+    Args:
+        pagination_style: The resolved pagination style ('offset', 'cursor',
+            'page'). Required to strip the right parameters.
+        pagination_config: The resolved pagination config dict holding the
+            spec's parameter names.
     """
-    # Strip the raw pagination limit param — the _iter fn handles it internally.
+    # Local import avoids a circular dependency at module load.
+    from otterapi.codegen.endpoints import pagination_owned_param_names
+
+    owned = pagination_owned_param_names(pagination_style, pagination_config)
     filtered_parameters = (
-        [p for p in parameters if p.name != pagination_limit_param]
-        if parameters
-        else parameters
+        [p for p in parameters if p.name not in owned] if parameters else parameters
     )
     return _build_export_function(
         fn_name=fn_name,

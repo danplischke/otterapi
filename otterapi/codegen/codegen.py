@@ -1108,6 +1108,8 @@ class Codegen(OpenAPIProcessor):
             endpoint,
             item_type_ast,
             item_type_imports,
+            pag_config,
+            pag_dict,
         )
 
         return generated_paginated_df
@@ -1285,6 +1287,8 @@ class Codegen(OpenAPIProcessor):
         endpoint: Endpoint,
         item_type_ast,
         item_type_imports,
+        pag_config,
+        pag_dict: dict,
     ) -> bool:
         """Emit sync+async export wrappers around the paginated ``_iter`` fns."""
         if not self.config.export.enabled or item_type_ast is None:
@@ -1314,7 +1318,8 @@ class Codegen(OpenAPIProcessor):
                 is_async=is_async,
                 default_format=default_format,
                 default_batch_size=self.config.export.batch_size,
-                pagination_limit_param=self.config.pagination.limit_param,
+                pagination_style=pag_config.style,
+                pagination_config=pag_dict,
             )
             endpoint_names.add(fn_name)
             body.append(fn)

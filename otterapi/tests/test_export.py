@@ -1248,3 +1248,214 @@ class TestUnwrappedEnvelopeExportGeneration:
         assert 'def async_get_things_export(' in endpoints_src
         # The export wrapper should target the unwrapped item model.
         assert 'model=Thing' in endpoints_src
+
+
+# -----------------------------------------------------------------------------
+# Paginated export: the wrapper must agree with the ``_iter`` fn it drives
+# -----------------------------------------------------------------------------
+
+
+def _paginated_spec(page_param: str, size_param: str) -> dict:
+    """A one-endpoint list spec paginated by *page_param* / *size_param*."""
+    return {
+        'openapi': '3.0.0',
+        'info': {'title': 'Test API', 'version': '1.0.0'},
+        'servers': [{'url': 'https://api.example.com'}],
+        'paths': {
+            '/items': {
+                'get': {
+                    'operationId': 'listItems',
+                    'parameters': [
+                        {
+                            'name': page_param,
+                            'in': 'query',
+                            'schema': {'type': 'integer'},
+                        },
+                        {
+                            'name': size_param,
+                            'in': 'query',
+                            'schema': {'type': 'integer'},
+                        },
+                        {'name': 'q', 'in': 'query', 'schema': {'type': 'string'}},
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Success',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'array',
+                                        'items': {'$ref': '#/components/schemas/Item'},
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+        },
+        'components': {
+            'schemas': {
+                'Item': {'type': 'object', 'properties': {'id': {'type': 'integer'}}}
+            }
+        },
+    }
+
+
+def _accepted_arg_names(fn_ast) -> set[str]:
+    return {a.arg for a in (*fn_ast.args.args, *fn_ast.args.kwonlyargs)}
+
+
+def _forwarded_keywords(fn_ast, target_fn_name: str) -> set[str]:
+    """Keyword names *fn_ast* passes to ``target_fn_name``."""
+    for node in ast.walk(fn_ast):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == target_fn_name
+        ):
+            return {kw.arg for kw in node.keywords if kw.arg}
+    raise AssertionError(f'no call to {target_fn_name} found')
+
+
+def _generate_paginated_export(tmp_path: Path, style: str, **doc_kwargs) -> str:
+    from otterapi.codegen.codegen import Codegen
+    from otterapi.config import PaginationConfig
+
+    page_param, size_param = (
+        ('page', 'per_page') if style == 'page' else ('offset', 'limit')
+    )
+    spec_file = tmp_path / 'openapi.json'
+    spec_file.write_text(json.dumps(_paginated_spec(page_param, size_param)))
+    output_dir = tmp_path / 'client'
+
+    config = DocumentConfig(
+        source=str(spec_file),
+        output=str(output_dir),
+        pagination=PaginationConfig(
+            enabled=True, auto_detect=True, default_style=style
+        ),
+        export=ExportConfig(enabled=True, formats=['jsonl']),
+        **doc_kwargs,
+    )
+    Codegen(config).generate()
+
+    module = 'endpoints.py' if 'module_split' not in doc_kwargs else None
+    if module is None:
+        sources = [
+            p.read_text()
+            for p in output_dir.rglob('*.py')
+            if 'def list_items_export(' in p.read_text()
+        ]
+        assert sources, 'no module contains the export wrapper'
+        return sources[0]
+    return (output_dir / module).read_text()
+
+
+class TestPaginatedExportGeneration:
+    """Pagination + export together must generate, and agree with ``_iter``."""
+
+    @pytest.mark.parametrize('style', ['offset', 'page'])
+    def test_pagination_plus_export_generates(self, style, tmp_path):
+        """Enabling both features used to raise AttributeError before generating."""
+        source = _generate_paginated_export(tmp_path, style)
+        assert 'def list_items_export(' in source
+        assert 'def async_list_items_export(' in source
+
+    @pytest.mark.parametrize('style', ['offset', 'page'])
+    def test_export_only_forwards_arguments_iter_accepts(self, style, tmp_path):
+        source = _generate_paginated_export(tmp_path, style)
+        tree = ast.parse(source)
+        functions = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+        for export_name, iter_name in (
+            ('list_items_export', 'list_items_iter'),
+            ('async_list_items_export', 'async_list_items_iter'),
+        ):
+            forwarded = _forwarded_keywords(functions[export_name], iter_name)
+            accepted = _accepted_arg_names(functions[iter_name])
+            assert forwarded <= accepted, (
+                f'{export_name} forwards {forwarded - accepted} '
+                f'which {iter_name} does not accept'
+            )
+
+    @pytest.mark.parametrize(
+        ('style', 'owned'),
+        [('offset', {'offset', 'limit'}), ('page', {'page', 'per_page'})],
+    )
+    def test_export_drops_the_specs_own_paging_parameters(self, style, owned, tmp_path):
+        """The paginator drives these itself via page_size / max_items."""
+        source = _generate_paginated_export(tmp_path, style)
+        export_fn = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name == 'list_items_export'
+        )
+        accepted = _accepted_arg_names(export_fn)
+        assert not (accepted & owned)
+        # Non-paging query parameters are still exposed and forwarded.
+        assert 'q' in accepted
+        assert {'page_size', 'max_items'} <= accepted
+
+    def test_split_modules_get_the_same_treatment(self, tmp_path):
+        from otterapi.config import ModuleSplitConfig
+
+        source = _generate_paginated_export(
+            tmp_path,
+            'page',
+            module_split=ModuleSplitConfig(enabled=True, strategy='path'),
+        )
+        export_fn = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name == 'list_items_export'
+        )
+        assert not (_accepted_arg_names(export_fn) & {'page', 'per_page'})
+
+
+class TestPaginationOwnedParamNames:
+    """Tests for pagination_owned_param_names()."""
+
+    def test_offset_style(self):
+        from otterapi.codegen.endpoints import pagination_owned_param_names
+
+        assert pagination_owned_param_names(
+            'offset', {'offset_param': 'skip', 'limit_param': 'take'}
+        ) == {'skip', 'take'}
+
+    def test_page_style_uses_per_page_not_limit(self):
+        from otterapi.codegen.endpoints import pagination_owned_param_names
+
+        assert pagination_owned_param_names(
+            'page', {'page_param': 'page', 'per_page_param': 'per_page'}
+        ) == {'page', 'per_page'}
+
+    def test_cursor_style(self):
+        from otterapi.codegen.endpoints import pagination_owned_param_names
+
+        assert pagination_owned_param_names(
+            'cursor', {'cursor_param': 'after', 'limit_param': 'first'}
+        ) == {'after', 'first'}
+
+    def test_falls_back_to_conventional_names(self):
+        from otterapi.codegen.endpoints import pagination_owned_param_names
+
+        assert pagination_owned_param_names('offset', {}) == {'offset', 'limit'}
+
+    def test_no_style_owns_nothing(self):
+        from otterapi.codegen.endpoints import pagination_owned_param_names
+
+        assert pagination_owned_param_names(None, {'limit_param': 'limit'}) == set()
+
+    def test_accepts_the_config_enum(self):
+        from otterapi.codegen.endpoints import pagination_owned_param_names
+        from otterapi.config import PaginationStyle
+
+        assert pagination_owned_param_names(PaginationStyle.PAGE, {}) == {
+            'page',
+            'per_page',
+        }
