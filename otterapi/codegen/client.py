@@ -116,8 +116,13 @@ def generate_api_error_class() -> ast.ClassDef:
                 ),
             ],
             handlers=[
+                # ``Response.json()`` raises ``json.JSONDecodeError`` (a
+                # ``ValueError`` subclass) for malformed bodies and
+                # ``UnicodeDecodeError`` (also a ``ValueError``) for undecodable
+                # ones.  Catching ``ValueError`` covers both without swallowing
+                # unrelated failures (flake8-bugbear's BLE001).
                 ast.ExceptHandler(
-                    type=_name('Exception'),
+                    type=_name('ValueError'),
                     name=None,
                     body=[
                         # detail = body if body else None
@@ -347,21 +352,22 @@ def generate_api_error_class() -> ast.ClassDef:
             ],
             orelse=[],
         ),
-        # cls = _resolve_error_class(status_code, cls)  -- pick the most
+        # error_cls = _resolve_error_class(status_code, cls)  -- pick the most
         # specific exception subclass registered for this status code,
         # falling through to ClientError / ServerError tier and finally
-        # to ``cls`` itself when the status is unrecognised.
+        # to ``cls`` itself when the status is unrecognised.  A separate name
+        # is used rather than rebinding ``cls`` (pylint's PLW0642).
         _assign(
-            _name('cls'),
+            _name('error_cls'),
             _call(
                 _name('_resolve_error_class'),
                 args=[_name('status_code'), _name('cls')],
             ),
         ),
-        # return cls(message, status_code=status_code, response=response, detail=detail, body=body)
+        # return error_cls(message, status_code=status_code, response=response, detail=detail, body=body)
         ast.Return(
             value=_call(
-                _name('cls'),
+                _name('error_cls'),
                 args=[_name('message')],
                 keywords=[
                     ast.keyword(arg='status_code', value=_name('status_code')),
@@ -649,7 +655,7 @@ def generate_base_client_class(
         imports: ImportDict = {
             'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
             'typing': {'Any'},
-            'types': {'UnionType'},
+            'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
         }
@@ -657,7 +663,7 @@ def generate_base_client_class(
         imports = {
             'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
             'typing': {'Any'},
-            'types': {'UnionType'},
+            'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter', 'RootModel'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
         }
@@ -863,6 +869,37 @@ def _build_init_method(
     )
 
 
+def _context_manager_exit_args() -> list[ast.arg]:
+    """Arguments for ``__exit__`` / ``__aexit__``, typed the way typeshed does.
+
+    ``exc_type: Any`` would trip flake8-pyi's PYI036 in downstream projects
+    that lint the generated package; the rule wants the exact protocol types
+    (or bare ``object``).  The annotations evaluate at runtime -- generated
+    modules have no ``from __future__ import annotations`` -- so everything
+    used here has to exist on Python 3.10, which ``type[...] | None`` and
+    ``TracebackType`` do.
+    """
+    return [
+        _argument(
+            'exc_type',
+            _union_expr(
+                [
+                    _subscript('type', _name('BaseException')),
+                    ast.Constant(value=None),
+                ]
+            ),
+        ),
+        _argument(
+            'exc_val',
+            _union_expr([_name('BaseException'), ast.Constant(value=None)]),
+        ),
+        _argument(
+            'exc_tb',
+            _union_expr([_name('TracebackType'), ast.Constant(value=None)]),
+        ),
+    ]
+
+
 def _build_lifecycle_methods() -> list[ast.stmt]:
     """Build close/aclose/__enter__/__exit__/__aenter__/__aexit__ methods."""
 
@@ -947,15 +984,11 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
     enter_method = _ctx_method('__enter__', [ast.Return(_name('self'))])
     enter_method.returns = None
 
-    # __exit__(self, *args): self.close()
+    # __exit__(self, exc_type, exc_val, exc_tb): self.close()
     exit_method = _ctx_method(
         '__exit__',
         [ast.Expr(_call(_attr('self', 'close')))],
-        extra_args=[
-            _argument('exc_type', _name('Any')),
-            _argument('exc_val', _name('Any')),
-            _argument('exc_tb', _name('Any')),
-        ],
+        extra_args=_context_manager_exit_args(),
     )
 
     # __aenter__(self): return self  (no return annotation — inferred from body)
@@ -964,15 +997,11 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
     )
     aenter_method.returns = None
 
-    # __aexit__(self, *args): await self.aclose()
+    # __aexit__(self, exc_type, exc_val, exc_tb): await self.aclose()
     aexit_method = _ctx_method(
         '__aexit__',
         [ast.Expr(ast.Await(_call(_attr('self', 'aclose'))))],
-        extra_args=[
-            _argument('exc_type', _name('Any')),
-            _argument('exc_val', _name('Any')),
-            _argument('exc_tb', _name('Any')),
-        ],
+        extra_args=_context_manager_exit_args(),
         is_async=True,
     )
 

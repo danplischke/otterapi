@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
+from otterapi.codegen._pep695 import PEP695_MIN_VERSION, modernize_type_params
+
 if TYPE_CHECKING:
     from otterapi.config import DocumentConfig
 
@@ -100,6 +102,11 @@ class FeatureModule(ABC):
         content = self.module_content
         if config is not None:
             content = self.transform_content(content, config)
+            if config.target_python_version >= PEP695_MIN_VERSION:
+                # Applied after the per-feature transform so subclasses keep
+                # matching against the pre-3.12 template text they were
+                # written against.
+                content = modernize_type_params(content)
         target = output_dir / self.module_filename
         target.write_text(content, encoding='utf-8')
         return target

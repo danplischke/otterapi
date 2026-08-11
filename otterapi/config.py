@@ -1060,6 +1060,18 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    target_python: Literal['3.10', '3.11', '3.12', '3.13', '3.14'] = Field(
+        default='3.10',
+        description=(
+            'Oldest Python version the generated code has to run on. The '
+            'default keeps the emitted runtime helpers compatible with '
+            'Python 3.10. From "3.12" on, the helpers use PEP 695 type '
+            'parameters (``def paginate_offset[T](...)``) instead of module-'
+            'level ``TypeVar``s, which is what linters configured for a modern '
+            'Python expect (the UP047 rule in ruff).'
+        ),
+    )
+
     pydantic_version: Literal[1, 2] = Field(
         default=2,
         description=(
@@ -1118,6 +1130,12 @@ class DocumentConfig(BaseModel):
         if not v.endswith('.py'):
             raise ValueError(f'File name must end with .py, got: {v}')
         return v
+
+    @property
+    def target_python_version(self) -> tuple[int, int]:
+        """``target_python`` as a comparable ``(major, minor)`` tuple."""
+        major, minor = self.target_python.split('.')
+        return int(major), int(minor)
 
 
 class CodegenConfig(BaseSettings):

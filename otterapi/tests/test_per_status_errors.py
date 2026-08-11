@@ -154,6 +154,55 @@ class TestDispatch:
             self._raise_for(generated_pkg, 500)
 
 
+class TestFromResponseBodyParsing:
+    """``from_response`` narrowed its ``except Exception`` to ``ValueError``.
+
+    Every way a response body can fail to become JSON raises a ``ValueError``
+    subclass, so the fallback still fires -- but an unrelated failure now
+    propagates instead of being silently turned into a detail string
+    (flake8-bugbear's BLE001).
+    """
+
+    def _response(self, **kwargs) -> httpx.Response:
+        return httpx.Response(
+            request=httpx.Request('GET', 'https://example.test'), **kwargs
+        )
+
+    def test_json_detail_is_extracted(self, errors):
+        err = errors.BaseAPIError.from_response(
+            self._response(status_code=404, json={'detail': 'no such user'})
+        )
+        assert err.detail == 'no such user'
+        assert isinstance(err, errors.NotFoundError)
+
+    def test_non_json_body_falls_back_to_raw_text(self, errors):
+        err = errors.BaseAPIError.from_response(
+            self._response(status_code=500, text='<html>gateway exploded</html>')
+        )
+        assert err.detail == '<html>gateway exploded</html>'
+        assert isinstance(err, errors.InternalServerError)
+
+    def test_empty_body_leaves_detail_unset(self, errors):
+        err = errors.BaseAPIError.from_response(
+            self._response(status_code=503, text='')
+        )
+        assert err.detail is None
+        assert str(err) == 'HTTP 503 Error'
+
+    def test_undecodable_body_falls_back(self, errors):
+        # UnicodeDecodeError is a ValueError, so the fallback covers it too.
+        err = errors.BaseAPIError.from_response(
+            self._response(status_code=502, content=b'\xff\xfe\x00garbage')
+        )
+        assert isinstance(err, errors.BadGatewayError)
+
+    def test_subclass_keeps_its_own_resolution(self, errors):
+        # ``from_response`` no longer rebinds ``cls`` (pylint's PLW0642); the
+        # resolved class still wins over the class it was called on.
+        err = errors.ClientError.from_response(self._response(status_code=404, text=''))
+        assert isinstance(err, errors.NotFoundError)
+
+
 class TestRegistryHelpers:
     def test_resolver_helper_is_exported(self, errors):
         assert callable(errors._resolve_error_class)

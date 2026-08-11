@@ -23,7 +23,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, TypeAlias, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -32,8 +32,11 @@ from upath import UPath
 if TYPE_CHECKING:
     import pyarrow as pa
 
-Row: TypeAlias = BaseModel | dict
-PathLike: TypeAlias = str | Path | UPath
+# Implicit type aliases: the explicit ``TypeAlias`` annotation would ask
+# downstream linters to rewrite these with PEP 695's ``type`` keyword (UP040),
+# which generated code cannot use while it still supports Python 3.10/3.11.
+Row = BaseModel | dict
+PathLike = str | Path | UPath
 
 
 # -----------------------------------------------------------------------------
