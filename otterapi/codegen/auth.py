@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -115,17 +116,23 @@ def _env_var_name(prefix: str, scheme_name: str) -> str:
 def collect_auth_schemes(
     adapter: OpenAPIAdapter | None,
     env_prefix: str = DEFAULT_ENV_PREFIX,
+    env_vars: Mapping[str, str] | None = None,
 ) -> list[AuthScheme]:
     """Reduce a document's ``securitySchemes`` to generation-ready descriptors.
 
     Args:
         adapter: The document facade, or None when no document is loaded.
         env_prefix: Prefix for the generated environment-variable names.
+        env_vars: Exact variable name per scheme, overriding the prefix rule.
+            Keyed by the scheme's name in the spec; the generated parameter
+            name is accepted as an alias, since that is what a reader of the
+            client sees.
 
     Returns:
         One :class:`AuthScheme` per supported scheme, ordered by spec name so
         the generated signature is stable across runs.
     """
+    env_vars = env_vars or {}
     if adapter is None:
         return []
 
@@ -184,13 +191,14 @@ def collect_auth_schemes(
             suffix += 1
         used_names.add(candidate)
 
+        configured = env_vars.get(scheme_name, env_vars.get(candidate))
         schemes.append(
             AuthScheme(
                 name=scheme_name,
                 python_name=candidate,
                 kind=kind,
                 wire_name=wire_name,
-                env_var=_env_var_name(env_prefix, scheme_name),
+                env_var=configured or _env_var_name(env_prefix, scheme_name),
             )
         )
 

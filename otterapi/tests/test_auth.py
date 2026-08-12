@@ -259,3 +259,82 @@ def test_before_request_hook_can_override_generated_auth(tmp_path: Path):
 
     request = _send(mod, Refreshing(bearer_auth='stale'))
     assert request.headers['Authorization'] == 'Bearer refreshed'
+
+
+class TestEnvVarNames:
+    """``env_vars`` pins the exact environment variable per scheme.
+
+    For credentials that already live somewhere the prefix rule would never
+    derive.
+    """
+
+    TWO_SCHEMES = _spec(
+        {
+            'api_key': {'type': 'apiKey', 'name': 'X-Key', 'in': 'header'},
+            'bearerAuth': {'type': 'http', 'scheme': 'bearer'},
+        }
+    )
+
+    def test_named_variable_is_used(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mod = _generate(
+            tmp_path,
+            self.TWO_SCHEMES,
+            'auth_envvar',
+            auth=AuthConfig(env_vars={'api_key': 'STRIPE_SECRET_KEY'}),
+        )
+        monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_test')
+        assert _send(mod, mod.Client()).headers['X-Key'] == 'sk_test'
+
+    def test_unnamed_schemes_keep_the_derived_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Naming one scheme must not disturb the others."""
+        mod = _generate(
+            tmp_path,
+            self.TWO_SCHEMES,
+            'auth_envvar_partial',
+            auth=AuthConfig(env_vars={'api_key': 'STRIPE_SECRET_KEY'}),
+        )
+        monkeypatch.setenv('OTTER_BEARER_AUTH', 'tok')
+        assert _send(mod, mod.Client()).headers['Authorization'] == 'Bearer tok'
+
+    def test_named_variable_beats_the_prefix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mod = _generate(
+            tmp_path,
+            self.TWO_SCHEMES,
+            'auth_envvar_precedence',
+            auth=AuthConfig(env_prefix='MYAPI', env_vars={'api_key': 'EXACT_NAME'}),
+        )
+        monkeypatch.setenv('MYAPI_API_KEY', 'from-prefix')
+        monkeypatch.setenv('EXACT_NAME', 'from-exact')
+        assert _send(mod, mod.Client()).headers['X-Key'] == 'from-exact'
+
+    def test_generated_parameter_name_works_as_a_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``bearerAuth`` in the spec is ``bearer_auth`` in the client."""
+        mod = _generate(
+            tmp_path,
+            self.TWO_SCHEMES,
+            'auth_envvar_alias',
+            auth=AuthConfig(env_vars={'bearer_auth': 'MY_TOKEN'}),
+        )
+        monkeypatch.setenv('MY_TOKEN', 'tok')
+        assert _send(mod, mod.Client()).headers['Authorization'] == 'Bearer tok'
+
+    def test_explicit_argument_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mod = _generate(
+            tmp_path,
+            self.TWO_SCHEMES,
+            'auth_envvar_arg_wins',
+            auth=AuthConfig(env_vars={'api_key': 'STRIPE_SECRET_KEY'}),
+        )
+        monkeypatch.setenv('STRIPE_SECRET_KEY', 'from-env')
+        request = _send(mod, mod.Client(api_key='explicit'))
+        assert request.headers['X-Key'] == 'explicit'

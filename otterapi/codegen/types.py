@@ -288,12 +288,16 @@ class RequestBodyInfo:
         type: The Type object for the body schema, or None if no schema.
         required: Whether the request body is required.
         description: Optional description of the request body.
+        exclude_unset: Whether the emitted ``model_dump`` drops fields the
+            caller never set.  Carried here rather than passed down separately
+            so the AST builders keep their existing signatures.
     """
 
     content_type: str
     type: Type | None = None
     required: bool = False
     description: str | None = None
+    exclude_unset: bool = True
 
     @property
     def is_json(self) -> bool:

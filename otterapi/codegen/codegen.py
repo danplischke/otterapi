@@ -559,7 +559,11 @@ class Codegen(OpenAPIProcessor):
         """
         if not self.config.auth.enabled or self.openapi is None:
             return []
-        return collect_auth_schemes(self._adapter, self.config.auth.env_prefix)
+        return collect_auth_schemes(
+            self._adapter,
+            self.config.auth.env_prefix,
+            self.config.auth.env_vars,
+        )
 
     def _build_parameter(self, param: OpenAPIParameter) -> Parameter:
         """Build a Parameter from a resolved OpenAPI parameter object."""
@@ -714,6 +718,7 @@ class Codegen(OpenAPIProcessor):
             type=body_type,
             required=body.required or False,
             description=body.description,
+            exclude_unset=self.config.request_body.exclude_unset,
         )
 
     def _get_param_model(

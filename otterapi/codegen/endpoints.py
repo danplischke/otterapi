@@ -606,16 +606,21 @@ class ParameterASTBuilder:
             and raises ``TypeError``.  ``by_alias`` restores wire names for
             fields whose spec name is not a Python identifier, and
             ``exclude_unset`` stops every untouched optional field being sent
-            as an explicit null.
+            as an explicit null -- omitted entirely when the document turns
+            that off, so the generated call says what it does.
             """
+            keywords = [
+                ast.keyword(arg='mode', value=ast.Constant(value='json')),
+                ast.keyword(arg='by_alias', value=ast.Constant(value=True)),
+            ]
+            if body.exclude_unset:
+                keywords.append(
+                    ast.keyword(arg='exclude_unset', value=ast.Constant(value=True))
+                )
             dump: ast.expr = _call(
                 func=_attr(_name(body_name), 'model_dump'),
                 args=[],
-                keywords=[
-                    ast.keyword(arg='mode', value=ast.Constant(value='json')),
-                    ast.keyword(arg='by_alias', value=ast.Constant(value=True)),
-                    ast.keyword(arg='exclude_unset', value=ast.Constant(value=True)),
-                ],
+                keywords=keywords,
             )
             if body.required:
                 return dump

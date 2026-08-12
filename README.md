@@ -839,7 +839,24 @@ documents:
       env_prefix: MYAPI    # -> MYAPI_API_KEY
 ```
 
-Basic auth needs two values, so it has no environment fallback.
+When a credential already lives in a variable the prefix rule would never
+derive, name it outright with `env_vars`. Keys are scheme names from
+`components.securitySchemes` (the generated parameter name works too), and
+only the schemes you name are affected — the rest keep the derived default:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    auth:
+      env_prefix: MYAPI
+      env_vars:
+        api_key: STRIPE_SECRET_KEY   # this one exactly
+        # bearerAuth still falls back to MYAPI_BEARER_AUTH
+```
+
+A constructor argument always beats the environment. Basic auth needs two
+values, so it has no environment fallback at all.
 
 ### Auth Options
 
@@ -847,6 +864,7 @@ Basic auth needs two values, so it has no environment fallback.
 |--------|------|---------|-------------|
 | `enabled` | bool | `true` | Generate credential parameters from `securitySchemes` |
 | `env_prefix` | string | `OTTER` | Prefix for the environment variables consulted when an argument is omitted. Empty string drops the prefix |
+| `env_vars` | map | `{}` | Exact environment variable per scheme, keyed by scheme name. Overrides `env_prefix` for the schemes it names |
 
 ### Customizing
 
@@ -863,6 +881,44 @@ class MyClient(Client):
 
 Set `auth.enabled: false` to opt out entirely and wire authentication by hand
 in the user-owned `client.py`.
+
+---
+
+## 📤 Request Bodies
+
+Bodies are serialized with `model_dump(mode='json', by_alias=True,
+exclude_unset=True)`: JSON mode so `datetime`, `UUID` and `Decimal` fields
+reach the wire as strings rather than raising, and aliases so fields whose
+spec name is not a Python identifier keep their wire name.
+
+`exclude_unset` means only the fields you actually set are sent:
+
+```python
+place_order(body=Order(id=7))     # -> {"id": 7}
+```
+
+Most APIs read an explicit `null` as "clear this field", so omitting the
+fields you never touched is the safer default — and it is what makes partial
+updates work. If an endpoint genuinely needs those nulls, a PUT that replaces
+a whole resource for instance, turn it off:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    request_body:
+      exclude_unset: false
+```
+
+```python
+place_order(body=Order(id=7))     # -> {"id": 7, "shipDate": null, "note": null}
+```
+
+### Request Body Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `exclude_unset` | bool | `true` | Send only the fields the caller set, rather than an explicit null for every untouched optional field |
 
 ---
 

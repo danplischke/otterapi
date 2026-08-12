@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import importlib
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -612,3 +613,55 @@ class TestRawResponseTypes:
         result = mod.get_blob(client=client)
         assert isinstance(result, httpx.Response)
         assert result.text == 'hello'
+
+
+# ---------------------------------------------------------------------------
+# request_body.exclude_unset
+# ---------------------------------------------------------------------------
+
+
+class TestExcludeUnsetConfig:
+    """Whether an untouched optional field goes out as an explicit null.
+
+    Most APIs read a null as "clear this field", so omitting unset fields is
+    the safer default -- but a PUT that replaces a whole resource may need
+    them, which is what turning this off is for.
+    """
+
+    def test_default_omits_unset_fields(self, tmp_path: Path):
+        mod = _generate(tmp_path, _body_spec(required=True), 'wire_unset_default')
+        rec = Recorder()
+        mod.place_order(mod.models.Order(id=7), client=rec.bind(mod.Client()))
+        assert rec.body == '{"id":7}'
+
+    def test_disabled_sends_explicit_nulls(self, tmp_path: Path):
+        from otterapi.config import RequestBodyConfig
+
+        mod = _generate(
+            tmp_path,
+            _body_spec(required=True),
+            'wire_unset_off',
+            request_body=RequestBodyConfig(exclude_unset=False),
+        )
+        rec = Recorder()
+        mod.place_order(mod.models.Order(id=7), client=rec.bind(mod.Client()))
+        # Parsed rather than compared as text: field order follows the model,
+        # which is not what this test is about.
+        assert json.loads(rec.body) == {'id': 7, 'shipDate': None, 'note': None}
+
+    def test_disabled_still_serializes_json_types(self, tmp_path: Path):
+        """Turning off exclude_unset must not undo the mode='json' fix."""
+        from otterapi.config import RequestBodyConfig
+
+        mod = _generate(
+            tmp_path,
+            _body_spec(required=True),
+            'wire_unset_off_dt',
+            request_body=RequestBodyConfig(exclude_unset=False),
+        )
+        rec = Recorder()
+        mod.place_order(
+            mod.models.Order(id=1, shipDate=datetime.datetime(2024, 1, 2, 3, 4, 5)),
+            client=rec.bind(mod.Client()),
+        )
+        assert '"shipDate":"2024-01-02T03:04:05"' in rec.body
