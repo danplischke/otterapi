@@ -989,8 +989,21 @@ class EndpointFunctionFactory:
             self._merge_imports(self.config.response_type_imports)
 
         if self._is_raw_response_type(self.config.response_type):
-            # Raw types (Response / bytes / str) skip Pydantic parsing.
-            return builder.add_return(_request_call()).build()
+            # Raw types skip Pydantic parsing, but a function annotated
+            # ``-> str`` returning the httpx Response is a lie: the caller gets
+            # an object, not the text it asked for. Pull the body out for the
+            # scalar cases; a genuine ``-> Response`` is returned as-is.
+            attribute = self._raw_response_attribute(self.config.response_type)
+            if attribute is None:
+                return builder.add_return(_request_call()).build()
+            builder.add_method_call_assignment(
+                target_var='response',
+                receiver='c',
+                method=request_method,
+                keywords=request_keywords,
+                is_async=self.config.is_async,
+            )
+            return builder.add_return(_attr('response', attribute)).build()
 
         # JSON response: request, parse, optionally unwrap.
         builder.add_method_call_assignment(
@@ -1052,6 +1065,19 @@ class EndpointFunctionFactory:
             return all(self._is_raw_union_element(elt) for elt in ann.slice.elts)
 
         return False
+
+    @staticmethod
+    def _raw_response_attribute(response_type: Type) -> str | None:
+        """Return the ``Response`` attribute that yields *response_type*.
+
+        ``str`` comes from ``.text`` and ``bytes`` from ``.content``.  Returns
+        None for anything else -- including a real ``Response`` return type and
+        unions -- meaning the response object itself is what to hand back.
+        """
+        ann = response_type.annotation_ast
+        if not isinstance(ann, ast.Name):
+            return None
+        return {'str': 'text', 'bytes': 'content'}.get(ann.id)
 
     def _build_unwrap_expression(self, var_name: str, data_path: str) -> ast.expr:
         """Build an expression to extract data from a response.

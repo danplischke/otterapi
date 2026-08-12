@@ -555,3 +555,60 @@ def test_optional_fields_are_annotated_optional(tmp_path: Path):
         assert not fields[name].is_required()
     source = (tmp_path / 'wire_annotations' / 'models.py').read_text(encoding='utf-8')
     assert 'id: int | None' in source
+
+
+# ---------------------------------------------------------------------------
+# Raw (unparsed) response types
+# ---------------------------------------------------------------------------
+
+
+def _scalar_body_spec(content_type: str) -> dict:
+    return _spec(
+        {
+            '/blob': {
+                'get': {
+                    'operationId': 'getBlob',
+                    'responses': {
+                        '200': {
+                            'description': 'ok',
+                            'content': {content_type: {'schema': {'type': 'string'}}},
+                        }
+                    },
+                }
+            }
+        }
+    )
+
+
+class TestRawResponseTypes:
+    def test_string_response_returns_the_text_not_the_response(self, tmp_path: Path):
+        """A function annotated ``-> str`` used to hand back an httpx Response.
+
+        The Petstore's ``/user/login`` is exactly this shape: a JSON body whose
+        schema is a bare ``type: string``.
+        """
+        mod = _generate(tmp_path, _scalar_body_spec('application/json'), 'wire_raw_str')
+        client = mod.Client()
+        client._sync_client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text='hello')
+            )
+        )
+        assert mod.get_blob(client=client) == 'hello'
+
+    @pytest.mark.parametrize('content_type', ['text/plain', 'application/octet-stream'])
+    def test_unparsed_content_still_yields_the_response(
+        self, tmp_path: Path, content_type: str
+    ):
+        """Content types with no model are typed ``-> Response`` and stay raw."""
+        package = 'wire_raw_' + content_type.split('/')[1].replace('-', '_')
+        mod = _generate(tmp_path, _scalar_body_spec(content_type), package)
+        client = mod.Client()
+        client._sync_client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text='hello')
+            )
+        )
+        result = mod.get_blob(client=client)
+        assert isinstance(result, httpx.Response)
+        assert result.text == 'hello'

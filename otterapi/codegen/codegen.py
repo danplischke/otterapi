@@ -102,6 +102,66 @@ def _resolve_param_serialization(param: OpenAPIParameter) -> tuple[str, bool]:
     return style, bool(explode)
 
 
+def _snapshot_directory(directory: UPath) -> dict[str, bytes]:
+    """Read every file under *directory* into memory, keyed by relative path.
+
+    Generated packages are a handful of Python source files, so holding them
+    in memory costs less than the temp-directory bookkeeping the alternative
+    would need -- and it works the same for a remote ``UPath``.
+    """
+    snapshot: dict[str, bytes] = {}
+    for path in directory.rglob('*'):
+        if path.is_file():
+            snapshot[str(path.relative_to(directory))] = path.read_bytes()
+    return snapshot
+
+
+def _restore_directory(
+    directory: UPath, snapshot: dict[str, bytes] | None, *, existed: bool
+) -> None:
+    """Put *directory* back the way it was before generation started.
+
+    Best-effort: a failure here must not mask the generation error that
+    triggered the rollback, so cleanup problems are logged rather than raised.
+    """
+    try:
+        if not existed:
+            if directory.exists():
+                _remove_tree(directory)
+            return
+
+        for path in list(directory.rglob('*')):
+            if path.is_file():
+                path.unlink()
+        for path in sorted(
+            (p for p in directory.rglob('*') if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            path.rmdir()
+
+        for relative, content in (snapshot or {}).items():
+            target = directory / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+    except OSError as exc:  # pragma: no cover - depends on filesystem state
+        logger.warning(
+            'Could not fully roll back %s after a failed generation: %s',
+            directory,
+            exc,
+        )
+
+
+def _remove_tree(directory: UPath) -> None:
+    """Delete *directory* and everything under it."""
+    for path in sorted(directory.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        if path.is_file():
+            path.unlink()
+        else:
+            path.rmdir()
+    directory.rmdir()
+
+
 def _topo_sort_by_base_classes(
     types_list: list,
     model_names: set[str],
@@ -1667,6 +1727,17 @@ class Codegen(OpenAPIProcessor):
         )
 
     def generate(self):
+        """Generate the client, leaving the output directory untouched on failure.
+
+        Generation writes many files and can fail partway through -- an
+        unresolvable relative server URL, a schema the type generator rejects,
+        a validation error on an emitted module. Without the rollback below,
+        the user is left with a half-written package that imports but is
+        wrong, which is worse than no package at all.
+
+        Returns:
+            The list of generated file paths, relative to the output directory.
+        """
         self._load_schema()
 
         if self.openapi is None:
@@ -1678,6 +1749,20 @@ class Codegen(OpenAPIProcessor):
             raise ValueError('OpenAPI spec has no paths to generate endpoints from')
 
         directory = UPath(self.config.output)
+        existed = directory.exists()
+        # Snapshot rather than generate-then-swap: client.py is deliberately
+        # preserved across runs, as is anything else the user keeps in the
+        # output directory, and a swap would discard both.
+        snapshot = _snapshot_directory(directory) if existed else None
+
+        try:
+            return self._generate_into(directory)
+        except BaseException:
+            _restore_directory(directory, snapshot, existed=existed)
+            raise
+
+    def _generate_into(self, directory: UPath):
+        """Write every generated file into *directory*."""
         directory.mkdir(parents=True, exist_ok=True)
 
         if not os.access(str(directory), os.W_OK):

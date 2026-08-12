@@ -875,6 +875,13 @@ otter generate
 # Generate from specific config file
 otter generate -c my-config.yml
 
+# Generate without a config file
+otter generate -s ./api.yaml -o ./client
+
+# Override the base URL — required when a file-loaded spec's servers are
+# relative (e.g. `url: /api/v3`), and applies to every document in a config
+otter generate -s ./api.yaml -o ./client -b https://api.example.com
+
 # Tolerate malformed specs (drop unknown/invalid fields with a warning)
 otter generate --lenient
 
@@ -884,6 +891,12 @@ otter init
 # Validate configuration
 otter validate
 ```
+
+Generation is all-or-nothing: if a run fails partway through, the output
+directory is restored to exactly what it was before, so a failure never
+leaves a half-written client behind. Files you own inside it — `client.py`
+and anything else you keep there — survive both a failed run and a
+successful regeneration.
 
 ---
 

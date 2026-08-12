@@ -10,6 +10,7 @@ from importlib.resources import files
 
 from otterapi.codegen.ast_utils import (
     ImportDict,
+    _ann_assign,
     _argument,
     _assign,
     _attr,
@@ -1271,9 +1272,14 @@ def _build_parse_response_method(
             _name('data'),
             _call(func=_attr('response', 'json')),
         ),
-        # validated = TypeAdapter(response_type).validate_python(data)
-        _assign(
+        # validated: Any = TypeAdapter(response_type).validate_python(data)
+        #
+        # Annotated because ``response_type`` is only known at runtime, so
+        # pydantic's mypy plugin cannot infer what the adapter produces and
+        # asks the user's own type-check for an annotation here.
+        _ann_assign(
             _name('validated'),
+            _name('Any'),
             _call(
                 func=_attr(
                     _call(
@@ -1767,7 +1773,19 @@ def _build_sync_request_body(
         orelse=[],
     )
 
-    return [for_loop]
+    # The loop always returns or raises: the final attempt either returns a
+    # response or re-raises. That is not provable from the loop's shape, so
+    # without this a user type-checking the generated client sees
+    # "Missing return statement".
+    unreachable = ast.Raise(
+        exc=_call(
+            _name('RuntimeError'),
+            args=[ast.Constant(value='retry loop exited without returning a response')],
+        ),
+        cause=None,
+    )
+
+    return [for_loop, unreachable]
 
 
 def _build_async_request_body(
@@ -1858,7 +1876,19 @@ def _build_async_request_body(
         orelse=[],
     )
 
-    return [for_loop]
+    # The loop always returns or raises: the final attempt either returns a
+    # response or re-raises. That is not provable from the loop's shape, so
+    # without this a user type-checking the generated client sees
+    # "Missing return statement".
+    unreachable = ast.Raise(
+        exc=_call(
+            _name('RuntimeError'),
+            args=[ast.Constant(value='retry loop exited without returning a response')],
+        ),
+        cause=None,
+    )
+
+    return [for_loop, unreachable]
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:
