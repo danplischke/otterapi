@@ -18,6 +18,12 @@ from otterapi.codegen.ast_utils import (
     _subscript,
     _union_expr,
 )
+from otterapi.codegen.auth import (
+    AuthScheme,
+    build_apply_auth_method,
+    build_auth_init_args,
+    build_auth_init_body,
+)
 
 # Prefix used when building `f'HTTP {status_code} ...'` error messages in generated code
 _HTTP_ERROR_PREFIX = 'HTTP '
@@ -635,6 +641,7 @@ def generate_base_client_class(
     default_base_url: str,
     default_timeout: float = 30.0,
     pydantic_version: int = 2,
+    auth_schemes: list[AuthScheme] | None = None,
 ) -> tuple[ast.ClassDef, ImportDict]:
     """Generate a BaseClient class with only request infrastructure.
 
@@ -647,10 +654,13 @@ def generate_base_client_class(
         default_timeout: Default request timeout in seconds.
         pydantic_version: Target Pydantic version (1 or 2).  Affects which
             response-unwrapping pattern is emitted in ``_parse_response``.
+        auth_schemes: Security schemes from the document, exposed as
+            keyword-only constructor parameters and applied by ``_apply_auth``.
 
     Returns:
         Tuple of (class AST node, required imports).
     """
+    auth_schemes = auth_schemes or []
     if pydantic_version == 1:
         imports: ImportDict = {
             'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
@@ -671,7 +681,13 @@ def generate_base_client_class(
         }
 
     # Build __init__ method
-    init_method = _build_init_method(default_base_url, default_timeout)
+    init_method = _build_init_method(default_base_url, default_timeout, auth_schemes)
+
+    # Build _apply_auth method (None when the document declares no schemes)
+    apply_auth_method, auth_imports = build_apply_auth_method(auth_schemes)
+    _, auth_init_imports = build_auth_init_body(auth_schemes)
+    _merge_imports(imports, auth_imports)
+    _merge_imports(imports, auth_init_imports)
 
     # Build lifecycle methods
     lifecycle_methods = _build_lifecycle_methods()
@@ -683,10 +699,14 @@ def generate_base_client_class(
     async_before_request_method = _build_async_before_request_method()
 
     # Build _request method (sync)
-    request_method = _build_request_method(is_async=False)
+    request_method = _build_request_method(
+        is_async=False, has_auth=apply_auth_method is not None
+    )
 
     # Build _request_async method (async)
-    async_request_method = _build_request_method(is_async=True)
+    async_request_method = _build_request_method(
+        is_async=True, has_auth=apply_auth_method is not None
+    )
 
     # Build _request_json method (sync) - request + json parsing
     request_json_method = _build_request_json_method(is_async=False)
@@ -733,6 +753,7 @@ Args:
         ),
         init_method,
         *lifecycle_methods,
+        *([apply_auth_method] if apply_auth_method else []),
         before_request_method,
         async_before_request_method,
         request_method,
@@ -756,9 +777,19 @@ Args:
 
 
 def _build_init_method(
-    default_base_url: str, default_timeout: float
+    default_base_url: str,
+    default_timeout: float,
+    auth_schemes: list[AuthScheme] | None = None,
 ) -> ast.FunctionDef:
-    """Build the __init__ method for the client class."""
+    """Build the __init__ method for the client class.
+
+    Args:
+        default_base_url: Default base URL baked into the signature.
+        default_timeout: Default request timeout in seconds.
+        auth_schemes: Security schemes to expose as keyword-only credential
+            parameters, or None for an API that declares none.
+    """
+    auth_schemes = auth_schemes or []
     # frozenset({429, 500, 502, 503, 504}) literal
     default_retry_statuses = ast.Call(
         func=_name('frozenset'),
@@ -817,6 +848,10 @@ def _build_init_method(
         _assign(_attr('self', '_async_client'), _name('async_http_client')),
     ]
 
+    auth_args, auth_defaults = build_auth_init_args(auth_schemes)
+    auth_body, _ = build_auth_init_body(auth_schemes)
+    init_body.extend(auth_body)
+
     return ast.FunctionDef(
         name='__init__',
         args=ast.arguments(
@@ -851,8 +886,10 @@ def _build_init_method(
                 ),
                 _argument('backoff_factor', _name('float')),
             ],
-            kwonlyargs=[],
-            kw_defaults=[],
+            # Credentials are keyword-only: they are optional, and positional
+            # order would be dictated by the spec's scheme names.
+            kwonlyargs=auth_args,
+            kw_defaults=auth_defaults,
             kwarg=None,
             defaults=[
                 ast.Constant(value=default_base_url),
@@ -1412,8 +1449,15 @@ def _build_request_json_method(
         )
 
 
-def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunctionDef:
-    """Build the internal _request or _request_async method."""
+def _build_request_method(
+    is_async: bool, has_auth: bool = False
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Build the internal _request or _request_async method.
+
+    Args:
+        is_async: Whether to build the async variant.
+        has_auth: Whether the client has an ``_apply_auth`` method to call.
+    """
     method_name = '_request_async' if is_async else '_request'
 
     args = ast.arguments(
@@ -1485,7 +1529,9 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
     )
 
     if is_async:
-        body = _build_async_request_body(url_expr, merged_headers, timeout_expr)
+        body = _build_async_request_body(
+            url_expr, merged_headers, timeout_expr, has_auth=has_auth
+        )
         return ast.AsyncFunctionDef(
             name=method_name,
             args=args,
@@ -1494,7 +1540,9 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
             returns=_name('Response'),
         )
     else:
-        body = _build_sync_request_body(url_expr, merged_headers, timeout_expr)
+        body = _build_sync_request_body(
+            url_expr, merged_headers, timeout_expr, has_auth=has_auth
+        )
         return ast.FunctionDef(
             name=method_name,
             args=args,
@@ -1502,6 +1550,17 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
             decorator_list=[],
             returns=_name('Response'),
         )
+
+
+def _build_apply_auth_call(has_auth: bool) -> list[ast.stmt]:
+    """Build ``self._apply_auth(request)``, or nothing when there is no auth.
+
+    Runs before ``_before_request`` so a user hook can still override or
+    refresh the credential the generated method just set.
+    """
+    if not has_auth:
+        return []
+    return [ast.Expr(_call(_attr('self', '_apply_auth'), args=[_name('request')]))]
 
 
 def _build_wire_format_stmts() -> list[ast.stmt]:
@@ -1693,7 +1752,10 @@ def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandl
 
 
 def _build_sync_request_body(
-    url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
+    url_expr: ast.expr,
+    merged_headers: ast.expr,
+    timeout_expr: ast.expr,
+    has_auth: bool = False,
 ) -> list[ast.stmt]:
     """Build the body for sync _request method with retry loop."""
     request_dict_stmt = _assign(
@@ -1711,6 +1773,7 @@ def _build_sync_request_body(
 
     try_body = [
         request_dict_stmt,
+        *_build_apply_auth_call(has_auth),
         before_request_stmt,
         *_build_wire_format_stmts(),
         request_stmt,
@@ -1745,7 +1808,10 @@ def _build_sync_request_body(
 
 
 def _build_async_request_body(
-    url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
+    url_expr: ast.expr,
+    merged_headers: ast.expr,
+    timeout_expr: ast.expr,
+    has_auth: bool = False,
 ) -> list[ast.stmt]:
     """Build the body for async _request_async method with retry loop.
 
@@ -1796,6 +1862,7 @@ def _build_async_request_body(
 
     try_body = [
         request_dict_stmt,
+        *_build_apply_auth_call(has_auth),
         before_request_stmt,
         *_build_wire_format_stmts(),
         client_if,

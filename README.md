@@ -788,6 +788,84 @@ print(user.id, user.email)
 
 ---
 
+## 🔐 Authentication
+
+Every scheme under `components.securitySchemes` becomes a keyword-only
+parameter on the generated client, applied automatically to every request.
+
+```yaml
+# spec
+components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: X-API-Key
+      in: header
+    bearerAuth:
+      type: http
+      scheme: bearer
+```
+
+```python
+from client import Client
+
+client = Client(api_key='...', bearer_auth='...')
+user = get_user(user_id=123, client=client)
+```
+
+| Scheme | Parameter type | Sent as |
+|--------|----------------|---------|
+| `apiKey` in `header` | `str` | the header named in the spec |
+| `apiKey` in `query` | `str` | the query parameter named in the spec |
+| `apiKey` in `cookie` | `str` | appended to the `Cookie` header |
+| `http` / `bearer` | `str` | `Authorization: Bearer <token>` |
+| `http` / `basic` | `tuple[str, str]` | `Authorization: Basic <base64>` |
+| `oauth2`, `openIdConnect` | `str` | `Authorization: Bearer <token>` — you supply an already-obtained token |
+
+Schemes OtterAPI does not recognize are skipped with a warning rather than
+failing generation.
+
+### Credentials from the environment
+
+Omit a credential and the client reads it from `<env_prefix>_<SCHEME_NAME>`,
+upper-cased — so the `api_key` scheme above falls back to `OTTER_API_KEY`.
+Set `env_prefix` per document when one project generates several clients:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    auth:
+      env_prefix: MYAPI    # -> MYAPI_API_KEY
+```
+
+Basic auth needs two values, so it has no environment fallback.
+
+### Auth Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Generate credential parameters from `securitySchemes` |
+| `env_prefix` | string | `OTTER` | Prefix for the environment variables consulted when an argument is omitted. Empty string drops the prefix |
+
+### Customizing
+
+`_apply_auth` runs before the `_before_request` hook, so the hook can still
+override or refresh whatever it set — useful for rotating an OAuth token:
+
+```python
+class MyClient(Client):
+    def _before_request(self, request):
+        if self._token_expired():
+            request['headers']['Authorization'] = f'Bearer {self._refresh()}'
+        return request
+```
+
+Set `auth.enabled: false` to opt out entirely and wire authentication by hand
+in the user-owned `client.py`.
+
+---
+
 ## 🔧 CLI Reference
 
 ```bash

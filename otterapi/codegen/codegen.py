@@ -24,6 +24,7 @@ from otterapi.codegen.ast_utils import (
     _union_expr,
     strip_optional,
 )
+from otterapi.codegen.auth import AuthScheme, collect_auth_schemes
 from otterapi.codegen.client import (
     _exported_error_names,
     generate_api_error_hierarchy,
@@ -487,6 +488,17 @@ class Codegen(OpenAPIProcessor):
             used_names.add(candidate)
 
         return all_params
+
+    def _auth_schemes(self) -> list[AuthScheme]:
+        """Security schemes to wire into the generated client.
+
+        Returns an empty list when the feature is switched off or the document
+        declares no supported scheme, in which case no credential parameters
+        and no ``_apply_auth`` method are emitted.
+        """
+        if not self.config.auth.enabled or self.openapi is None:
+            return []
+        return collect_auth_schemes(self._adapter, self.config.auth.env_prefix)
 
     def _build_parameter(self, param: OpenAPIParameter) -> Parameter:
         """Build a Parameter from a resolved OpenAPI parameter object."""
@@ -1973,6 +1985,7 @@ class Codegen(OpenAPIProcessor):
             default_base_url=base_url,
             default_timeout=30.0,
             pydantic_version=self.config.pydantic_version,
+            auth_schemes=self._auth_schemes(),
         )
 
         # Build the _client.py file

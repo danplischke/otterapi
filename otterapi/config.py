@@ -750,6 +750,37 @@ class EndpointResponseUnwrapConfig(BaseModel):
     model_config = {'extra': 'forbid'}
 
 
+class AuthConfig(BaseModel):
+    """Configuration for generating authentication from ``securitySchemes``.
+
+    Each supported scheme in the document becomes a keyword-only constructor
+    parameter on the generated client, applied automatically to every request.
+
+    Attributes:
+        enabled: Whether to generate credential parameters at all.  Turn this
+            off to keep the previous behaviour of wiring auth by hand in the
+            user-owned ``client.py``.
+        env_prefix: Prefix for the environment variables an omitted credential
+            falls back to, e.g. ``OTTER`` gives ``OTTER_API_KEY`` for a scheme
+            named ``apiKey``.  Set it per document when a project generates
+            more than one client, so their variables do not collide.  An empty
+            string drops the prefix entirely.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description='Generate client credential parameters from securitySchemes.',
+    )
+
+    env_prefix: str = Field(
+        default='OTTER',
+        description=(
+            'Prefix for the environment variables that supply credentials when '
+            'the constructor argument is omitted.'
+        ),
+    )
+
+
 class ResponseUnwrapConfig(BaseModel):
     """Configuration for response unwrapping.
 
@@ -1105,6 +1136,11 @@ class DocumentConfig(BaseModel):
     export: ExportConfig = Field(
         default_factory=ExportConfig,
         description='Configuration for tabular file export helpers.',
+    )
+
+    auth: AuthConfig = Field(
+        default_factory=AuthConfig,
+        description="Configuration for the spec's security schemes.",
     )
 
     @field_validator('source')
