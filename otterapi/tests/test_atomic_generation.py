@@ -12,6 +12,7 @@ else the user keeps in the output directory.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -67,6 +68,29 @@ def _generate(spec_file: Path, output: Path, **kwargs) -> None:
     Codegen(
         DocumentConfig(source=str(spec_file), output=str(output), **kwargs)
     ).generate()
+
+
+def _base_url_default(output: Path) -> str:
+    """Read the base_url default baked into the generated client's __init__.
+
+    Parsed rather than string-matched: ``ast.unparse`` writes an annotated
+    default as ``base_url: str='...'`` and only a formatter adds the spaces,
+    so asserting on the formatted spelling makes the test depend on whether
+    ruff happens to be on PATH -- which it is not on the Windows runners.
+    """
+    tree = ast.parse((output / '_client.py').read_text(encoding='utf-8'))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != '__init__':
+            continue
+        args = node.args
+        # Defaults align to the tail of the positional arguments.
+        offset = len(args.args) - len(args.defaults)
+        for index, arg in enumerate(args.args):
+            if arg.arg == 'base_url' and index >= offset:
+                default = args.defaults[index - offset]
+                assert isinstance(default, ast.Constant)
+                return str(default.value)
+    raise AssertionError('generated client has no base_url default')
 
 
 class TestFailedGenerationRollsBack:
@@ -150,8 +174,7 @@ class TestBaseUrlOption:
 
         _generate(spec_file, output, base_url='https://example.test/api/v3')
 
-        client_src = (output / '_client.py').read_text(encoding='utf-8')
-        assert "base_url: str = 'https://example.test/api/v3'" in client_src
+        assert _base_url_default(output) == 'https://example.test/api/v3'
 
     def test_cli_flag_overrides_every_document_in_a_config_file(self, tmp_path: Path):
         from otterapi.cli import _resolve_codegen_config
