@@ -1,5 +1,4 @@
-"""
-Endpoint generation module for creating sync and async HTTP request functions.
+"""Endpoint generation module for creating sync and async HTTP request functions.
 
 This module provides utilities for generating Python AST nodes that represent
 HTTP endpoint functions. It supports both synchronous and asynchronous request
@@ -18,13 +17,15 @@ Key Features:
     - Unified EndpointFunctionFactory for consistent endpoint generation
 """
 
+from __future__ import annotations
+
 import ast
 import re
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Self, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from otterapi.codegen.ast_utils import (
     ImportDict,
@@ -34,6 +35,7 @@ from otterapi.codegen.ast_utils import (
     _attr,
     _call,
     _func,
+    _function_def,
     _name,
     _subscript,
     _union_expr,
@@ -41,6 +43,10 @@ from otterapi.codegen.ast_utils import (
 from otterapi.openapi.constants import MediaType
 
 if TYPE_CHECKING:
+    # typing.Self is 3.11+, and otterapi still supports 3.10. Annotations
+    # are deferred above, so the name is only needed by a type checker.
+    from typing import Self
+
     from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type
 
 # String annotations for the optional dataframe-conversion return types
@@ -74,6 +80,7 @@ __all__ = [
     'build_header_params',
     'build_query_params',
     'build_path_params',
+    'build_param_styles',
     'build_body_params',
     'prepare_call_from_parameters',
     'build_default_client_code',
@@ -247,7 +254,7 @@ class FunctionSignatureBuilder:
                 self._imports[module] = set()
             self._imports[module].update(names)
 
-    def add_parameters(self, parameters: list['Parameter'] | None) -> Self:
+    def add_parameters(self, parameters: list[Parameter] | None) -> Self:
         """Add endpoint parameters to the signature.
 
         Separates required parameters into positional args and optional
@@ -296,7 +303,7 @@ class FunctionSignatureBuilder:
 
     def add_request_body(
         self,
-        body: 'RequestBodyInfo | None',
+        body: RequestBodyInfo | None,
     ) -> Self:
         """Add request body parameter to the signature.
 
@@ -433,7 +440,7 @@ class ParameterASTBuilder:
     """
 
     @staticmethod
-    def build_query_params(parameters: list['Parameter']) -> ast.Dict | None:
+    def build_query_params(parameters: list[Parameter]) -> ast.Dict | None:
         """Build a dictionary AST node for query parameters.
 
         Creates an AST Dict node mapping query parameter names to their values.
@@ -455,7 +462,7 @@ class ParameterASTBuilder:
         )
 
     @staticmethod
-    def build_header_params(parameters: list['Parameter']) -> ast.Dict | None:
+    def build_header_params(parameters: list[Parameter]) -> ast.Dict | None:
         """Build a dictionary AST node for header parameters.
 
         Creates an AST Dict node mapping header parameter names to their values.
@@ -477,7 +484,7 @@ class ParameterASTBuilder:
         )
 
     @staticmethod
-    def build_path_expr(path: str, parameters: list['Parameter']) -> ast.expr:
+    def build_path_expr(path: str, parameters: list[Parameter]) -> ast.expr:
         """Build an f-string or constant for the request path.
 
         Replaces OpenAPI path parameters like {petId} with Python f-string
@@ -492,9 +499,7 @@ class ParameterASTBuilder:
             - ast.Constant for static paths without parameters
             - ast.JoinedStr (f-string) for paths with parameter substitution
         """
-        path_params = {
-            p.name: p.name_sanitized for p in parameters if p.location == 'path'
-        }
+        path_params = {p.name: p for p in parameters if p.location == 'path'}
 
         if not path_params:
             return ast.Constant(value=path)
@@ -508,8 +513,38 @@ class ParameterASTBuilder:
                 if part:
                     values.append(ast.Constant(value=part))
             else:
-                sanitized = path_params.get(part, part)
-                values.append(ast.FormattedValue(value=_name(sanitized), conversion=-1))
+                param = path_params.get(part)
+                sanitized = param.name_sanitized if param else part
+                # Interpolating the raw value lets a path parameter containing
+                # '/' or '?' escape its URL segment, and renders enums and
+                # datetimes with str(). format_path_param percent-encodes and
+                # applies the parameter's OpenAPI style.
+                keywords: list[ast.keyword] = []
+                if param is not None and not param.uses_default_style:
+                    keywords.append(
+                        ast.keyword(arg='style', value=ast.Constant(value=param.style))
+                    )
+                    keywords.append(
+                        ast.keyword(
+                            arg='explode', value=ast.Constant(value=param.explode)
+                        )
+                    )
+                    if param.style == 'matrix':
+                        keywords.append(
+                            ast.keyword(
+                                arg='name', value=ast.Constant(value=param.name)
+                            )
+                        )
+                values.append(
+                    ast.FormattedValue(
+                        value=_call(
+                            _name('format_path_param'),
+                            args=[_name(sanitized)],
+                            keywords=keywords,
+                        ),
+                        conversion=-1,
+                    )
+                )
 
         if len(values) == 1 and isinstance(values[0], ast.Constant):
             return values[0]
@@ -517,8 +552,35 @@ class ParameterASTBuilder:
         return ast.JoinedStr(values=values)
 
     @staticmethod
+    def build_param_styles(parameters: list[Parameter]) -> ast.Dict | None:
+        """Build the ``param_styles`` mapping for non-default query parameters.
+
+        Returns ``None`` when every query parameter uses the OpenAPI default
+        (``form``/``explode=true``), so the common case emits no extra keyword.
+        """
+        deviating = [
+            p for p in parameters if p.location == 'query' and not p.uses_default_style
+        ]
+        if not deviating:
+            return None
+
+        return ast.Dict(
+            keys=[ast.Constant(value=p.name) for p in deviating],
+            values=[
+                ast.Tuple(
+                    elts=[
+                        ast.Constant(value=p.style),
+                        ast.Constant(value=p.explode),
+                    ],
+                    ctx=ast.Load(),
+                )
+                for p in deviating
+            ],
+        )
+
+    @staticmethod
     def build_body_expr(
-        body: 'RequestBodyInfo | None',
+        body: RequestBodyInfo | None,
     ) -> tuple[ast.expr | None, str | None]:
         """Build an AST expression for the request body parameter.
 
@@ -536,20 +598,51 @@ class ParameterASTBuilder:
 
         body_name = 'body'
 
-        body_expr: ast.expr
-        if body.is_json and body.type and body.type.type in ('model', 'root'):
-            body_expr = _call(
+        def _dump() -> ast.expr:
+            """``body.model_dump(mode='json', by_alias=True, exclude_unset=True)``.
+
+            The default ``model_dump()`` is Python-mode, so a ``datetime``,
+            ``UUID`` or ``Decimal`` field reaches ``json=`` as a native object
+            and raises ``TypeError``.  ``by_alias`` restores wire names for
+            fields whose spec name is not a Python identifier, and
+            ``exclude_unset`` stops every untouched optional field being sent
+            as an explicit null -- omitted entirely when the document turns
+            that off, so the generated call says what it does.
+            """
+            keywords = [
+                ast.keyword(arg='mode', value=ast.Constant(value='json')),
+                ast.keyword(arg='by_alias', value=ast.Constant(value=True)),
+            ]
+            if body.exclude_unset:
+                keywords.append(
+                    ast.keyword(arg='exclude_unset', value=ast.Constant(value=True))
+                )
+            dump: ast.expr = _call(
                 func=_attr(_name(body_name), 'model_dump'),
                 args=[],
+                keywords=keywords,
             )
+            if body.required:
+                return dump
+            # An optional body defaults to None, and None has no model_dump.
+            return ast.IfExp(
+                test=ast.Compare(
+                    left=_name(body_name),
+                    ops=[ast.IsNot()],
+                    comparators=[ast.Constant(value=None)],
+                ),
+                body=dump,
+                orelse=ast.Constant(value=None),
+            )
+
+        body_expr: ast.expr
+        if body.is_json and body.type and body.type.type in ('model', 'root'):
+            body_expr = _dump()
         elif body.is_multipart:
             body_expr = _name(body_name)
         elif body.is_form:
             if body.type and body.type.type in ('model', 'root'):
-                body_expr = _call(
-                    func=_attr(_name(body_name), 'model_dump'),
-                    args=[],
-                )
+                body_expr = _dump()
             else:
                 body_expr = _name(body_name)
         else:
@@ -559,9 +652,9 @@ class ParameterASTBuilder:
 
     @staticmethod
     def prepare_all_params(
-        parameters: list['Parameter'] | None,
+        parameters: list[Parameter] | None,
         path: str,
-        request_body_info: 'RequestBodyInfo | None' = None,
+        request_body_info: RequestBodyInfo | None = None,
     ) -> tuple[ast.expr | None, ast.expr | None, ast.expr | None, str | None, ast.expr]:
         """Prepare all parameter AST nodes for a request function call.
 
@@ -618,10 +711,10 @@ class EndpointFunctionConfig:
     fn_name: str
     method: str
     path: str
-    parameters: list['Parameter'] | None = None
-    request_body_info: 'RequestBodyInfo | None' = None
-    response_type: 'Type | None' = None
-    response_infos: list['ResponseInfo'] | None = None
+    parameters: list[Parameter] | None = None
+    request_body_info: RequestBodyInfo | None = None
+    response_type: Type | None = None
+    response_infos: list[ResponseInfo] | None = None
     docs: str | None = None
     is_async: bool = False
     mode: EndpointMode = EndpointMode.STANDALONE
@@ -901,8 +994,21 @@ class EndpointFunctionFactory:
             self._merge_imports(self.config.response_type_imports)
 
         if self._is_raw_response_type(self.config.response_type):
-            # Raw types (Response / bytes / str) skip Pydantic parsing.
-            return builder.add_return(_request_call()).build()
+            # Raw types skip Pydantic parsing, but a function annotated
+            # ``-> str`` returning the httpx Response is a lie: the caller gets
+            # an object, not the text it asked for. Pull the body out for the
+            # scalar cases; a genuine ``-> Response`` is returned as-is.
+            attribute = self._raw_response_attribute(self.config.response_type)
+            if attribute is None:
+                return builder.add_return(_request_call()).build()
+            builder.add_method_call_assignment(
+                target_var='response',
+                receiver='c',
+                method=request_method,
+                keywords=request_keywords,
+                is_async=self.config.is_async,
+            )
+            return builder.add_return(_attr('response', attribute)).build()
 
         # JSON response: request, parse, optionally unwrap.
         builder.add_method_call_assignment(
@@ -942,7 +1048,7 @@ class EndpointFunctionFactory:
             return elt.id in ('Response', 'bytes', 'str', 'None')
         return isinstance(elt, ast.Constant) and elt.value is None
 
-    def _is_raw_response_type(self, response_type: 'Type') -> bool:
+    def _is_raw_response_type(self, response_type: Type) -> bool:
         """Check if the response type is a raw type that doesn't need JSON parsing.
 
         Raw types include: Response, bytes, str (for non-JSON content types).
@@ -964,6 +1070,19 @@ class EndpointFunctionFactory:
             return all(self._is_raw_union_element(elt) for elt in ann.slice.elts)
 
         return False
+
+    @staticmethod
+    def _raw_response_attribute(response_type: Type) -> str | None:
+        """Return the ``Response`` attribute that yields *response_type*.
+
+        ``str`` comes from ``.text`` and ``bytes`` from ``.content``.  Returns
+        None for anything else -- including a real ``Response`` return type and
+        unions -- meaning the response object itself is what to hand back.
+        """
+        ann = response_type.annotation_ast
+        if not isinstance(ann, ast.Name):
+            return None
+        return {'str': 'text', 'bytes': 'content'}.get(ann.id)
 
     def _build_unwrap_expression(self, var_name: str, data_path: str) -> ast.expr:
         """Build an expression to extract data from a response.
@@ -1374,17 +1493,21 @@ class EndpointFunctionFactory:
             self.config.path, self.config.parameters or []
         )
 
-        request_call = _call(
-            func=_attr('c', request_method),
-            keywords=[
-                ast.keyword(
-                    arg='method', value=ast.Constant(value=self.config.method.lower())
-                ),
-                ast.keyword(arg='path', value=path_expr),
-                ast.keyword(arg='params', value=params_dict),
-                ast.keyword(arg=None, value=_name('kwargs')),
-            ],
+        page_keywords = [
+            ast.keyword(
+                arg='method', value=ast.Constant(value=self.config.method.lower())
+            ),
+            ast.keyword(arg='path', value=path_expr),
+            ast.keyword(arg='params', value=params_dict),
+        ]
+        param_styles = ParameterASTBuilder.build_param_styles(
+            self.config.parameters or []
         )
+        if param_styles:
+            page_keywords.append(ast.keyword(arg='param_styles', value=param_styles))
+        page_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
+
+        request_call = _call(func=_attr('c', request_method), keywords=page_keywords)
         request_expr: ast.expr = request_call
         if self.config.is_async:
             request_expr = ast.Await(value=request_call)
@@ -1437,13 +1560,11 @@ class EndpointFunctionFactory:
             kwarg=None,
             defaults=[],
         )
-        fn_cls = ast.AsyncFunctionDef if self.config.is_async else ast.FunctionDef
-        return fn_cls(
+        return _function_def(
             name='fetch_page',
             args=fn_args,
             body=fetch_body,
-            decorator_list=[],
-            returns=None,
+            is_async=self.config.is_async,
         )
 
     def _build_extract_lambda(self, path: str | None) -> ast.expr:
@@ -1505,6 +1626,10 @@ class EndpointFunctionFactory:
 
         if query_params:
             request_keywords.append(ast.keyword(arg='params', value=query_params))
+
+        param_styles = ParameterASTBuilder.build_param_styles(parameters)
+        if param_styles:
+            request_keywords.append(ast.keyword(arg='param_styles', value=param_styles))
 
         if header_params:
             request_keywords.append(ast.keyword(arg='headers', value=header_params))
@@ -1857,7 +1982,7 @@ def base_async_request_fn(
 
 
 def get_parameters(
-    parameters: list['Parameter'],
+    parameters: list[Parameter],
 ) -> tuple[list[ast.arg], list[ast.arg], list[ast.expr], ImportDict]:
     """Extract function arguments from OpenAPI parameters.
 
@@ -1903,6 +2028,7 @@ def get_base_call_keywords(
     body_param_name: str | None = None,
     timeout: float | None = None,
     stream: bool = False,
+    param_styles: ast.expr | None = None,
 ) -> list[ast.keyword]:
     """Build the keyword arguments for a request function call.
 
@@ -1915,6 +2041,8 @@ def get_base_call_keywords(
         body_param_name: The httpx parameter name for the body.
         timeout: Optional request timeout in seconds.
         stream: Whether to stream the response.
+        param_styles: AST expression for the non-default ``style``/``explode``
+            mapping, or None when every parameter uses the OpenAPI default.
 
     Returns:
         List of AST keyword nodes for the function call.
@@ -1950,6 +2078,9 @@ def get_base_call_keywords(
     if query_params:
         keywords.append(ast.keyword(arg='params', value=query_params))
 
+    if param_styles:
+        keywords.append(ast.keyword(arg='param_styles', value=param_styles))
+
     if header_params:
         keywords.append(ast.keyword(arg='headers', value=header_params))
 
@@ -1960,7 +2091,7 @@ def get_base_call_keywords(
 
 
 def build_header_params(
-    parameters: list['Parameter'],
+    parameters: list[Parameter],
 ) -> ast.Dict | None:
     """Build a dictionary AST node for header parameters.
 
@@ -1974,7 +2105,7 @@ def build_header_params(
 
 
 def build_query_params(
-    parameters: list['Parameter'],
+    parameters: list[Parameter],
 ) -> ast.Dict | None:
     """Build a dictionary AST node for query parameters.
 
@@ -1987,9 +2118,24 @@ def build_query_params(
     return ParameterASTBuilder.build_query_params(parameters)
 
 
+def build_param_styles(
+    parameters: list[Parameter],
+) -> ast.Dict | None:
+    """Build the ``param_styles`` mapping for non-default query parameters.
+
+    Args:
+        parameters: List of Parameter objects to inspect.
+
+    Returns:
+        An AST Dict node, or None when every query parameter uses the
+        OpenAPI default serialization.
+    """
+    return ParameterASTBuilder.build_param_styles(parameters)
+
+
 def build_path_params(
     path: str,
-    parameters: list['Parameter'],
+    parameters: list[Parameter],
 ) -> ast.expr:
     """Build an f-string or constant for the request path.
 
@@ -2004,7 +2150,7 @@ def build_path_params(
 
 
 def build_body_params(
-    body: 'RequestBodyInfo | None',
+    body: RequestBodyInfo | None,
 ) -> tuple[ast.expr | None, str | None]:
     """Build an AST expression for the request body parameter.
 
@@ -2018,9 +2164,9 @@ def build_body_params(
 
 
 def prepare_call_from_parameters(
-    parameters: list['Parameter'] | None,
+    parameters: list[Parameter] | None,
     path: str,
-    request_body_info: 'RequestBodyInfo | None' = None,
+    request_body_info: RequestBodyInfo | None = None,
 ) -> tuple[ast.expr | None, ast.expr | None, ast.expr | None, str | None, ast.expr]:
     """Prepare all parameter AST nodes for a request function call.
 
@@ -2041,8 +2187,8 @@ def prepare_call_from_parameters(
 
 
 def _build_endpoint_fn_signature(
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
     imports: ImportDict,
 ) -> tuple[list[ast.arg], list[ast.arg], list[ast.expr]]:
     """Build (args, kwonlyargs, kw_defaults) for an endpoint fn, registering imports in place."""
@@ -2077,10 +2223,10 @@ def _build_endpoint_request_call(
     *,
     method: str,
     path: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
-    response_model: 'Type | None',
-    response_infos: list['ResponseInfo'] | None,
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
+    response_model: Type | None,
+    response_infos: list[ResponseInfo] | None,
     base_fn_name: str,
     is_async: bool,
     imports: ImportDict,
@@ -2113,6 +2259,7 @@ def _build_endpoint_request_call(
         body_expr=body_expr,
         body_param_name=body_param_name,
         stream=False,
+        param_styles=ParameterASTBuilder.build_param_styles(parameters or []),
     )
 
     call_args = [
@@ -2129,7 +2276,7 @@ def _build_endpoint_request_call(
 
 
 def _resolve_endpoint_return_type(
-    response_model: 'Type | None', imports: ImportDict
+    response_model: Type | None, imports: ImportDict
 ) -> ast.expr:
     """Resolve the endpoint's return annotation, registering imports in place."""
     if response_model and response_model.annotation_ast is not None:
@@ -2142,12 +2289,12 @@ def _build_endpoint_fn(
     name: str,
     method: str,
     path: str,
-    response_model: 'Type | None',
+    response_model: Type | None,
     is_async: bool,
     docs: str | None = None,
-    parameters: list['Parameter'] | None = None,
-    response_infos: list['ResponseInfo'] | None = None,
-    request_body_info: 'RequestBodyInfo | None' = None,
+    parameters: list[Parameter] | None = None,
+    response_infos: list[ResponseInfo] | None = None,
+    request_body_info: RequestBodyInfo | None = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an endpoint function (sync or async).
 
@@ -2212,11 +2359,11 @@ def request_fn(
     name: str,
     method: str,
     path: str,
-    response_model: 'Type | None',
+    response_model: Type | None,
     docs: str | None = None,
-    parameters: list['Parameter'] | None = None,
-    response_infos: list['ResponseInfo'] | None = None,
-    request_body_info: 'RequestBodyInfo | None' = None,
+    parameters: list[Parameter] | None = None,
+    response_infos: list[ResponseInfo] | None = None,
+    request_body_info: RequestBodyInfo | None = None,
 ) -> tuple[ast.FunctionDef, ImportDict]:
     """Generate a synchronous endpoint function.
 
@@ -2251,11 +2398,11 @@ def async_request_fn(
     name: str,
     method: str,
     path: str,
-    response_model: 'Type | None',
+    response_model: Type | None,
     docs: str | None = None,
-    parameters: list['Parameter'] | None = None,
-    response_infos: list['ResponseInfo'] | None = None,
-    request_body_info: 'RequestBodyInfo | None' = None,
+    parameters: list[Parameter] | None = None,
+    response_infos: list[ResponseInfo] | None = None,
+    request_body_info: RequestBodyInfo | None = None,
 ) -> tuple[ast.AsyncFunctionDef, ImportDict]:
     """Generate an asynchronous endpoint function.
 
@@ -2316,10 +2463,10 @@ def build_standalone_endpoint_fn(
     fn_name: str,
     method: str,
     path: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
-    response_type: 'Type | None',
-    response_infos: list['ResponseInfo'] | None = None,
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
+    response_type: Type | None,
+    response_infos: list[ResponseInfo] | None = None,
     docs: str | None = None,
     is_async: bool = False,
     unwrap_data_path: str | None = None,
@@ -2371,9 +2518,9 @@ def build_standalone_endpoint_fn(
 def build_delegating_endpoint_fn(
     fn_name: str,
     client_method_name: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
-    response_type: 'Type | None',
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
+    response_type: Type | None,
     docs: str | None = None,
     is_async: bool = False,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
@@ -2412,8 +2559,8 @@ def build_standalone_dataframe_fn(
     fn_name: str,
     method: str,
     path: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
     library: Literal['pandas', 'polars'],
     default_path: str | None = None,
     docs: str | None = None,
@@ -2460,9 +2607,9 @@ def build_standalone_paginated_dataframe_fn(
     fn_name: str,
     method: str,
     path: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
-    response_type: 'Type | None',
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
+    response_type: Type | None,
     pagination_style: str,
     pagination_config: dict,
     library: Literal['pandas', 'polars'],
@@ -2520,8 +2667,8 @@ def build_standalone_paginated_dataframe_fn(
 def build_delegating_dataframe_fn(
     fn_name: str,
     client_method_name: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
     library: Literal['pandas', 'polars'],
     default_path: str | None = None,
     docs: str | None = None,
@@ -2568,9 +2715,9 @@ def build_standalone_paginated_fn(
     fn_name: str,
     method: str,
     path: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
-    response_type: 'Type | None',
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
+    response_type: Type | None,
     pagination_style: str,
     pagination_config: dict,
     item_type_ast: ast.expr | None = None,
@@ -2622,9 +2769,9 @@ def build_standalone_paginated_iter_fn(
     fn_name: str,
     method: str,
     path: str,
-    parameters: list['Parameter'] | None,
-    request_body_info: 'RequestBodyInfo | None',
-    response_type: 'Type | None',
+    parameters: list[Parameter] | None,
+    request_body_info: RequestBodyInfo | None,
+    response_type: Type | None,
     pagination_style: str,
     pagination_config: dict,
     item_type_ast: ast.expr | None = None,

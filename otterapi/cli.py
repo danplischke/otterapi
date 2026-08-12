@@ -142,11 +142,21 @@ def setup_logging(verbose: bool = False, debug: bool = False) -> None:
 
 
 def _resolve_codegen_config(
-    config: str | None, source: str | None, output: str | None
+    config: str | None,
+    source: str | None,
+    output: str | None,
+    base_url: str | None = None,
 ) -> CodegenConfig:
-    """Build a CodegenConfig from --source/--output or a config file."""
+    """Build a CodegenConfig from --source/--output or a config file.
+
+    ``--base-url`` applies either way: with a config file it overrides the
+    base URL of every document, which is what makes a spec whose servers are
+    relative usable without editing the file.
+    """
     if source and output:
-        return CodegenConfig(documents=[DocumentConfig(source=source, output=output)])
+        return CodegenConfig(
+            documents=[DocumentConfig(source=source, output=output, base_url=base_url)]
+        )
 
     if source or output:
         error_console.print(
@@ -155,7 +165,7 @@ def _resolve_codegen_config(
         raise typer.Exit(1)
 
     try:
-        return get_config(config)
+        resolved = get_config(config)
     except FileNotFoundError as e:
         error_console.print(f'[red]Error:[/red] {e}')
         error_console.print(
@@ -165,6 +175,11 @@ def _resolve_codegen_config(
             '[dim]or use [bold]--source[/bold] and [bold]--output[/bold] options.[/dim]'
         )
         raise typer.Exit(1)
+
+    if base_url:
+        for document in resolved.documents:
+            document.base_url = base_url
+    return resolved
 
 
 def _generate_document(
@@ -224,6 +239,17 @@ def generate(
         str | None,
         typer.Option('--output', '-o', help='Output directory for generated code'),
     ] = None,
+    base_url: Annotated[
+        str | None,
+        typer.Option(
+            '--base-url',
+            '-b',
+            help=(
+                'Override the base URL from the spec. Required when a '
+                'file-loaded spec only declares relative server URLs'
+            ),
+        ),
+    ] = None,
     verbose: Annotated[
         bool, typer.Option('--verbose', '-v', help='Enable verbose output')
     ] = False,
@@ -251,11 +277,12 @@ def generate(
         otter generate --source https://api.example.com/openapi.json --output ./client
         otter generate -s ./api.yaml -o ./generated
         otter generate -s ./api.yaml -o ./generated --lenient
+        otter generate -s ./api.yaml -o ./gen -b https://api.example.com
     """
     setup_logging(verbose, debug)
 
     try:
-        codegen_config = _resolve_codegen_config(config, source, output)
+        codegen_config = _resolve_codegen_config(config, source, output, base_url)
 
         for document_config in codegen_config.documents:
             _generate_document(

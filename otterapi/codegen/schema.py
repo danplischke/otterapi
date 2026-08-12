@@ -335,8 +335,10 @@ class SchemaLoader:
     def _format_validation_errors(
         self, error: ValidationError, limit: int = 15
     ) -> list[str]:
-        """Render a pydantic ``ValidationError`` into concise, de-duplicated
-        messages, grouping identical problems that repeat across the document.
+        """Render a pydantic ``ValidationError`` into concise messages.
+
+        Identical problems that repeat across the document are grouped, so a
+        spec with one mistake in fifty places reports it once.
         """
         grouped: dict[str, str] = {}
         for err in error.errors():
@@ -553,11 +555,11 @@ class SchemaResolver:
 
         return cast(Schema, schemas[schema_name]), self._sanitize_name(schema_name)
 
-    def get_all_schemas(self) -> dict[str, Schema]:
+    def get_all_schemas(self) -> dict[str, Schema | Reference]:
         """Get all schemas defined in the components/schemas section.
 
         Returns:
-            Dictionary mapping schema names to Schema objects.
+            Dictionary mapping schema names to Schema (or Reference) objects.
             Returns an empty dict if no schemas are defined.
         """
         if not self.openapi.components or not self.openapi.components.schemas:

@@ -25,7 +25,6 @@ from otterapi.codegen._pep695 import modernize_type_params
 from otterapi.config import (
     DataFrameConfig,
     DocumentConfig,
-    ExportConfig,
     PaginationConfig,
 )
 
@@ -157,8 +156,11 @@ class TestModernizeTypeParams:
 
 
 class TestModernizeBailsOut:
-    """Emitting the legacy form costs a lint warning; emitting broken code
-    costs the user their client.  Anything unclear is left untouched."""
+    """Anything the rewrite does not fully understand is left untouched.
+
+    Emitting the legacy form costs a lint warning; emitting broken code
+    costs the user their client.
+    """
 
     def test_module_without_typevars(self):
         source = 'def plain(x: int) -> int:\n    return x\n'
@@ -258,19 +260,16 @@ class TestRuntimeModulesEmission:
         assert "T = TypeVar('T')" in pagination
 
     def test_typevar_free_modules_are_untouched(self, tmp_path: Path):
+        """A module with no TypeVar and no TypeAlias comes through verbatim."""
         doc = _doc(
             target_python='3.12',
             dataframe=DataFrameConfig(enabled=True, pandas=True),
-            export=ExportConfig(enabled=True),
         )
         emitted = Path(DataFrameFeature().write(tmp_path, doc)).read_text('utf-8')
         baseline = DataFrameFeature().transform_content(
             DataFrameFeature().module_content, doc
         )
         assert emitted == baseline
-
-        export = Path(ExportFeature().write(tmp_path, doc)).read_text('utf-8')
-        assert export == ExportFeature().module_content
 
     @pytest.mark.skipif(
         sys.version_info < (3, 12),
@@ -284,12 +283,37 @@ class TestRuntimeModulesEmission:
 
 
 class TestExportTypeAliases:
-    """``Row``/``PathLike`` stay implicit aliases: the explicit ``TypeAlias``
-    annotation asks downstream linters for PEP 695's ``type`` keyword (UP040),
-    which generated code cannot use while it supports 3.10/3.11."""
+    """``Row``/``PathLike`` carry explicit ``TypeAlias`` annotations.
 
-    def test_no_typealias_annotation(self):
-        source = ExportFeature().module_content
+    Without them a checker reads the two as plain module variables, and every
+    signature in ``_export.py`` that mentions them fails with "Variable ... is
+    not valid as a type" -- in the user's project as well as ours.  The UP040
+    warning that the implicit form was avoiding is handled by rewriting the
+    aliases to PEP 695 syntax for 3.12+ targets instead.
+    """
+
+    def test_pre_695_target_keeps_the_typealias_form(self, tmp_path: Path):
+        source = Path(
+            ExportFeature().write(tmp_path, _doc(target_python='3.11'))
+        ).read_text('utf-8')
+        assert 'Row: TypeAlias = BaseModel | dict' in source
+        assert 'PathLike: TypeAlias = str | Path | UPath' in source
+
+    def test_modern_target_uses_the_type_keyword(self, tmp_path: Path):
+        source = Path(
+            ExportFeature().write(tmp_path, _doc(target_python='3.12'))
+        ).read_text('utf-8')
+        assert 'type Row = BaseModel | dict' in source
+        assert 'type PathLike = str | Path | UPath' in source
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 12),
+        reason='PEP 695 syntax needs a 3.12+ parser to check',
+    )
+    def test_modern_target_drops_the_now_dead_import(self, tmp_path: Path):
+        source = Path(
+            ExportFeature().write(tmp_path, _doc(target_python='3.12'))
+        ).read_text('utf-8')
         tree = ast.parse(source)
         imported = {
             alias.name
@@ -297,7 +321,4 @@ class TestExportTypeAliases:
             if isinstance(node, ast.ImportFrom)
             for alias in node.names
         }
-        referenced = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        assert 'TypeAlias' not in imported | referenced
-        assert 'Row = BaseModel | dict' in source
-        assert 'PathLike = str | Path | UPath' in source
+        assert 'TypeAlias' not in imported

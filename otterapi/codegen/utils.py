@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlparse
 
 from upath import UPath
@@ -326,7 +327,11 @@ class OpenAPIProcessor:
                     f"Referenced schema '{schema_name}' not found in components.schemas"
                 )
 
-            return schemas[schema_name], sanitize_identifier(schema_name)
+            # components.schemas is dict[str, Schema | Reference]; a chained
+            # $ref is out of scope for this resolver, which resolves one hop.
+            return cast('Schema', schemas[schema_name]), sanitize_identifier(
+                schema_name
+            )
         return reference, sanitize_identifier(reference.title) if hasattr(
             reference, 'title'
         ) and reference.title else None

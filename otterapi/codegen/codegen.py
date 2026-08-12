@@ -20,9 +20,12 @@ from otterapi.codegen.ast_utils import (
     ImportCollector,
     _all,
     _assign,
+    _class_def,
     _name,
     _union_expr,
+    strip_optional,
 )
+from otterapi.codegen.auth import AuthScheme, collect_auth_schemes
 from otterapi.codegen.client import (
     _exported_error_names,
     generate_api_error_hierarchy,
@@ -75,6 +78,88 @@ def _load_models_mixin_source() -> str:
         .joinpath('_models_mixin.py')
         .read_text('utf-8')
     )
+
+
+#: Default ``style`` per parameter location, per the OpenAPI specification.
+_DEFAULT_PARAM_STYLE = {
+    'query': 'form',
+    'cookie': 'form',
+    'path': 'simple',
+    'header': 'simple',
+}
+
+
+def _resolve_param_serialization(param: OpenAPIParameter) -> tuple[str, bool]:
+    """Resolve a parameter's ``(style, explode)`` against the spec defaults.
+
+    ``explode`` defaults to ``True`` for ``form`` and ``False`` for every other
+    style, so it cannot be defaulted without first knowing the style.
+    """
+    style = getattr(param, 'style', None) or _DEFAULT_PARAM_STYLE.get(param.in_, 'form')
+    explode = getattr(param, 'explode', None)
+    if explode is None:
+        explode = style == 'form'
+    return style, bool(explode)
+
+
+def _snapshot_directory(directory: UPath) -> dict[str, bytes]:
+    """Read every file under *directory* into memory, keyed by relative path.
+
+    Generated packages are a handful of Python source files, so holding them
+    in memory costs less than the temp-directory bookkeeping the alternative
+    would need -- and it works the same for a remote ``UPath``.
+    """
+    snapshot: dict[str, bytes] = {}
+    for path in directory.rglob('*'):
+        if path.is_file():
+            snapshot[str(path.relative_to(directory))] = path.read_bytes()
+    return snapshot
+
+
+def _restore_directory(
+    directory: UPath, snapshot: dict[str, bytes] | None, *, existed: bool
+) -> None:
+    """Put *directory* back the way it was before generation started.
+
+    Best-effort: a failure here must not mask the generation error that
+    triggered the rollback, so cleanup problems are logged rather than raised.
+    """
+    try:
+        if not existed:
+            if directory.exists():
+                _remove_tree(directory)
+            return
+
+        for path in list(directory.rglob('*')):
+            if path.is_file():
+                path.unlink()
+        for path in sorted(
+            (p for p in directory.rglob('*') if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            path.rmdir()
+
+        for relative, content in (snapshot or {}).items():
+            target = directory / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+    except OSError as exc:  # pragma: no cover - depends on filesystem state
+        logger.warning(
+            'Could not fully roll back %s after a failed generation: %s',
+            directory,
+            exc,
+        )
+
+
+def _remove_tree(directory: UPath) -> None:
+    """Delete *directory* and everything under it."""
+    for path in sorted(directory.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        if path.is_file():
+            path.unlink()
+        else:
+            path.rmdir()
+    directory.rmdir()
 
 
 def _topo_sort_by_base_classes(
@@ -465,12 +550,29 @@ class Codegen(OpenAPIProcessor):
 
         return all_params
 
+    def _auth_schemes(self) -> list[AuthScheme]:
+        """Security schemes to wire into the generated client.
+
+        Returns an empty list when the feature is switched off or the document
+        declares no supported scheme, in which case no credential parameters
+        and no ``_apply_auth`` method are emitted.
+        """
+        if not self.config.auth.enabled or self.openapi is None:
+            return []
+        return collect_auth_schemes(
+            self._adapter,
+            self.config.auth.env_prefix,
+            self.config.auth.env_vars,
+        )
+
     def _build_parameter(self, param: OpenAPIParameter) -> Parameter:
         """Build a Parameter from a resolved OpenAPI parameter object."""
         param_type = None
         if param.schema_:
             assert self.typegen is not None
             param_type = self.typegen.schema_to_type(param.schema_)
+
+        style, explode = _resolve_param_serialization(param)
 
         return Parameter(
             name=param.name,
@@ -481,6 +583,8 @@ class Codegen(OpenAPIProcessor):
             required=param.required or False,
             type=param_type,
             description=param.description,
+            style=style,
+            explode=explode,
         )
 
     def _resolve_parameter_reference(
@@ -614,6 +718,7 @@ class Codegen(OpenAPIProcessor):
             type=body_type,
             required=body.required or False,
             description=body.description,
+            exclude_unset=self.config.request_body.exclude_unset,
         )
 
     def _get_param_model(
@@ -1431,6 +1536,9 @@ class Codegen(OpenAPIProcessor):
         )
 
         import_collector.add_imports({'.client': {'Client'}})
+        # Registered optimistically: pruned away for modules with no path
+        # parameters (see write_mod's import pruning).
+        import_collector.add_imports({'._serialization': {'format_path_param'}})
 
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
@@ -1485,14 +1593,14 @@ class Codegen(OpenAPIProcessor):
         )
         if has_model_base:
             return impl
-        return ast.ClassDef(
+        return _class_def(
             name=impl.name,
             bases=[
                 ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
                 *impl.bases,
             ],
-            keywords=impl.keywords,
             body=impl.body,
+            keywords=impl.keywords,
             decorator_list=impl.decorator_list,
         )
 
@@ -1624,6 +1732,17 @@ class Codegen(OpenAPIProcessor):
         )
 
     def generate(self):
+        """Generate the client, leaving the output directory untouched on failure.
+
+        Generation writes many files and can fail partway through -- an
+        unresolvable relative server URL, a schema the type generator rejects,
+        a validation error on an emitted module. Without the rollback below,
+        the user is left with a half-written package that imports but is
+        wrong, which is worse than no package at all.
+
+        Returns:
+            The list of generated file paths, relative to the output directory.
+        """
         self._load_schema()
 
         if self.openapi is None:
@@ -1635,6 +1754,20 @@ class Codegen(OpenAPIProcessor):
             raise ValueError('OpenAPI spec has no paths to generate endpoints from')
 
         directory = UPath(self.config.output)
+        existed = directory.exists()
+        # Snapshot rather than generate-then-swap: client.py is deliberately
+        # preserved across runs, as is anything else the user keeps in the
+        # output directory, and a swap would discard both.
+        snapshot = _snapshot_directory(directory) if existed else None
+
+        try:
+            return self._generate_into(directory)
+        except BaseException:
+            _restore_directory(directory, snapshot, existed=existed)
+            raise
+
+    def _generate_into(self, directory: UPath):
+        """Write every generated file into *directory*."""
         directory.mkdir(parents=True, exist_ok=True)
 
         if not os.access(str(directory), os.W_OK):
@@ -1884,7 +2017,9 @@ class Codegen(OpenAPIProcessor):
         output_name = self.config.output
         generated_files = []
         for module in emitted:
-            rel_path = str(module.path.relative_to(directory))
+            # Both sides may be UPath; PurePath.relative_to's overloads only
+            # cover str / os.PathLike, which UPath satisfies at runtime.
+            rel_path = str(module.path.relative_to(str(directory)))
             generated_files.append(f'{output_name}/{rel_path}')
 
         # Add __init__.py files
@@ -1943,6 +2078,7 @@ class Codegen(OpenAPIProcessor):
             default_base_url=base_url,
             default_timeout=30.0,
             pydantic_version=self.config.pydantic_version,
+            auth_schemes=self._auth_schemes(),
         )
 
         # Build the _client.py file
@@ -2078,7 +2214,12 @@ class Codegen(OpenAPIProcessor):
     def _extract_list_item_type(
         self, type_ast: ast.expr | None
     ) -> tuple[ast.expr | None, dict[str, set[str]]]:
-        """Extract the item type AST and imports if ``type_ast`` is ``list[X]``."""
+        """Extract the item type AST and imports if ``type_ast`` is ``list[X]``.
+
+        Looks through an optional wrapper, so an envelope field declared
+        ``list[Thing] | None`` still yields ``Thing``.
+        """
+        type_ast = strip_optional(type_ast)
         if (
             isinstance(type_ast, ast.Subscript)
             and isinstance(type_ast.value, ast.Name)

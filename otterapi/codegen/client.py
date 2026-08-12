@@ -10,13 +10,22 @@ from importlib.resources import files
 
 from otterapi.codegen.ast_utils import (
     ImportDict,
+    _ann_assign,
     _argument,
     _assign,
     _attr,
     _call,
+    _class_def,
+    _function_def,
     _name,
     _subscript,
     _union_expr,
+)
+from otterapi.codegen.auth import (
+    AuthScheme,
+    build_apply_auth_method,
+    build_auth_init_args,
+    build_auth_init_body,
 )
 
 # Prefix used when building `f'HTTP {status_code} ...'` error messages in generated code
@@ -51,7 +60,7 @@ def generate_api_error_class() -> ast.ClassDef:
         ),
     ]
 
-    init_method = ast.FunctionDef(
+    init_method = _function_def(
         name='__init__',
         args=ast.arguments(
             posonlyargs=[],
@@ -77,7 +86,6 @@ def generate_api_error_class() -> ast.ClassDef:
             defaults=[],
         ),
         body=init_body,
-        decorator_list=[],
         returns=ast.Constant(value=None),
     )
 
@@ -379,7 +387,7 @@ def generate_api_error_class() -> ast.ClassDef:
         ),
     ]
 
-    from_response_method = ast.FunctionDef(
+    from_response_method = _function_def(
         name='from_response',
         args=ast.arguments(
             posonlyargs=[],
@@ -398,7 +406,7 @@ def generate_api_error_class() -> ast.ClassDef:
     )
 
     # Build __str__ method
-    str_method = ast.FunctionDef(
+    str_method = _function_def(
         name='__str__',
         args=ast.arguments(
             posonlyargs=[],
@@ -417,12 +425,11 @@ def generate_api_error_class() -> ast.ClassDef:
                 )
             ),
         ],
-        decorator_list=[],
         returns=_name('str'),
     )
 
     # Build __repr__ method
-    repr_method = ast.FunctionDef(
+    repr_method = _function_def(
         name='__repr__',
         args=ast.arguments(
             posonlyargs=[],
@@ -449,7 +456,6 @@ def generate_api_error_class() -> ast.ClassDef:
                 )
             ),
         ],
-        decorator_list=[],
         returns=_name('str'),
     )
 
@@ -470,12 +476,10 @@ Attributes:
         )
     )
 
-    class_def = ast.ClassDef(
+    class_def = _class_def(
         name='BaseAPIError',
         bases=[_name('Exception')],
-        keywords=[],
         body=[docstring, init_method, from_response_method, str_method, repr_method],
-        decorator_list=[],
     )
 
     return class_def
@@ -635,6 +639,7 @@ def generate_base_client_class(
     default_base_url: str,
     default_timeout: float = 30.0,
     pydantic_version: int = 2,
+    auth_schemes: list[AuthScheme] | None = None,
 ) -> tuple[ast.ClassDef, ImportDict]:
     """Generate a BaseClient class with only request infrastructure.
 
@@ -647,10 +652,13 @@ def generate_base_client_class(
         default_timeout: Default request timeout in seconds.
         pydantic_version: Target Pydantic version (1 or 2).  Affects which
             response-unwrapping pattern is emitted in ``_parse_response``.
+        auth_schemes: Security schemes from the document, exposed as
+            keyword-only constructor parameters and applied by ``_apply_auth``.
 
     Returns:
         Tuple of (class AST node, required imports).
     """
+    auth_schemes = auth_schemes or []
     if pydantic_version == 1:
         imports: ImportDict = {
             'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
@@ -658,6 +666,7 @@ def generate_base_client_class(
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+            '._serialization': {'serialize_headers', 'serialize_query_params'},
         }
     else:
         imports = {
@@ -666,10 +675,17 @@ def generate_base_client_class(
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter', 'RootModel'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+            '._serialization': {'serialize_headers', 'serialize_query_params'},
         }
 
     # Build __init__ method
-    init_method = _build_init_method(default_base_url, default_timeout)
+    init_method = _build_init_method(default_base_url, default_timeout, auth_schemes)
+
+    # Build _apply_auth method (None when the document declares no schemes)
+    apply_auth_method, auth_imports = build_apply_auth_method(auth_schemes)
+    _, auth_init_imports = build_auth_init_body(auth_schemes)
+    _merge_imports(imports, auth_imports)
+    _merge_imports(imports, auth_init_imports)
 
     # Build lifecycle methods
     lifecycle_methods = _build_lifecycle_methods()
@@ -681,10 +697,14 @@ def generate_base_client_class(
     async_before_request_method = _build_async_before_request_method()
 
     # Build _request method (sync)
-    request_method = _build_request_method(is_async=False)
+    request_method = _build_request_method(
+        is_async=False, has_auth=apply_auth_method is not None
+    )
 
     # Build _request_async method (async)
-    async_request_method = _build_request_method(is_async=True)
+    async_request_method = _build_request_method(
+        is_async=True, has_auth=apply_auth_method is not None
+    )
 
     # Build _request_json method (sync) - request + json parsing
     request_json_method = _build_request_json_method(is_async=False)
@@ -731,6 +751,7 @@ Args:
         ),
         init_method,
         *lifecycle_methods,
+        *([apply_auth_method] if apply_auth_method else []),
         before_request_method,
         async_before_request_method,
         request_method,
@@ -742,21 +763,25 @@ Args:
         async_parse_response_method,
     ]
 
-    class_def = ast.ClassDef(
-        name=class_name,
-        bases=[],
-        keywords=[],
-        body=class_body,
-        decorator_list=[],
-    )
+    class_def = _class_def(name=class_name, bases=[], body=class_body)
 
     return class_def, imports
 
 
 def _build_init_method(
-    default_base_url: str, default_timeout: float
+    default_base_url: str,
+    default_timeout: float,
+    auth_schemes: list[AuthScheme] | None = None,
 ) -> ast.FunctionDef:
-    """Build the __init__ method for the client class."""
+    """Build the __init__ method for the client class.
+
+    Args:
+        default_base_url: Default base URL baked into the signature.
+        default_timeout: Default request timeout in seconds.
+        auth_schemes: Security schemes to expose as keyword-only credential
+            parameters, or None for an API that declares none.
+    """
+    auth_schemes = auth_schemes or []
     # frozenset({429, 500, 502, 503, 504}) literal
     default_retry_statuses = ast.Call(
         func=_name('frozenset'),
@@ -815,7 +840,11 @@ def _build_init_method(
         _assign(_attr('self', '_async_client'), _name('async_http_client')),
     ]
 
-    return ast.FunctionDef(
+    auth_args, auth_defaults = build_auth_init_args(auth_schemes)
+    auth_body, _ = build_auth_init_body(auth_schemes)
+    init_body.extend(auth_body)
+
+    return _function_def(
         name='__init__',
         args=ast.arguments(
             posonlyargs=[],
@@ -849,8 +878,10 @@ def _build_init_method(
                 ),
                 _argument('backoff_factor', _name('float')),
             ],
-            kwonlyargs=[],
-            kw_defaults=[],
+            # Credentials are keyword-only: they are optional, and positional
+            # order would be dictated by the spec's scheme names.
+            kwonlyargs=auth_args,
+            kw_defaults=auth_defaults,
             kwarg=None,
             defaults=[
                 ast.Constant(value=default_base_url),
@@ -864,7 +895,6 @@ def _build_init_method(
             ],
         ),
         body=init_body,
-        decorator_list=[],
         returns=ast.Constant(value=None),
     )
 
@@ -906,8 +936,7 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
     def _simple_method(
         name: str, body: list[ast.stmt], is_async: bool = False
     ) -> ast.stmt:
-        cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
-        return cls(
+        return _function_def(
             name=name,
             args=ast.arguments(
                 posonlyargs=[],
@@ -918,8 +947,8 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
                 defaults=[],
             ),
             body=body,
-            decorator_list=[],
             returns=ast.Constant(value=None),
+            is_async=is_async,
         )
 
     def _ctx_method(
@@ -928,9 +957,8 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
         extra_args: list | None = None,
         is_async: bool = False,
     ) -> ast.FunctionDef | ast.AsyncFunctionDef:
-        cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
         args_list = [_argument('self')] + (extra_args or [])
-        return cls(
+        return _function_def(
             name=name,
             args=ast.arguments(
                 posonlyargs=[],
@@ -941,8 +969,8 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
                 defaults=[],
             ),
             body=body,
-            decorator_list=[],
             returns=ast.Constant(value=None),
+            is_async=is_async,
         )
 
     # close(self): if self._owns_sync_client: self._sync_client.close()
@@ -1067,11 +1095,10 @@ def _build_validate_response_method() -> ast.FunctionDef:
         ast.Pass(),
     ]
 
-    return ast.FunctionDef(
+    return _function_def(
         name='_validate_response',
         args=args,
         body=body,
-        decorator_list=[],
         returns=ast.Constant(value=None),
     )
 
@@ -1129,12 +1156,8 @@ def _build_before_request_method() -> ast.FunctionDef:
         ast.Return(value=_name('request')),
     ]
 
-    return ast.FunctionDef(
-        name='_before_request',
-        args=args,
-        body=body,
-        decorator_list=[],
-        returns=_name('dict'),
+    return _function_def(
+        name='_before_request', args=args, body=body, returns=_name('dict')
     )
 
 
@@ -1198,12 +1221,12 @@ def _build_async_before_request_method() -> ast.AsyncFunctionDef:
         ),
     ]
 
-    return ast.AsyncFunctionDef(
+    return _function_def(
         name='_async_before_request',
         args=args,
         body=body,
-        decorator_list=[],
         returns=_name('dict'),
+        is_async=True,
     )
 
 
@@ -1249,9 +1272,14 @@ def _build_parse_response_method(
             _name('data'),
             _call(func=_attr('response', 'json')),
         ),
-        # validated = TypeAdapter(response_type).validate_python(data)
-        _assign(
+        # validated: Any = TypeAdapter(response_type).validate_python(data)
+        #
+        # Annotated because ``response_type`` is only known at runtime, so
+        # pydantic's mypy plugin cannot infer what the adapter produces and
+        # asks the user's own type-check for an annotation here.
+        _ann_assign(
             _name('validated'),
+            _name('Any'),
             _call(
                 func=_attr(
                     _call(
@@ -1302,20 +1330,12 @@ def _build_parse_response_method(
     ]
 
     if is_async:
-        return ast.AsyncFunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any'), is_async=True
         )
     else:
-        return ast.FunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any')
         )
 
 
@@ -1348,6 +1368,9 @@ def _build_request_json_method(
             _argument(
                 'timeout', _union_expr([_name('float'), ast.Constant(value=None)])
             ),
+            _argument(
+                'param_styles', _union_expr([_name('dict'), ast.Constant(value=None)])
+            ),
         ],
         kw_defaults=[
             ast.Constant(value=None),  # params
@@ -1357,6 +1380,7 @@ def _build_request_json_method(
             ast.Constant(value=None),  # files
             ast.Constant(value=None),  # content
             ast.Constant(value=None),  # timeout
+            ast.Constant(value=None),  # param_styles
         ],
         kwarg=None,
         defaults=[],
@@ -1374,6 +1398,7 @@ def _build_request_json_method(
             ast.keyword(arg='files', value=_name('files')),
             ast.keyword(arg='content', value=_name('content')),
             ast.keyword(arg='timeout', value=_name('timeout')),
+            ast.keyword(arg='param_styles', value=_name('param_styles')),
         ],
     )
 
@@ -1388,25 +1413,24 @@ def _build_request_json_method(
     ]
 
     if is_async:
-        return ast.AsyncFunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any'), is_async=True
         )
     else:
-        return ast.FunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any')
         )
 
 
-def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunctionDef:
-    """Build the internal _request or _request_async method."""
+def _build_request_method(
+    is_async: bool, has_auth: bool = False
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Build the internal _request or _request_async method.
+
+    Args:
+        is_async: Whether to build the async variant.
+        has_auth: Whether the client has an ``_apply_auth`` method to call.
+    """
     method_name = '_request_async' if is_async else '_request'
 
     args = ast.arguments(
@@ -1428,6 +1452,9 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
             _argument(
                 'timeout', _union_expr([_name('float'), ast.Constant(value=None)])
             ),
+            _argument(
+                'param_styles', _union_expr([_name('dict'), ast.Constant(value=None)])
+            ),
         ],
         kw_defaults=[
             ast.Constant(value=None),  # params
@@ -1437,6 +1464,7 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
             ast.Constant(value=None),  # files
             ast.Constant(value=None),  # content
             ast.Constant(value=None),  # timeout
+            ast.Constant(value=None),  # param_styles
         ],
         kwarg=None,
         defaults=[],
@@ -1474,62 +1502,71 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
     )
 
     if is_async:
-        body = _build_async_request_body(url_expr, merged_headers, timeout_expr)
-        return ast.AsyncFunctionDef(
+        body = _build_async_request_body(
+            url_expr, merged_headers, timeout_expr, has_auth=has_auth
+        )
+        return _function_def(
             name=method_name,
             args=args,
             body=body,
-            decorator_list=[],
             returns=_name('Response'),
+            is_async=True,
         )
     else:
-        body = _build_sync_request_body(url_expr, merged_headers, timeout_expr)
-        return ast.FunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Response'),
+        body = _build_sync_request_body(
+            url_expr, merged_headers, timeout_expr, has_auth=has_auth
+        )
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Response')
         )
 
 
-def _build_filtered_params_expr() -> ast.expr:
-    """Build expression to filter None values from params dict.
+def _build_apply_auth_call(has_auth: bool) -> list[ast.stmt]:
+    """Build ``self._apply_auth(request)``, or nothing when there is no auth.
 
-    Generates: {k: v for k, v in params.items() if v is not None} if params else None
+    Runs before ``_before_request`` so a user hook can still override or
+    refresh the credential the generated method just set.
     """
-    # Build the dict comprehension: {k: v for k, v in params.items() if v is not None}
-    dict_comp = ast.DictComp(
-        key=_name('k'),
-        value=_name('v'),
-        generators=[
-            ast.comprehension(
-                target=ast.Tuple(
-                    elts=[
-                        ast.Name(id='k', ctx=ast.Store()),
-                        ast.Name(id='v', ctx=ast.Store()),
-                    ],
-                    ctx=ast.Store(),
-                ),
-                iter=_call(_attr('params', 'items')),
-                ifs=[
-                    ast.Compare(
-                        left=_name('v'),
-                        ops=[ast.IsNot()],
-                        comparators=[ast.Constant(value=None)],
-                    )
-                ],
-                is_async=0,
-            )
-        ],
-    )
+    if not has_auth:
+        return []
+    return [ast.Expr(_call(_attr('self', '_apply_auth'), args=[_name('request')]))]
 
-    # Build the conditional: dict_comp if params else None
-    return ast.IfExp(
-        test=_name('params'),
-        body=dict_comp,
-        orelse=ast.Constant(value=None),
-    )
+
+def _build_wire_format_stmts() -> list[ast.stmt]:
+    """Build the statements that render ``request`` into its wire form.
+
+    Generates::
+
+        request['params'] = serialize_query_params(request.get('params'), param_styles)
+        request['headers'] = serialize_headers(request.get('headers'))
+
+    These run *after* ``_before_request`` so the hook still sees (and can
+    mutate) plain dicts, while anything it adds is serialized too.
+    """
+
+    def _request_item(key: str) -> ast.expr:
+        return ast.Subscript(
+            value=_name('request'),
+            slice=ast.Constant(value=key),
+            ctx=ast.Store(),
+        )
+
+    def _request_get(key: str) -> ast.expr:
+        return _call(_attr('request', 'get'), args=[ast.Constant(value=key)])
+
+    return [
+        _assign(
+            _request_item('params'),
+            _call(
+                _name('serialize_query_params'),
+                args=[_request_get('params'), _name('param_styles')],
+            ),
+        ),
+        _assign(
+            _request_item('headers'),
+            _call(_name('serialize_headers'), args=[_request_get('headers')]),
+        ),
+    ]
 
 
 def _build_request_dict(
@@ -1555,7 +1592,7 @@ def _build_request_dict(
         values=[
             _name('method'),
             url_expr,
-            _name('filtered_params'),
+            _name('params'),
             merged_headers,
             _name('json'),
             _name('data'),
@@ -1684,13 +1721,12 @@ def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandl
 
 
 def _build_sync_request_body(
-    url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
+    url_expr: ast.expr,
+    merged_headers: ast.expr,
+    timeout_expr: ast.expr,
+    has_auth: bool = False,
 ) -> list[ast.stmt]:
     """Build the body for sync _request method with retry loop."""
-    filtered_params_stmt = _assign(
-        _name('filtered_params'), _build_filtered_params_expr()
-    )
-
     request_dict_stmt = _assign(
         _name('request'), _build_request_dict(url_expr, merged_headers, timeout_expr)
     )
@@ -1706,7 +1742,9 @@ def _build_sync_request_body(
 
     try_body = [
         request_dict_stmt,
+        *_build_apply_auth_call(has_auth),
         before_request_stmt,
+        *_build_wire_format_stmts(),
         request_stmt,
         _build_retry_check('_backoff_sleep', is_async=False),
         ast.Return(value=_name('response')),
@@ -1735,11 +1773,26 @@ def _build_sync_request_body(
         orelse=[],
     )
 
-    return [filtered_params_stmt, for_loop]
+    # The loop always returns or raises: the final attempt either returns a
+    # response or re-raises. That is not provable from the loop's shape, so
+    # without this a user type-checking the generated client sees
+    # "Missing return statement".
+    unreachable = ast.Raise(
+        exc=_call(
+            _name('RuntimeError'),
+            args=[ast.Constant(value='retry loop exited without returning a response')],
+        ),
+        cause=None,
+    )
+
+    return [for_loop, unreachable]
 
 
 def _build_async_request_body(
-    url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
+    url_expr: ast.expr,
+    merged_headers: ast.expr,
+    timeout_expr: ast.expr,
+    has_auth: bool = False,
 ) -> list[ast.stmt]:
     """Build the body for async _request_async method with retry loop.
 
@@ -1747,10 +1800,6 @@ def _build_async_request_body(
     tests), otherwise creates a per-call AsyncClient to avoid event-loop binding
     issues when coroutines are dispatched to a thread via run_sync / run_concurrently.
     """
-    filtered_params_stmt = _assign(
-        _name('filtered_params'), _build_filtered_params_expr()
-    )
-
     request_dict_stmt = _assign(
         _name('request'), _build_request_dict(url_expr, merged_headers, timeout_expr)
     )
@@ -1794,7 +1843,9 @@ def _build_async_request_body(
 
     try_body = [
         request_dict_stmt,
+        *_build_apply_auth_call(has_auth),
         before_request_stmt,
+        *_build_wire_format_stmts(),
         client_if,
         _build_retry_check('_backoff_sleep_async', is_async=True),
         ast.Return(value=_name('response')),
@@ -1825,7 +1876,19 @@ def _build_async_request_body(
         orelse=[],
     )
 
-    return [filtered_params_stmt, for_loop]
+    # The loop always returns or raises: the final attempt either returns a
+    # response or re-raises. That is not provable from the loop's shape, so
+    # without this a user type-checking the generated client sees
+    # "Missing return statement".
+    unreachable = ast.Raise(
+        exc=_call(
+            _name('RuntimeError'),
+            args=[ast.Constant(value='retry loop exited without returning a response')],
+        ),
+        cause=None,
+    )
+
+    return [for_loop, unreachable]
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:

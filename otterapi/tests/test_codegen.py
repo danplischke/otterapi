@@ -368,8 +368,7 @@ class TestCodegen:
     def test_extract_operation_parameters_disambiguates_colliding_names(
         self, temp_output_dir
     ):
-        """Distinct params that sanitize to the same identifier must not emit a
-        duplicate function argument.
+        """Params sanitizing alike must not emit a duplicate argument.
 
         Collisions arise from same-name/different-location params (``id`` in
         both query and header) and from names that differ only by separators
@@ -486,8 +485,9 @@ class TestCodegen:
     def test_duplicate_status_codes_collapse_to_single_response_type(
         self, temp_output_dir
     ):
-        """Multiple status codes pointing at the same schema must collapse to a
-        single response type, not a redundant ``X | X`` union.
+        """Status codes sharing a schema collapse to one response type.
+
+        Not a redundant ``X | X`` union.
         """
         count_schema = {
             'type': 'object',

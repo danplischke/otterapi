@@ -58,8 +58,9 @@ jobs:
         run: uv sync --group dev
 
       - name: Run mypy
-        run: uv run mypy otterapi --ignore-missing-imports
-        continue-on-error: true # Don't fail CI yet, but report issues
+        # Settings live in [tool.mypy]; the library is type-clean, so this
+        # gates rather than merely reporting.
+        run: uv run mypy
 
   test:
     name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -68,7 +69,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.12", "3.13", "3.14"]
+        # requires-python is >=3.10, so the oldest supported version has to
+        # be exercised: typing.Self and tomllib are 3.11+, and nothing
+        # caught that while 3.10 went untested.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
           - os: macos-latest
             python-version: "3.14"

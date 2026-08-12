@@ -13,7 +13,7 @@ import re
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
@@ -651,7 +651,7 @@ class ExportConfig(BaseModel):
     )
 
     formats: list[ExportFormat] = Field(
-        default_factory=lambda: ['csv', 'jsonl'],
+        default_factory=lambda: cast('list[ExportFormat]', ['csv', 'jsonl']),
         description='Default formats supported by generated helpers.',
     )
 
@@ -748,6 +748,72 @@ class EndpointResponseUnwrapConfig(BaseModel):
     )
 
     model_config = {'extra': 'forbid'}
+
+
+class RequestBodyConfig(BaseModel):
+    """Configuration for how request bodies are serialized.
+
+    Attributes:
+        exclude_unset: Send only the fields the caller actually set.  With this
+            off, a model's every untouched optional field goes out as an
+            explicit ``null`` -- which some APIs read as "clear this field".
+            Turn it off when an endpoint genuinely needs those nulls, for
+            instance a PUT that replaces a whole resource.
+    """
+
+    exclude_unset: bool = Field(
+        default=True,
+        description=(
+            'Send only fields the caller set, rather than an explicit null for '
+            'every untouched optional field.'
+        ),
+    )
+
+
+class AuthConfig(BaseModel):
+    """Configuration for generating authentication from ``securitySchemes``.
+
+    Each supported scheme in the document becomes a keyword-only constructor
+    parameter on the generated client, applied automatically to every request.
+
+    Attributes:
+        enabled: Whether to generate credential parameters at all.  Turn this
+            off to keep the previous behaviour of wiring auth by hand in the
+            user-owned ``client.py``.
+        env_prefix: Prefix for the environment variables an omitted credential
+            falls back to, e.g. ``OTTER`` gives ``OTTER_API_KEY`` for a scheme
+            named ``apiKey``.  Set it per document when a project generates
+            more than one client, so their variables do not collide.  An empty
+            string drops the prefix entirely.
+        env_vars: Exact environment variable name per security scheme, keyed by
+            the scheme's name in ``components.securitySchemes``.  Use it when a
+            credential already lives somewhere the prefix rule would never
+            derive -- an existing ``STRIPE_SECRET_KEY``, say.  Takes precedence
+            over ``env_prefix`` for the schemes it names; the rest keep the
+            derived default.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description='Generate client credential parameters from securitySchemes.',
+    )
+
+    env_prefix: str = Field(
+        default='OTTER',
+        description=(
+            'Prefix for the environment variables that supply credentials when '
+            'the constructor argument is omitted.'
+        ),
+    )
+
+    env_vars: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Exact environment variable name per security scheme, keyed by the '
+            'scheme name in components.securitySchemes. Overrides env_prefix '
+            'for the schemes it names.'
+        ),
+    )
 
 
 class ResponseUnwrapConfig(BaseModel):
@@ -1107,6 +1173,16 @@ class DocumentConfig(BaseModel):
         description='Configuration for tabular file export helpers.',
     )
 
+    auth: AuthConfig = Field(
+        default_factory=AuthConfig,
+        description="Configuration for the spec's security schemes.",
+    )
+
+    request_body: RequestBodyConfig = Field(
+        default_factory=RequestBodyConfig,
+        description='Configuration for request body serialization.',
+    )
+
     @field_validator('source')
     @classmethod
     def validate_source(cls, v: str) -> str:
@@ -1260,7 +1336,12 @@ def load_toml(path: str | Path) -> dict:
         FileNotFoundError: If the file doesn't exist.
         KeyError: If the file doesn't contain otterapi configuration.
     """
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
+        # tomllib landed in 3.11; tomli is the same parser, installed via the
+        # version-conditional dependency in pyproject.toml.
+        import tomli as tomllib  # type: ignore[no-redef]
 
     path = Path(path)
     if not path.exists():
@@ -1316,8 +1397,7 @@ def load_config_file(path: str | Path) -> dict:
 
 
 class ConfigValidationError(ValueError):
-    """Raised when an OtterAPI config file is syntactically loadable but
-    semantically invalid.
+    """Raised when a config file loads but is semantically invalid.
 
     Wraps :class:`pydantic.ValidationError` with a friendlier multi-line
     message that includes the source file path and, when known, the

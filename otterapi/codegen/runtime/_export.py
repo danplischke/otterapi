@@ -18,12 +18,20 @@ from __future__ import annotations
 import csv
 import json
 import types
-from collections.abc import AsyncIterable, Iterable, Iterator
+from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Iterator
 from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    TypeAlias,
+    Union,
+    get_args,
+    get_origin,
+)
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -32,11 +40,11 @@ from upath import UPath
 if TYPE_CHECKING:
     import pyarrow as pa
 
-# Implicit type aliases: the explicit ``TypeAlias`` annotation would ask
-# downstream linters to rewrite these with PEP 695's ``type`` keyword (UP040),
-# which generated code cannot use while it still supports Python 3.10/3.11.
-Row = BaseModel | dict
-PathLike = str | Path | UPath
+# Explicit ``TypeAlias`` annotations: without them these read as plain module
+# variables, and every signature below that mentions them fails to type-check
+# in the user's project ("Variable ... is not valid as a type").
+Row: TypeAlias = BaseModel | dict
+PathLike: TypeAlias = str | Path | UPath
 
 
 # -----------------------------------------------------------------------------
@@ -595,14 +603,16 @@ async def to_parquet_async(
 # -----------------------------------------------------------------------------
 
 
-_WRITERS = {
+# Annotated so the dispatchers below call a known callable type rather than
+# whatever join mypy infers across four differently-shaped writers.
+_WRITERS: dict[str, Callable[..., int]] = {
     'csv': to_csv,
     'tsv': to_tsv,
     'jsonl': to_jsonl,
     'parquet': to_parquet,
 }
 
-_ASYNC_WRITERS = {
+_ASYNC_WRITERS: dict[str, Callable[..., Awaitable[int]]] = {
     'csv': to_csv_async,
     'tsv': to_tsv_async,
     'jsonl': to_jsonl_async,

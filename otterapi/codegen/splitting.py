@@ -18,7 +18,13 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import MODELS_MODULE, ImportCollector, _all, _name
+from otterapi.codegen.ast_utils import (
+    MODELS_MODULE,
+    ImportCollector,
+    _all,
+    _name,
+    strip_optional,
+)
 from otterapi.codegen.dataframes import get_dataframe_config_for_endpoint
 from otterapi.codegen.endpoints import (
     build_default_client_code,
@@ -580,7 +586,7 @@ class EmittedModule:
         endpoint_names: Names of endpoints (functions) in this module.
     """
 
-    path: Path
+    path: Path | UPath
     module_path: list[str]
     endpoint_names: list[str] = field(default_factory=list)
 
@@ -729,6 +735,8 @@ class SplitModuleEmitter:
                 file_path=file_path,
                 endpoints=node.endpoints,
                 description=node.description,
+                # ('store', 'pets') -> store/pets.py, one directory down.
+                package_depth=max(len(module_path), 1),
             )
 
             self._emitted_modules.append(
@@ -1245,6 +1253,9 @@ class SplitModuleEmitter:
     ) -> ast.If | None:
         """Register Client/model/DataFrame/pagination imports; return the optional TYPE_CHECKING block."""
         import_collector.add_imports({'.client': {'Client'}})
+        # Registered optimistically: pruned away for modules with no path
+        # parameters (see write_mod's import pruning).
+        import_collector.add_imports({'._serialization': {'format_path_param'}})
 
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
@@ -1295,8 +1306,19 @@ class SplitModuleEmitter:
         file_path: Path | UPath,
         endpoints: list[Endpoint],
         description: str | None = None,
+        package_depth: int = 1,
     ) -> list[str]:
-        """Emit a single endpoint module file."""
+        """Emit a single endpoint module file.
+
+        Args:
+            file_path: Where to write the module.
+            endpoints: The endpoints this module owns.
+            description: Optional module docstring.
+            package_depth: How deep the module sits below the package root; 1
+                for a root-level module.  ``client.py``, ``models.py`` and the
+                runtime helpers always live at the root, so a nested module has
+                to reach further up to import them.
+        """
         body: list[ast.stmt] = []
 
         if description:
@@ -1331,15 +1353,23 @@ class SplitModuleEmitter:
             has_export_methods,
         )
 
+        # Sibling imports were registered as if this module sat at the package
+        # root; re-point them now that we know how deep it actually is.
+        import_collector.rebase_relative(package_depth)
+
         final_body: list[ast.stmt] = []
         final_body.extend(import_collector.to_ast())
 
         if type_checking_block:
             final_body.append(type_checking_block)
 
+        models_module = MODELS_MODULE
+        if package_depth > 1:
+            models_module = '.' * package_depth + MODELS_MODULE.lstrip('.')
+
         all_names = list(endpoint_names)
         if self.reexport_models:
-            model_names = import_collector._imports.get(MODELS_MODULE, set())
+            model_names = import_collector._imports.get(models_module, set())
             if self.reexport_model_exclude_patterns:
                 model_names = {
                     n
@@ -1379,7 +1409,12 @@ class SplitModuleEmitter:
 
     @staticmethod
     def _list_item_type(type_ast: ast.expr | None) -> ast.expr | None:
-        """Return the item-type AST if ``type_ast`` is ``list[ItemType]``, else None."""
+        """Return the item-type AST if ``type_ast`` is ``list[ItemType]``, else None.
+
+        Looks through an optional wrapper, so ``list[Thing] | None`` still
+        yields ``Thing``.
+        """
+        type_ast = strip_optional(type_ast)
         if (
             isinstance(type_ast, ast.Subscript)
             and isinstance(type_ast.value, ast.Name)

@@ -788,6 +788,140 @@ print(user.id, user.email)
 
 ---
 
+## 🔐 Authentication
+
+Every scheme under `components.securitySchemes` becomes a keyword-only
+parameter on the generated client, applied automatically to every request.
+
+```yaml
+# spec
+components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: X-API-Key
+      in: header
+    bearerAuth:
+      type: http
+      scheme: bearer
+```
+
+```python
+from client import Client
+
+client = Client(api_key='...', bearer_auth='...')
+user = get_user(user_id=123, client=client)
+```
+
+| Scheme | Parameter type | Sent as |
+|--------|----------------|---------|
+| `apiKey` in `header` | `str` | the header named in the spec |
+| `apiKey` in `query` | `str` | the query parameter named in the spec |
+| `apiKey` in `cookie` | `str` | appended to the `Cookie` header |
+| `http` / `bearer` | `str` | `Authorization: Bearer <token>` |
+| `http` / `basic` | `tuple[str, str]` | `Authorization: Basic <base64>` |
+| `oauth2`, `openIdConnect` | `str` | `Authorization: Bearer <token>` — you supply an already-obtained token |
+
+Schemes OtterAPI does not recognize are skipped with a warning rather than
+failing generation.
+
+### Credentials from the environment
+
+Omit a credential and the client reads it from `<env_prefix>_<SCHEME_NAME>`,
+upper-cased — so the `api_key` scheme above falls back to `OTTER_API_KEY`.
+Set `env_prefix` per document when one project generates several clients:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    auth:
+      env_prefix: MYAPI    # -> MYAPI_API_KEY
+```
+
+When a credential already lives in a variable the prefix rule would never
+derive, name it outright with `env_vars`. Keys are scheme names from
+`components.securitySchemes` (the generated parameter name works too), and
+only the schemes you name are affected — the rest keep the derived default:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    auth:
+      env_prefix: MYAPI
+      env_vars:
+        api_key: STRIPE_SECRET_KEY   # this one exactly
+        # bearerAuth still falls back to MYAPI_BEARER_AUTH
+```
+
+A constructor argument always beats the environment. Basic auth needs two
+values, so it has no environment fallback at all.
+
+### Auth Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Generate credential parameters from `securitySchemes` |
+| `env_prefix` | string | `OTTER` | Prefix for the environment variables consulted when an argument is omitted. Empty string drops the prefix |
+| `env_vars` | map | `{}` | Exact environment variable per scheme, keyed by scheme name. Overrides `env_prefix` for the schemes it names |
+
+### Customizing
+
+`_apply_auth` runs before the `_before_request` hook, so the hook can still
+override or refresh whatever it set — useful for rotating an OAuth token:
+
+```python
+class MyClient(Client):
+    def _before_request(self, request):
+        if self._token_expired():
+            request['headers']['Authorization'] = f'Bearer {self._refresh()}'
+        return request
+```
+
+Set `auth.enabled: false` to opt out entirely and wire authentication by hand
+in the user-owned `client.py`.
+
+---
+
+## 📤 Request Bodies
+
+Bodies are serialized with `model_dump(mode='json', by_alias=True,
+exclude_unset=True)`: JSON mode so `datetime`, `UUID` and `Decimal` fields
+reach the wire as strings rather than raising, and aliases so fields whose
+spec name is not a Python identifier keep their wire name.
+
+`exclude_unset` means only the fields you actually set are sent:
+
+```python
+place_order(body=Order(id=7))     # -> {"id": 7}
+```
+
+Most APIs read an explicit `null` as "clear this field", so omitting the
+fields you never touched is the safer default — and it is what makes partial
+updates work. If an endpoint genuinely needs those nulls, a PUT that replaces
+a whole resource for instance, turn it off:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    request_body:
+      exclude_unset: false
+```
+
+```python
+place_order(body=Order(id=7))     # -> {"id": 7, "shipDate": null, "note": null}
+```
+
+### Request Body Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `exclude_unset` | bool | `true` | Send only the fields the caller set, rather than an explicit null for every untouched optional field |
+
+---
+
 ## 🔧 CLI Reference
 
 ```bash
@@ -796,6 +930,13 @@ otter generate
 
 # Generate from specific config file
 otter generate -c my-config.yml
+
+# Generate without a config file
+otter generate -s ./api.yaml -o ./client
+
+# Override the base URL — required when a file-loaded spec's servers are
+# relative (e.g. `url: /api/v3`), and applies to every document in a config
+otter generate -s ./api.yaml -o ./client -b https://api.example.com
 
 # Tolerate malformed specs (drop unknown/invalid fields with a warning)
 otter generate --lenient
@@ -806,6 +947,12 @@ otter init
 # Validate configuration
 otter validate
 ```
+
+Generation is all-or-nothing: if a run fails partway through, the output
+directory is restored to exactly what it was before, so a failure never
+leaves a half-written client behind. Files you own inside it — `client.py`
+and anything else you keep there — survive both a failed run and a
+successful regeneration.
 
 ---
 
