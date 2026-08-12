@@ -46,6 +46,10 @@ def _commented_optional_sections() -> str:
 #   - source: ...
 #     output: ...
 #
+#     # Oldest Python the generated code must run on. From "3.12" on, the
+#     # runtime helpers use PEP 695 type parameters instead of TypeVars.
+#     target_python: "3.10"
+#
 #     # Pagination: emit *_iter() helpers that stream paginated endpoints.
 #     # auto_detect=true picks up offset/limit, cursor/limit, page/per_page
 #     # parameters automatically.

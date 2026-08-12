@@ -146,6 +146,8 @@ Each entry under `documents:` supports these fields:
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
+| `target_python` | `3.10` … `3.14` | `3.10` | Oldest Python the generated code has to run on. `3.12`+ emits PEP 695 type parameters in the runtime helpers |
+| `pydantic_version` | `1` \| `2` | `2` | Target Pydantic version for generated models and helpers |
 
 #### Function Naming
 
@@ -177,6 +179,38 @@ documents:
 ```
 
 Patterns follow standard glob syntax (`*` = single segment, `**` = any depth).
+
+#### Target Python Version
+
+Generated code defaults to running on Python 3.10, so the runtime helpers
+(`_pagination.py`, `_concurrency.py`) declare their generics with module-level
+`TypeVar`s:
+
+```python
+T = TypeVar('T')
+
+def paginate_offset(..., extract_items: Callable[[Any], list[T]]) -> list[T]:
+```
+
+That is the only spelling that works before 3.12, but a project whose linter is
+configured for a newer Python flags it as legacy (ruff's
+[UP047](https://docs.astral.sh/ruff/rules/non-pep695-generic-function/)). If the
+generated client only has to run on 3.12+, say so and the same helpers are
+emitted with [PEP 695](https://peps.python.org/pep-0695/) type parameters:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    target_python: "3.12"
+```
+
+```python
+def paginate_offset[T](..., extract_items: Callable[[Any], list[T]]) -> list[T]:
+```
+
+The setting describes the *generated* code — OtterAPI itself still runs on any
+supported interpreter, including when it emits 3.12-only syntax.
 
 ### Environment Variable Support
 

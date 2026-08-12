@@ -93,7 +93,9 @@ class APIError(BaseAPIError):
                         or json_body.get('detail')
                         or json_body
                     )
-                except Exception:
+                except ValueError:
+                    # Every way a body fails to become JSON -- malformed JSON,
+                    # undecodable bytes -- raises a ValueError subclass.
                     detail = body if body else None
                 return cls(
                     f'HTTP {status_code} Error: {detail}',
