@@ -357,7 +357,7 @@ class TestHeaderParams:
     )
 
     def test_unset_optional_header_does_not_raise(self, tmp_path: Path):
-        """httpx rejects a None header value; an unset header must be dropped."""
+        """Httpx rejects a None header value; an unset header must be dropped."""
         mod = _generate(tmp_path, self.HEADER_SPEC, 'wire_hdr_unset')
         rec = Recorder()
         mod.get_thing(client=rec.bind(mod.Client()))
@@ -372,7 +372,7 @@ class TestHeaderParams:
         assert rec.request.headers['X-Trace'] == 'abc'
 
     def test_non_string_header_is_stringified(self, tmp_path: Path):
-        """httpx requires str/bytes, so an integer header must be rendered."""
+        """Httpx requires str/bytes, so an integer header must be rendered."""
         mod = _generate(
             tmp_path,
             _spec(

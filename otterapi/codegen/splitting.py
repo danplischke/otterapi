@@ -586,7 +586,7 @@ class EmittedModule:
         endpoint_names: Names of endpoints (functions) in this module.
     """
 
-    path: Path
+    path: Path | UPath
     module_path: list[str]
     endpoint_names: list[str] = field(default_factory=list)
 

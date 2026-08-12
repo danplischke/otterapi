@@ -13,7 +13,7 @@ import re
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
@@ -651,7 +651,7 @@ class ExportConfig(BaseModel):
     )
 
     formats: list[ExportFormat] = Field(
-        default_factory=lambda: ['csv', 'jsonl'],
+        default_factory=lambda: cast('list[ExportFormat]', ['csv', 'jsonl']),
         description='Default formats supported by generated helpers.',
     )
 
@@ -1296,7 +1296,12 @@ def load_toml(path: str | Path) -> dict:
         FileNotFoundError: If the file doesn't exist.
         KeyError: If the file doesn't contain otterapi configuration.
     """
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
+        # tomllib landed in 3.11; tomli is the same parser, installed via the
+        # version-conditional dependency in pyproject.toml.
+        import tomli as tomllib  # type: ignore[no-redef]
 
     path = Path(path)
     if not path.exists():
@@ -1352,8 +1357,7 @@ def load_config_file(path: str | Path) -> dict:
 
 
 class ConfigValidationError(ValueError):
-    """Raised when an OtterAPI config file is syntactically loadable but
-    semantically invalid.
+    """Raised when a config file loads but is semantically invalid.
 
     Wraps :class:`pydantic.ValidationError` with a friendlier multi-line
     message that includes the source file path and, when known, the

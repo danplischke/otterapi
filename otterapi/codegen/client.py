@@ -14,6 +14,8 @@ from otterapi.codegen.ast_utils import (
     _assign,
     _attr,
     _call,
+    _class_def,
+    _function_def,
     _name,
     _subscript,
     _union_expr,
@@ -57,7 +59,7 @@ def generate_api_error_class() -> ast.ClassDef:
         ),
     ]
 
-    init_method = ast.FunctionDef(
+    init_method = _function_def(
         name='__init__',
         args=ast.arguments(
             posonlyargs=[],
@@ -83,7 +85,6 @@ def generate_api_error_class() -> ast.ClassDef:
             defaults=[],
         ),
         body=init_body,
-        decorator_list=[],
         returns=ast.Constant(value=None),
     )
 
@@ -385,7 +386,7 @@ def generate_api_error_class() -> ast.ClassDef:
         ),
     ]
 
-    from_response_method = ast.FunctionDef(
+    from_response_method = _function_def(
         name='from_response',
         args=ast.arguments(
             posonlyargs=[],
@@ -404,7 +405,7 @@ def generate_api_error_class() -> ast.ClassDef:
     )
 
     # Build __str__ method
-    str_method = ast.FunctionDef(
+    str_method = _function_def(
         name='__str__',
         args=ast.arguments(
             posonlyargs=[],
@@ -423,12 +424,11 @@ def generate_api_error_class() -> ast.ClassDef:
                 )
             ),
         ],
-        decorator_list=[],
         returns=_name('str'),
     )
 
     # Build __repr__ method
-    repr_method = ast.FunctionDef(
+    repr_method = _function_def(
         name='__repr__',
         args=ast.arguments(
             posonlyargs=[],
@@ -455,7 +455,6 @@ def generate_api_error_class() -> ast.ClassDef:
                 )
             ),
         ],
-        decorator_list=[],
         returns=_name('str'),
     )
 
@@ -476,12 +475,10 @@ Attributes:
         )
     )
 
-    class_def = ast.ClassDef(
+    class_def = _class_def(
         name='BaseAPIError',
         bases=[_name('Exception')],
-        keywords=[],
         body=[docstring, init_method, from_response_method, str_method, repr_method],
-        decorator_list=[],
     )
 
     return class_def
@@ -765,13 +762,7 @@ Args:
         async_parse_response_method,
     ]
 
-    class_def = ast.ClassDef(
-        name=class_name,
-        bases=[],
-        keywords=[],
-        body=class_body,
-        decorator_list=[],
-    )
+    class_def = _class_def(name=class_name, bases=[], body=class_body)
 
     return class_def, imports
 
@@ -852,7 +843,7 @@ def _build_init_method(
     auth_body, _ = build_auth_init_body(auth_schemes)
     init_body.extend(auth_body)
 
-    return ast.FunctionDef(
+    return _function_def(
         name='__init__',
         args=ast.arguments(
             posonlyargs=[],
@@ -903,7 +894,6 @@ def _build_init_method(
             ],
         ),
         body=init_body,
-        decorator_list=[],
         returns=ast.Constant(value=None),
     )
 
@@ -945,8 +935,7 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
     def _simple_method(
         name: str, body: list[ast.stmt], is_async: bool = False
     ) -> ast.stmt:
-        cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
-        return cls(
+        return _function_def(
             name=name,
             args=ast.arguments(
                 posonlyargs=[],
@@ -957,8 +946,8 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
                 defaults=[],
             ),
             body=body,
-            decorator_list=[],
             returns=ast.Constant(value=None),
+            is_async=is_async,
         )
 
     def _ctx_method(
@@ -967,9 +956,8 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
         extra_args: list | None = None,
         is_async: bool = False,
     ) -> ast.FunctionDef | ast.AsyncFunctionDef:
-        cls = ast.AsyncFunctionDef if is_async else ast.FunctionDef
         args_list = [_argument('self')] + (extra_args or [])
-        return cls(
+        return _function_def(
             name=name,
             args=ast.arguments(
                 posonlyargs=[],
@@ -980,8 +968,8 @@ def _build_lifecycle_methods() -> list[ast.stmt]:
                 defaults=[],
             ),
             body=body,
-            decorator_list=[],
             returns=ast.Constant(value=None),
+            is_async=is_async,
         )
 
     # close(self): if self._owns_sync_client: self._sync_client.close()
@@ -1106,11 +1094,10 @@ def _build_validate_response_method() -> ast.FunctionDef:
         ast.Pass(),
     ]
 
-    return ast.FunctionDef(
+    return _function_def(
         name='_validate_response',
         args=args,
         body=body,
-        decorator_list=[],
         returns=ast.Constant(value=None),
     )
 
@@ -1168,12 +1155,8 @@ def _build_before_request_method() -> ast.FunctionDef:
         ast.Return(value=_name('request')),
     ]
 
-    return ast.FunctionDef(
-        name='_before_request',
-        args=args,
-        body=body,
-        decorator_list=[],
-        returns=_name('dict'),
+    return _function_def(
+        name='_before_request', args=args, body=body, returns=_name('dict')
     )
 
 
@@ -1237,12 +1220,12 @@ def _build_async_before_request_method() -> ast.AsyncFunctionDef:
         ),
     ]
 
-    return ast.AsyncFunctionDef(
+    return _function_def(
         name='_async_before_request',
         args=args,
         body=body,
-        decorator_list=[],
         returns=_name('dict'),
+        is_async=True,
     )
 
 
@@ -1341,20 +1324,12 @@ def _build_parse_response_method(
     ]
 
     if is_async:
-        return ast.AsyncFunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any'), is_async=True
         )
     else:
-        return ast.FunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any')
         )
 
 
@@ -1432,20 +1407,12 @@ def _build_request_json_method(
     ]
 
     if is_async:
-        return ast.AsyncFunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any'), is_async=True
         )
     else:
-        return ast.FunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Any'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Any')
         )
 
 
@@ -1532,23 +1499,19 @@ def _build_request_method(
         body = _build_async_request_body(
             url_expr, merged_headers, timeout_expr, has_auth=has_auth
         )
-        return ast.AsyncFunctionDef(
+        return _function_def(
             name=method_name,
             args=args,
             body=body,
-            decorator_list=[],
             returns=_name('Response'),
+            is_async=True,
         )
     else:
         body = _build_sync_request_body(
             url_expr, merged_headers, timeout_expr, has_auth=has_auth
         )
-        return ast.FunctionDef(
-            name=method_name,
-            args=args,
-            body=body,
-            decorator_list=[],
-            returns=_name('Response'),
+        return _function_def(
+            name=method_name, args=args, body=body, returns=_name('Response')
         )
 
 

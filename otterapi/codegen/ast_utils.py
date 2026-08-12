@@ -8,7 +8,7 @@ import ast
 import builtins
 import sys
 from collections.abc import Iterable, Sequence
-from typing import cast
+from typing import Literal, cast, overload
 
 __all__ = [
     # AST helpers
@@ -25,6 +25,8 @@ __all__ = [
     '_func',
     '_async_func',
     '_all',
+    '_class_def',
+    '_function_def',
     # Import collection
     'ImportCollector',
     # Import pruning
@@ -44,6 +46,111 @@ MODELS_MODULE = '.models'
 
 # Type alias for import dictionaries used throughout codegen.
 ImportDict = dict[str, set[str]]
+
+
+def _class_def(
+    name: str,
+    bases: list[ast.expr],
+    body: list[ast.stmt],
+    keywords: list[ast.keyword] | None = None,
+    decorator_list: list[ast.expr] | None = None,
+) -> ast.ClassDef:
+    """Build an ``ast.ClassDef`` that is valid on every supported interpreter.
+
+    ``type_params`` became a required field of ``ClassDef`` in Python 3.12.
+    Passing it unconditionally is a type error when checking against an older
+    typeshed, and omitting it makes ``ast.unparse`` fail on 3.12+, so the
+    version check has to be here rather than at each of the call sites.
+    """
+    keywords = keywords or []
+    decorator_list = decorator_list or []
+    if sys.version_info >= (3, 12):
+        return ast.ClassDef(
+            name=name,
+            bases=bases,
+            keywords=keywords,
+            body=body,
+            decorator_list=decorator_list,
+            type_params=[],
+        )
+    return ast.ClassDef(
+        name=name,
+        bases=bases,
+        keywords=keywords,
+        body=body,
+        decorator_list=decorator_list,
+    )
+
+
+@overload
+def _function_def(
+    name: str,
+    args: ast.arguments,
+    body: list[ast.stmt],
+    decorator_list: list[ast.expr] | None = ...,
+    returns: ast.expr | None = ...,
+    *,
+    is_async: Literal[False] = ...,
+) -> ast.FunctionDef: ...
+
+
+@overload
+def _function_def(
+    name: str,
+    args: ast.arguments,
+    body: list[ast.stmt],
+    decorator_list: list[ast.expr] | None = ...,
+    returns: ast.expr | None = ...,
+    *,
+    is_async: Literal[True],
+) -> ast.AsyncFunctionDef: ...
+
+
+@overload
+def _function_def(
+    name: str,
+    args: ast.arguments,
+    body: list[ast.stmt],
+    decorator_list: list[ast.expr] | None = ...,
+    returns: ast.expr | None = ...,
+    *,
+    is_async: bool,
+) -> ast.FunctionDef | ast.AsyncFunctionDef: ...
+
+
+def _function_def(
+    name: str,
+    args: ast.arguments,
+    body: list[ast.stmt],
+    decorator_list: list[ast.expr] | None = None,
+    returns: ast.expr | None = None,
+    *,
+    is_async: bool = False,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Build a function definition valid on every supported interpreter.
+
+    Same ``type_params`` story as :func:`_class_def`.  Overloaded on
+    ``is_async`` so a caller passing the literal gets the exact node type back
+    rather than the union.
+    """
+    decorator_list = decorator_list or []
+    node_type = ast.AsyncFunctionDef if is_async else ast.FunctionDef
+    if sys.version_info >= (3, 12):
+        return node_type(  # type: ignore[no-any-return]
+            name=name,
+            args=args,
+            body=body,
+            decorator_list=decorator_list,
+            returns=returns,
+            type_params=[],
+        )
+    return node_type(  # type: ignore[no-any-return]
+        name=name,
+        args=args,
+        body=body,
+        decorator_list=decorator_list,
+        returns=returns,
+    )
 
 
 def strip_optional(annotation: ast.expr | None) -> ast.expr | None:
@@ -169,7 +276,7 @@ def _func(
     kwonlyargs: Sequence[ast.arg] | None = None,
     kw_defaults: Sequence[ast.expr | None] | None = None,
 ) -> ast.FunctionDef:
-    return ast.FunctionDef(
+    return _function_def(
         name=name,
         args=ast.arguments(
             posonlyargs=[],
@@ -180,7 +287,6 @@ def _func(
             defaults=[],
         ),
         body=body,
-        decorator_list=[],
         returns=returns,
     )
 
@@ -194,7 +300,7 @@ def _async_func(
     kwonlyargs: Sequence[ast.arg] | None = None,
     kw_defaults: Sequence[ast.expr | None] | None = None,
 ) -> ast.AsyncFunctionDef:
-    return ast.AsyncFunctionDef(
+    return _function_def(
         name=name,
         args=ast.arguments(
             posonlyargs=[],
@@ -205,8 +311,8 @@ def _async_func(
             defaults=[],
         ),
         body=body,
-        decorator_list=[],
         returns=returns,
+        is_async=True,
     )
 
 
@@ -547,51 +653,69 @@ def collect_bound_names(body: Sequence[ast.stmt]) -> set[str]:
 
     for stmt in body:
         for node in ast.walk(stmt):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    bound |= _assignment_target_names(target)
-            elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
-                bound |= _assignment_target_names(node.target)
-            elif isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
-                bound |= _assignment_target_names(node.target)
-            elif isinstance(node, ast.withitem):
-                bound |= _assignment_target_names(node.optional_vars)
-            elif isinstance(node, ast.Name) and isinstance(
-                node.ctx, ast.Store | ast.Del
-            ):
-                bound.add(node.id)
-            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                bound.add(node.name)
-                args = node.args
-                bound.update(
-                    a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)
-                )
-                bound.update(a.arg for a in (args.vararg, args.kwarg) if a)
-            elif isinstance(node, ast.Lambda):
-                args = node.args
-                bound.update(
-                    a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)
-                )
-                bound.update(a.arg for a in (args.vararg, args.kwarg) if a)
-            elif isinstance(node, ast.ClassDef):
-                bound.add(node.name)
-            elif isinstance(node, ast.Import | ast.ImportFrom):
-                dotted = isinstance(node, ast.Import)
-                bound.update(
-                    _alias_bound_name(alias, dotted=dotted)
-                    for alias in node.names
-                    if alias.name != '*'
-                )
-            elif isinstance(node, ast.ExceptHandler) and node.name:
-                bound.add(node.name)
-            elif isinstance(node, ast.Global | ast.Nonlocal):
-                bound.update(node.names)
-            elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
-                bound.add(node.name)
-            elif isinstance(node, ast.MatchMapping) and node.rest:
-                bound.add(node.rest)
+            bound |= _names_bound_by_target(node)
+            bound |= _names_bound_by_declaration(node)
 
     return bound
+
+
+def _argument_names(args: ast.arguments) -> set[str]:
+    """Every parameter name in an argument list, including *args / **kwargs."""
+    names = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    names.update(a.arg for a in (args.vararg, args.kwarg) if a)
+    return names
+
+
+def _names_bound_by_target(node: ast.AST) -> set[str]:
+    """Names bound by an assignment-like target on *node*.
+
+    Covers assignments, augmented and walrus assignments, loop and
+    comprehension targets, ``with ... as``, and bare ``Store``/``Del`` names.
+    """
+    if isinstance(node, ast.Assign):
+        names: set[str] = set()
+        for target in node.targets:
+            names |= _assignment_target_names(target)
+        return names
+    if isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
+        return _assignment_target_names(node.target)
+    if isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
+        return _assignment_target_names(node.target)
+    if isinstance(node, ast.withitem):
+        return _assignment_target_names(node.optional_vars)
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+        return {node.id}
+    return set()
+
+
+def _names_bound_by_declaration(node: ast.AST) -> set[str]:
+    """Names bound by a declaration on *node*.
+
+    Covers def/class names and their parameters, imports, ``except ... as``,
+    ``global``/``nonlocal``, and match-statement captures.
+    """
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        return {node.name} | _argument_names(node.args)
+    if isinstance(node, ast.Lambda):
+        return _argument_names(node.args)
+    if isinstance(node, ast.ClassDef):
+        return {node.name}
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        dotted = isinstance(node, ast.Import)
+        return {
+            _alias_bound_name(alias, dotted=dotted)
+            for alias in node.names
+            if alias.name != '*'
+        }
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return {node.name}
+    if isinstance(node, ast.Global | ast.Nonlocal):
+        return set(node.names)
+    if isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
+        return {node.name}
+    if isinstance(node, ast.MatchMapping) and node.rest:
+        return {node.rest}
+    return set()
 
 
 def _has_star_import(body: Sequence[ast.stmt]) -> bool:

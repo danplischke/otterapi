@@ -260,8 +260,10 @@ class TestFindUnresolvedNames:
         assert find_unresolved_names(ast.parse(source).body) == set()
 
     def test_annassign_target_is_a_binding_even_with_load_ctx(self):
-        """Codegen hand-builds nodes and ast.unparse ignores ctx, so a field
-        target may carry Load. It still binds the name."""
+        """An AnnAssign target carrying ``Load`` still binds its name.
+
+        Codegen hand-builds nodes and ``ast.unparse`` ignores ``ctx``.
+        """
         field = ast.AnnAssign(
             target=ast.Name(id='total', ctx=ast.Load()),
             annotation=ast.Name(id='int', ctx=ast.Load()),

@@ -29,7 +29,7 @@ from __future__ import annotations
 import ast
 import re
 
-__all__ = ['modernize_type_params']
+__all__ = ['modernize_type_aliases', 'modernize_type_params']
 
 # The Python version that introduced PEP 695 type parameter syntax.
 PEP695_MIN_VERSION = (3, 12)
@@ -191,3 +191,93 @@ def modernize_type_params(source: str) -> str:
 def _collapse_blank_runs(source: str) -> str:
     """Squash the 3+ blank-line runs left behind by removed declarations."""
     return re.sub(r'\n{4,}', '\n\n\n', source)
+
+
+#: Line budget for a regenerated import, matching ruff's default.
+_MAX_LINE = 88
+
+
+def _render_import_without(node: ast.ImportFrom, name: str) -> str | None:
+    """Re-render *node* with *name* removed, or None if nothing is left.
+
+    Rebuilding from the AST rather than editing text handles the parenthesized
+    multi-line form, which is how a typing import of more than a few names is
+    actually written.
+    """
+    kept = [alias for alias in node.names if alias.name != name]
+    if not kept:
+        return None
+
+    module = '.' * node.level + (node.module or '')
+    rendered = [
+        alias.name if alias.asname is None else f'{alias.name} as {alias.asname}'
+        for alias in kept
+    ]
+    single = f'from {module} import {", ".join(rendered)}'
+    if len(single) <= _MAX_LINE:
+        return single + '\n'
+
+    body = ''.join(f'    {entry},\n' for entry in rendered)
+    return f'from {module} import (\n{body})\n'
+
+
+def modernize_type_aliases(source: str) -> str:
+    """Return *source* with ``X: TypeAlias = Y`` rewritten as ``type X = Y``.
+
+    The explicit ``TypeAlias`` annotation is what makes these usable as types
+    at all -- without it a checker reads them as plain module variables and
+    every signature mentioning them fails.  But on 3.12+ ruff's UP040
+    (``non-pep695-type-alias``) wants the ``type`` keyword instead, so a
+    project linting its generated client at 3.12 would see a warning per
+    alias.  This is the same trade-off ``modernize_type_params`` makes for
+    generic functions, applied to aliases.
+
+    Single-line aliases only.  A multi-line one is left alone rather than
+    risk emitting a broken module -- a lint warning is cheaper than a client
+    that does not import.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    lines = source.splitlines(keepends=True)
+    edits: dict[int, str | None] = {}
+    found = False
+
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign) or node.value is None:
+            continue
+        if not isinstance(node.target, ast.Name):
+            continue
+        annotation = node.annotation
+        is_type_alias = (
+            isinstance(annotation, ast.Name) and annotation.id == 'TypeAlias'
+        ) or (isinstance(annotation, ast.Constant) and annotation.value == 'TypeAlias')
+        if not is_type_alias or node.lineno != node.end_lineno:
+            continue
+        line = lines[node.lineno - 1]
+        indent = line[: len(line) - len(line.lstrip())]
+        value = ast.unparse(node.value)
+        edits[node.lineno] = f'{indent}type {node.target.id} = {value}\n'
+        found = True
+
+    if not found:
+        return source
+
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if not any(alias.name == 'TypeAlias' for alias in node.names):
+            continue
+        edits[node.lineno] = _render_import_without(node, 'TypeAlias')
+        # Drop the continuation lines of a parenthesized import.
+        for lineno in range(node.lineno + 1, (node.end_lineno or node.lineno) + 1):
+            edits[lineno] = None
+
+    result: list[str] = []
+    for lineno, line in enumerate(lines, start=1):
+        text = edits.get(lineno, line)
+        if text is not None:
+            result.append(text)
+    return _collapse_blank_runs(''.join(result))

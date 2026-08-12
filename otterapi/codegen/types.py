@@ -12,7 +12,7 @@ import logging
 from collections.abc import Iterable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -484,9 +484,11 @@ class TypeGenerator(OpenAPIProcessor):
             candidate = f'{prefix}{counter}'
 
     def add_type(self, type_: Type, base_name: str | None = None) -> Type:
-        """Add a type to the registry. If a type with the same name but different definition
-        already exists, generate a unique name using the base_name prefix.
-        Returns the type (potentially with a modified name).
+        """Add a type to the registry, renaming it on a name collision.
+
+        If a differently-defined type already holds the name, a unique one is
+        generated from the ``base_name`` prefix.  Returns the type, which may
+        carry the modified name.
         """
         # Skip types without names (primitive types, inline types, etc.)
         if not type_.name:
@@ -744,8 +746,10 @@ class TypeGenerator(OpenAPIProcessor):
 
     @staticmethod
     def _make_any_type() -> Type:
-        """Build a bare ``Any`` type (accepts strings, numbers, null, arrays,
-        and objects alike)."""
+        """Build a bare ``Any`` type.
+
+        Accepts strings, numbers, null, arrays, and objects alike.
+        """
         any_type = Type(
             reference=None,
             name=None,
@@ -954,8 +958,7 @@ class TypeGenerator(OpenAPIProcessor):
         ]
 
     def _discriminator_is_literal(self, schema: Schema) -> bool:
-        """Return True only if every variant has the discriminator property
-        constrained to a single ``enum`` value.
+        """Check that every variant pins the discriminator to one enum value.
 
         Pydantic v2 requires ``Literal`` types on the discriminator field.
         If any variant is missing the constraint we fall back to a plain union.
@@ -969,7 +972,7 @@ class TypeGenerator(OpenAPIProcessor):
                 return False
             props = resolved.properties or {}
             disc_prop = props.get(prop_name)
-            if disc_prop is None:
+            if disc_prop is None or not isinstance(disc_prop, Schema):
                 return False
             # A single-value enum is the only reliable source of Literal.
             if not (disc_prop.enum and len(disc_prop.enum) == 1):
@@ -1045,7 +1048,7 @@ class TypeGenerator(OpenAPIProcessor):
         required_fields = set(schema.required or [])
         for property_name, property_schema in (schema.properties or {}).items():
             # Resolve reference to check for nullable
-            resolved_schema = property_schema
+            resolved_schema = cast('Schema', property_schema)
             if hasattr(property_schema, 'ref') and property_schema.ref:
                 resolved_schema, _ = self._resolve_reference(property_schema)
 
@@ -1058,7 +1061,11 @@ class TypeGenerator(OpenAPIProcessor):
             )
             is_required = property_name in required_fields
             field = self._create_pydantic_field(
-                property_name, property_schema, type_, is_required, is_nullable
+                property_name,
+                cast('Schema', property_schema),
+                type_,
+                is_required,
+                is_nullable,
             )
 
             body.append(field)
@@ -1403,7 +1410,8 @@ class TypeGenerator(OpenAPIProcessor):
         return type_
 
     def get_sorted_types(self) -> list[Type]:
-        """Returns the types sorted in dependency order using topological sort.
+        """Return the types in dependency order via a topological sort.
+
         Types with no dependencies come first.
         """
         sorted_types: list[Type] = []

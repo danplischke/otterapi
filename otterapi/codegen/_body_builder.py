@@ -16,15 +16,20 @@ fixtures in ``otterapi/tests/fixtures/golden``).
 from __future__ import annotations
 
 import ast
-from typing import Self
+from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import _assign, _attr, _call, _name
+
+if TYPE_CHECKING:
+    # typing.Self is 3.11+, and otterapi still supports 3.10. The module
+    # defers annotations, so the name is only ever needed by a type checker.
+    from typing import Self
 
 
 class BodyStatementBuilder:
     """Fluent builder for the recurring shapes that show up in endpoint bodies.
 
-    Example
+    Example:
     -------
     >>> body = (
     ...     BodyStatementBuilder()

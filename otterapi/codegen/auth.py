@@ -38,6 +38,7 @@ from otterapi.codegen.ast_utils import (
     _assign,
     _attr,
     _call,
+    _function_def,
     _name,
     _subscript,
     _union_expr,
@@ -450,7 +451,7 @@ def build_apply_auth_method(
         )
 
     return (
-        ast.FunctionDef(
+        _function_def(
             name='_apply_auth',
             args=ast.arguments(
                 posonlyargs=[],
@@ -461,7 +462,6 @@ def build_apply_auth_method(
                 defaults=[],
             ),
             body=body,
-            decorator_list=[],
             returns=ast.Constant(value=None),
         ),
         imports,

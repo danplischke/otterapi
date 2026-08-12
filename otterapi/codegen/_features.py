@@ -28,7 +28,11 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
-from otterapi.codegen._pep695 import PEP695_MIN_VERSION, modernize_type_params
+from otterapi.codegen._pep695 import (
+    PEP695_MIN_VERSION,
+    modernize_type_aliases,
+    modernize_type_params,
+)
 
 if TYPE_CHECKING:
     from otterapi.config import DocumentConfig
@@ -107,6 +111,7 @@ class FeatureModule(ABC):
                 # matching against the pre-3.12 template text they were
                 # written against.
                 content = modernize_type_params(content)
+                content = modernize_type_aliases(content)
         target = output_dir / self.module_filename
         target.write_text(content, encoding='utf-8')
         return target

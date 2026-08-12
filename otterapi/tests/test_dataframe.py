@@ -1120,8 +1120,10 @@ class TestEndpointReturnsListUnwrap:
     """Tests for endpoint_returns_list with response unwrapping active."""
 
     def test_unwrap_list_type_detected_over_envelope_response_type(self):
-        """An envelope response_type still counts as a list when the unwrapped
-        data type is a ``list[...]`` -- the response_unwrap gap fix."""
+        """An envelope response_type still counts as a list.
+
+        True whenever the unwrapped data type is a ``list[...]``.
+        """
         from otterapi.codegen.dataframes import endpoint_returns_list
 
         endpoint = _make_endpoint_with_response_type(
@@ -1162,8 +1164,10 @@ class TestEndpointReturnsListUnwrap:
         assert endpoint_returns_list(scalar_endpoint) is False
 
     def test_get_dataframe_config_uses_unwrap_type(self):
-        """get_dataframe_config_for_endpoint generates df methods for an
-        envelope endpoint once the unwrapped list type is supplied."""
+        """An envelope endpoint gets df methods once its list type is known.
+
+        The unwrapped list type is what makes it eligible.
+        """
         from otterapi.codegen.dataframes import get_dataframe_config_for_endpoint
 
         endpoint = _make_endpoint_with_response_type(

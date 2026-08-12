@@ -20,6 +20,7 @@ from otterapi.codegen.ast_utils import (
     ImportCollector,
     _all,
     _assign,
+    _class_def,
     _name,
     _union_expr,
     strip_optional,
@@ -1527,14 +1528,14 @@ class Codegen(OpenAPIProcessor):
         )
         if has_model_base:
             return impl
-        return ast.ClassDef(
+        return _class_def(
             name=impl.name,
             bases=[
                 ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
                 *impl.bases,
             ],
-            keywords=impl.keywords,
             body=impl.body,
+            keywords=impl.keywords,
             decorator_list=impl.decorator_list,
         )
 
@@ -1926,7 +1927,9 @@ class Codegen(OpenAPIProcessor):
         output_name = self.config.output
         generated_files = []
         for module in emitted:
-            rel_path = str(module.path.relative_to(directory))
+            # Both sides may be UPath; PurePath.relative_to's overloads only
+            # cover str / os.PathLike, which UPath satisfies at runtime.
+            rel_path = str(module.path.relative_to(str(directory)))
             generated_files.append(f'{output_name}/{rel_path}')
 
         # Add __init__.py files

@@ -458,10 +458,23 @@ def build_standalone_paginated_export_fn(
     whose arguments ``_iter`` does not accept.
 
     Args:
+        fn_name: Name of the export function to generate.
+        target_iter_fn_name: Name of the ``_iter`` function it drives.
+        parameters: The endpoint's parameters, before paging ones are stripped.
+        request_body_info: Request body info, or None for a bodiless endpoint.
+        item_type_ast: Annotation of the item model handed to ``export``.
+        item_type_imports: Imports the item annotation needs, or None.
+        docs: Docstring for the generated function, or None.
+        is_async: Whether to generate the async variant.
+        default_format: Default value for the wrapper's ``format`` argument.
+        default_batch_size: Default value for the wrapper's ``batch_size``.
         pagination_style: The resolved pagination style ('offset', 'cursor',
             'page'). Required to strip the right parameters.
         pagination_config: The resolved pagination config dict holding the
             spec's parameter names.
+
+    Returns:
+        A tuple of (function AST, required imports).
     """
     # Local import avoids a circular dependency at module load.
     from otterapi.codegen.endpoints import pagination_owned_param_names
