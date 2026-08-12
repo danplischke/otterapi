@@ -255,6 +255,29 @@ class ImportCollector:
                 self._imports[module] = set()
             self._imports[module].update(names)
 
+    def rebase_relative(self, depth: int) -> None:
+        """Re-point single-dot relative imports at a module *depth* levels deep.
+
+        Sibling modules like ``.client`` and ``.models`` are registered by
+        builders that do not know where the importing module will land.  A
+        module emitted into a subpackage has to reach back up to the package
+        root, so ``.client`` becomes ``..client`` one level down, ``...client``
+        two levels down, and so on.
+
+        Args:
+            depth: The importing module's depth below the package root, where
+                1 means the module sits at the root (no rewriting needed).
+        """
+        if depth <= 1:
+            return
+
+        prefix = '.' * depth
+        for module in [
+            m for m in self._imports if m.startswith('.') and not m.startswith('..')
+        ]:
+            names = self._imports.pop(module)
+            self._imports.setdefault(prefix + module.lstrip('.'), set()).update(names)
+
     def _get_import_category(self, module: str) -> int:
         """Get the sort category for a module.
 

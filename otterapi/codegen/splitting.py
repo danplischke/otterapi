@@ -735,6 +735,8 @@ class SplitModuleEmitter:
                 file_path=file_path,
                 endpoints=node.endpoints,
                 description=node.description,
+                # ('store', 'pets') -> store/pets.py, one directory down.
+                package_depth=max(len(module_path), 1),
             )
 
             self._emitted_modules.append(
@@ -1304,8 +1306,19 @@ class SplitModuleEmitter:
         file_path: Path | UPath,
         endpoints: list[Endpoint],
         description: str | None = None,
+        package_depth: int = 1,
     ) -> list[str]:
-        """Emit a single endpoint module file."""
+        """Emit a single endpoint module file.
+
+        Args:
+            file_path: Where to write the module.
+            endpoints: The endpoints this module owns.
+            description: Optional module docstring.
+            package_depth: How deep the module sits below the package root; 1
+                for a root-level module.  ``client.py``, ``models.py`` and the
+                runtime helpers always live at the root, so a nested module has
+                to reach further up to import them.
+        """
         body: list[ast.stmt] = []
 
         if description:
@@ -1340,15 +1353,23 @@ class SplitModuleEmitter:
             has_export_methods,
         )
 
+        # Sibling imports were registered as if this module sat at the package
+        # root; re-point them now that we know how deep it actually is.
+        import_collector.rebase_relative(package_depth)
+
         final_body: list[ast.stmt] = []
         final_body.extend(import_collector.to_ast())
 
         if type_checking_block:
             final_body.append(type_checking_block)
 
+        models_module = MODELS_MODULE
+        if package_depth > 1:
+            models_module = '.' * package_depth + MODELS_MODULE.lstrip('.')
+
         all_names = list(endpoint_names)
         if self.reexport_models:
-            model_names = import_collector._imports.get(MODELS_MODULE, set())
+            model_names = import_collector._imports.get(models_module, set())
             if self.reexport_model_exclude_patterns:
                 model_names = {
                     n
