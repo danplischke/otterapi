@@ -32,6 +32,8 @@ __all__ = [
     'collect_bound_names',
     'find_unresolved_names',
     'prune_unused_imports',
+    # Annotation inspection
+    'strip_optional',
     # Shared constants / type aliases
     'MODELS_MODULE',
     'ImportDict',
@@ -42,6 +44,33 @@ MODELS_MODULE = '.models'
 
 # Type alias for import dictionaries used throughout codegen.
 ImportDict = dict[str, set[str]]
+
+
+def strip_optional(annotation: ast.expr | None) -> ast.expr | None:
+    """Return *annotation* with a trailing ``| None`` removed.
+
+    Optional model fields are annotated ``list[Thing] | None``, but the shape
+    checks that drive DataFrame/export generation and item-type extraction care
+    about the ``list[Thing]`` inside.  Returns the annotation unchanged when it
+    is not an optional union, and None when the union holds nothing but None.
+    """
+    if not isinstance(annotation, ast.BinOp) or not isinstance(
+        annotation.op, ast.BitOr
+    ):
+        return annotation
+
+    def _is_none(node: ast.expr) -> bool:
+        return isinstance(node, ast.Constant) and node.value is None
+
+    left = None if _is_none(annotation.left) else strip_optional(annotation.left)
+    right = None if _is_none(annotation.right) else strip_optional(annotation.right)
+
+    if left is None:
+        return right
+    if right is None:
+        return left
+    # A genuine multi-member union (X | Y): nothing to strip.
+    return annotation
 
 
 def _name(name: str) -> ast.Name:

@@ -133,6 +133,7 @@ def all_features() -> list[FeatureModule]:
         ExportFeature(),
         ConcurrencyFeature(),
         RetryFeature(),
+        SerializationFeature(),
     ]
 
 
@@ -227,6 +228,19 @@ class RetryFeature(FeatureModule):
     """Emits ``_retry.py`` (backoff sleep helpers used by the generated _client.py)."""
 
     module_filename = '_retry.py'
+
+    def is_enabled(self, _config: DocumentConfig) -> bool:
+        return True
+
+
+class SerializationFeature(FeatureModule):
+    """Emits ``_serialization.py`` (OpenAPI wire-format parameter rendering).
+
+    Always enabled: every generated client sends query, header, or path
+    parameters, and all three go through these helpers.
+    """
+
+    module_filename = '_serialization.py'
 
     def is_enabled(self, _config: DocumentConfig) -> bool:
         return True

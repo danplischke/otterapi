@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
+from otterapi.codegen.ast_utils import strip_optional
+
 if TYPE_CHECKING:
     from otterapi.codegen.types import Endpoint, Type
     from otterapi.config import DataFrameConfig
@@ -88,7 +90,15 @@ def annotation_ast_returns_list(annotation_ast: 'ast.expr | None') -> bool:
 
     Returns:
         True if the annotation is a ``list[...]`` subscript, False otherwise.
+        ``list[...] | None`` also counts: an optional envelope field still
+        yields a list when it is present, and classifying it as non-list would
+        silently drop the endpoint's DataFrame and export variants.
     """
+    # Kept in step with _extract_list_item_type: if this says "list" but the
+    # item-type extraction disagrees, the endpoint gets an export wrapper with
+    # no model to hand it.
+    annotation_ast = strip_optional(annotation_ast)
+
     if isinstance(annotation_ast, ast.Subscript):
         if isinstance(annotation_ast.value, ast.Name) and (
             annotation_ast.value.id == 'list'

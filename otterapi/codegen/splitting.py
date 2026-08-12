@@ -18,7 +18,13 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import MODELS_MODULE, ImportCollector, _all, _name
+from otterapi.codegen.ast_utils import (
+    MODELS_MODULE,
+    ImportCollector,
+    _all,
+    _name,
+    strip_optional,
+)
 from otterapi.codegen.dataframes import get_dataframe_config_for_endpoint
 from otterapi.codegen.endpoints import (
     build_default_client_code,
@@ -1245,6 +1251,9 @@ class SplitModuleEmitter:
     ) -> ast.If | None:
         """Register Client/model/DataFrame/pagination imports; return the optional TYPE_CHECKING block."""
         import_collector.add_imports({'.client': {'Client'}})
+        # Registered optimistically: pruned away for modules with no path
+        # parameters (see write_mod's import pruning).
+        import_collector.add_imports({'._serialization': {'format_path_param'}})
 
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
@@ -1379,7 +1388,12 @@ class SplitModuleEmitter:
 
     @staticmethod
     def _list_item_type(type_ast: ast.expr | None) -> ast.expr | None:
-        """Return the item-type AST if ``type_ast`` is ``list[ItemType]``, else None."""
+        """Return the item-type AST if ``type_ast`` is ``list[ItemType]``, else None.
+
+        Looks through an optional wrapper, so ``list[Thing] | None`` still
+        yields ``Thing``.
+        """
+        type_ast = strip_optional(type_ast)
         if (
             isinstance(type_ast, ast.Subscript)
             and isinstance(type_ast.value, ast.Name)

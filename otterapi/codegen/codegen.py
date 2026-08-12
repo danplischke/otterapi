@@ -22,6 +22,7 @@ from otterapi.codegen.ast_utils import (
     _assign,
     _name,
     _union_expr,
+    strip_optional,
 )
 from otterapi.codegen.client import (
     _exported_error_names,
@@ -75,6 +76,28 @@ def _load_models_mixin_source() -> str:
         .joinpath('_models_mixin.py')
         .read_text('utf-8')
     )
+
+
+#: Default ``style`` per parameter location, per the OpenAPI specification.
+_DEFAULT_PARAM_STYLE = {
+    'query': 'form',
+    'cookie': 'form',
+    'path': 'simple',
+    'header': 'simple',
+}
+
+
+def _resolve_param_serialization(param: OpenAPIParameter) -> tuple[str, bool]:
+    """Resolve a parameter's ``(style, explode)`` against the spec defaults.
+
+    ``explode`` defaults to ``True`` for ``form`` and ``False`` for every other
+    style, so it cannot be defaulted without first knowing the style.
+    """
+    style = getattr(param, 'style', None) or _DEFAULT_PARAM_STYLE.get(param.in_, 'form')
+    explode = getattr(param, 'explode', None)
+    if explode is None:
+        explode = style == 'form'
+    return style, bool(explode)
 
 
 def _topo_sort_by_base_classes(
@@ -472,6 +495,8 @@ class Codegen(OpenAPIProcessor):
             assert self.typegen is not None
             param_type = self.typegen.schema_to_type(param.schema_)
 
+        style, explode = _resolve_param_serialization(param)
+
         return Parameter(
             name=param.name,
             name_sanitized=sanitize_parameter_field_name(param.name),
@@ -481,6 +506,8 @@ class Codegen(OpenAPIProcessor):
             required=param.required or False,
             type=param_type,
             description=param.description,
+            style=style,
+            explode=explode,
         )
 
     def _resolve_parameter_reference(
@@ -1431,6 +1458,9 @@ class Codegen(OpenAPIProcessor):
         )
 
         import_collector.add_imports({'.client': {'Client'}})
+        # Registered optimistically: pruned away for modules with no path
+        # parameters (see write_mod's import pruning).
+        import_collector.add_imports({'._serialization': {'format_path_param'}})
 
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
@@ -2078,7 +2108,12 @@ class Codegen(OpenAPIProcessor):
     def _extract_list_item_type(
         self, type_ast: ast.expr | None
     ) -> tuple[ast.expr | None, dict[str, set[str]]]:
-        """Extract the item type AST and imports if ``type_ast`` is ``list[X]``."""
+        """Extract the item type AST and imports if ``type_ast`` is ``list[X]``.
+
+        Looks through an optional wrapper, so an envelope field declared
+        ``list[Thing] | None`` still yields ``Thing``.
+        """
+        type_ast = strip_optional(type_ast)
         if (
             isinstance(type_ast, ast.Subscript)
             and isinstance(type_ast.value, ast.Name)

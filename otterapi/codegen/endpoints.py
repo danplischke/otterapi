@@ -74,6 +74,7 @@ __all__ = [
     'build_header_params',
     'build_query_params',
     'build_path_params',
+    'build_param_styles',
     'build_body_params',
     'prepare_call_from_parameters',
     'build_default_client_code',
@@ -492,9 +493,7 @@ class ParameterASTBuilder:
             - ast.Constant for static paths without parameters
             - ast.JoinedStr (f-string) for paths with parameter substitution
         """
-        path_params = {
-            p.name: p.name_sanitized for p in parameters if p.location == 'path'
-        }
+        path_params = {p.name: p for p in parameters if p.location == 'path'}
 
         if not path_params:
             return ast.Constant(value=path)
@@ -508,13 +507,70 @@ class ParameterASTBuilder:
                 if part:
                     values.append(ast.Constant(value=part))
             else:
-                sanitized = path_params.get(part, part)
-                values.append(ast.FormattedValue(value=_name(sanitized), conversion=-1))
+                param = path_params.get(part)
+                sanitized = param.name_sanitized if param else part
+                # Interpolating the raw value lets a path parameter containing
+                # '/' or '?' escape its URL segment, and renders enums and
+                # datetimes with str(). format_path_param percent-encodes and
+                # applies the parameter's OpenAPI style.
+                keywords: list[ast.keyword] = []
+                if param is not None and not param.uses_default_style:
+                    keywords.append(
+                        ast.keyword(arg='style', value=ast.Constant(value=param.style))
+                    )
+                    keywords.append(
+                        ast.keyword(
+                            arg='explode', value=ast.Constant(value=param.explode)
+                        )
+                    )
+                    if param.style == 'matrix':
+                        keywords.append(
+                            ast.keyword(
+                                arg='name', value=ast.Constant(value=param.name)
+                            )
+                        )
+                values.append(
+                    ast.FormattedValue(
+                        value=_call(
+                            _name('format_path_param'),
+                            args=[_name(sanitized)],
+                            keywords=keywords,
+                        ),
+                        conversion=-1,
+                    )
+                )
 
         if len(values) == 1 and isinstance(values[0], ast.Constant):
             return values[0]
 
         return ast.JoinedStr(values=values)
+
+    @staticmethod
+    def build_param_styles(parameters: list['Parameter']) -> ast.Dict | None:
+        """Build the ``param_styles`` mapping for non-default query parameters.
+
+        Returns ``None`` when every query parameter uses the OpenAPI default
+        (``form``/``explode=true``), so the common case emits no extra keyword.
+        """
+        deviating = [
+            p for p in parameters if p.location == 'query' and not p.uses_default_style
+        ]
+        if not deviating:
+            return None
+
+        return ast.Dict(
+            keys=[ast.Constant(value=p.name) for p in deviating],
+            values=[
+                ast.Tuple(
+                    elts=[
+                        ast.Constant(value=p.style),
+                        ast.Constant(value=p.explode),
+                    ],
+                    ctx=ast.Load(),
+                )
+                for p in deviating
+            ],
+        )
 
     @staticmethod
     def build_body_expr(
@@ -536,20 +592,46 @@ class ParameterASTBuilder:
 
         body_name = 'body'
 
-        body_expr: ast.expr
-        if body.is_json and body.type and body.type.type in ('model', 'root'):
-            body_expr = _call(
+        def _dump() -> ast.expr:
+            """``body.model_dump(mode='json', by_alias=True, exclude_unset=True)``.
+
+            The default ``model_dump()`` is Python-mode, so a ``datetime``,
+            ``UUID`` or ``Decimal`` field reaches ``json=`` as a native object
+            and raises ``TypeError``.  ``by_alias`` restores wire names for
+            fields whose spec name is not a Python identifier, and
+            ``exclude_unset`` stops every untouched optional field being sent
+            as an explicit null.
+            """
+            dump: ast.expr = _call(
                 func=_attr(_name(body_name), 'model_dump'),
                 args=[],
+                keywords=[
+                    ast.keyword(arg='mode', value=ast.Constant(value='json')),
+                    ast.keyword(arg='by_alias', value=ast.Constant(value=True)),
+                    ast.keyword(arg='exclude_unset', value=ast.Constant(value=True)),
+                ],
             )
+            if body.required:
+                return dump
+            # An optional body defaults to None, and None has no model_dump.
+            return ast.IfExp(
+                test=ast.Compare(
+                    left=_name(body_name),
+                    ops=[ast.IsNot()],
+                    comparators=[ast.Constant(value=None)],
+                ),
+                body=dump,
+                orelse=ast.Constant(value=None),
+            )
+
+        body_expr: ast.expr
+        if body.is_json and body.type and body.type.type in ('model', 'root'):
+            body_expr = _dump()
         elif body.is_multipart:
             body_expr = _name(body_name)
         elif body.is_form:
             if body.type and body.type.type in ('model', 'root'):
-                body_expr = _call(
-                    func=_attr(_name(body_name), 'model_dump'),
-                    args=[],
-                )
+                body_expr = _dump()
             else:
                 body_expr = _name(body_name)
         else:
@@ -1374,17 +1456,21 @@ class EndpointFunctionFactory:
             self.config.path, self.config.parameters or []
         )
 
-        request_call = _call(
-            func=_attr('c', request_method),
-            keywords=[
-                ast.keyword(
-                    arg='method', value=ast.Constant(value=self.config.method.lower())
-                ),
-                ast.keyword(arg='path', value=path_expr),
-                ast.keyword(arg='params', value=params_dict),
-                ast.keyword(arg=None, value=_name('kwargs')),
-            ],
+        page_keywords = [
+            ast.keyword(
+                arg='method', value=ast.Constant(value=self.config.method.lower())
+            ),
+            ast.keyword(arg='path', value=path_expr),
+            ast.keyword(arg='params', value=params_dict),
+        ]
+        param_styles = ParameterASTBuilder.build_param_styles(
+            self.config.parameters or []
         )
+        if param_styles:
+            page_keywords.append(ast.keyword(arg='param_styles', value=param_styles))
+        page_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
+
+        request_call = _call(func=_attr('c', request_method), keywords=page_keywords)
         request_expr: ast.expr = request_call
         if self.config.is_async:
             request_expr = ast.Await(value=request_call)
@@ -1505,6 +1591,10 @@ class EndpointFunctionFactory:
 
         if query_params:
             request_keywords.append(ast.keyword(arg='params', value=query_params))
+
+        param_styles = ParameterASTBuilder.build_param_styles(parameters)
+        if param_styles:
+            request_keywords.append(ast.keyword(arg='param_styles', value=param_styles))
 
         if header_params:
             request_keywords.append(ast.keyword(arg='headers', value=header_params))
@@ -1903,6 +1993,7 @@ def get_base_call_keywords(
     body_param_name: str | None = None,
     timeout: float | None = None,
     stream: bool = False,
+    param_styles: ast.expr | None = None,
 ) -> list[ast.keyword]:
     """Build the keyword arguments for a request function call.
 
@@ -1915,6 +2006,8 @@ def get_base_call_keywords(
         body_param_name: The httpx parameter name for the body.
         timeout: Optional request timeout in seconds.
         stream: Whether to stream the response.
+        param_styles: AST expression for the non-default ``style``/``explode``
+            mapping, or None when every parameter uses the OpenAPI default.
 
     Returns:
         List of AST keyword nodes for the function call.
@@ -1949,6 +2042,9 @@ def get_base_call_keywords(
 
     if query_params:
         keywords.append(ast.keyword(arg='params', value=query_params))
+
+    if param_styles:
+        keywords.append(ast.keyword(arg='param_styles', value=param_styles))
 
     if header_params:
         keywords.append(ast.keyword(arg='headers', value=header_params))
@@ -1985,6 +2081,21 @@ def build_query_params(
         An AST Dict node for query parameters, or None if no query params.
     """
     return ParameterASTBuilder.build_query_params(parameters)
+
+
+def build_param_styles(
+    parameters: list['Parameter'],
+) -> ast.Dict | None:
+    """Build the ``param_styles`` mapping for non-default query parameters.
+
+    Args:
+        parameters: List of Parameter objects to inspect.
+
+    Returns:
+        An AST Dict node, or None when every query parameter uses the
+        OpenAPI default serialization.
+    """
+    return ParameterASTBuilder.build_param_styles(parameters)
 
 
 def build_path_params(
@@ -2113,6 +2224,7 @@ def _build_endpoint_request_call(
         body_expr=body_expr,
         body_param_name=body_param_name,
         stream=False,
+        param_styles=ParameterASTBuilder.build_param_styles(parameters or []),
     )
 
     call_args = [

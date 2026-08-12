@@ -658,6 +658,7 @@ def generate_base_client_class(
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+            '._serialization': {'serialize_headers', 'serialize_query_params'},
         }
     else:
         imports = {
@@ -666,6 +667,7 @@ def generate_base_client_class(
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter', 'RootModel'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+            '._serialization': {'serialize_headers', 'serialize_query_params'},
         }
 
     # Build __init__ method
@@ -1348,6 +1350,9 @@ def _build_request_json_method(
             _argument(
                 'timeout', _union_expr([_name('float'), ast.Constant(value=None)])
             ),
+            _argument(
+                'param_styles', _union_expr([_name('dict'), ast.Constant(value=None)])
+            ),
         ],
         kw_defaults=[
             ast.Constant(value=None),  # params
@@ -1357,6 +1362,7 @@ def _build_request_json_method(
             ast.Constant(value=None),  # files
             ast.Constant(value=None),  # content
             ast.Constant(value=None),  # timeout
+            ast.Constant(value=None),  # param_styles
         ],
         kwarg=None,
         defaults=[],
@@ -1374,6 +1380,7 @@ def _build_request_json_method(
             ast.keyword(arg='files', value=_name('files')),
             ast.keyword(arg='content', value=_name('content')),
             ast.keyword(arg='timeout', value=_name('timeout')),
+            ast.keyword(arg='param_styles', value=_name('param_styles')),
         ],
     )
 
@@ -1428,6 +1435,9 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
             _argument(
                 'timeout', _union_expr([_name('float'), ast.Constant(value=None)])
             ),
+            _argument(
+                'param_styles', _union_expr([_name('dict'), ast.Constant(value=None)])
+            ),
         ],
         kw_defaults=[
             ast.Constant(value=None),  # params
@@ -1437,6 +1447,7 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
             ast.Constant(value=None),  # files
             ast.Constant(value=None),  # content
             ast.Constant(value=None),  # timeout
+            ast.Constant(value=None),  # param_styles
         ],
         kwarg=None,
         defaults=[],
@@ -1493,43 +1504,41 @@ def _build_request_method(is_async: bool) -> ast.FunctionDef | ast.AsyncFunction
         )
 
 
-def _build_filtered_params_expr() -> ast.expr:
-    """Build expression to filter None values from params dict.
+def _build_wire_format_stmts() -> list[ast.stmt]:
+    """Build the statements that render ``request`` into its wire form.
 
-    Generates: {k: v for k, v in params.items() if v is not None} if params else None
+    Generates::
+
+        request['params'] = serialize_query_params(request.get('params'), param_styles)
+        request['headers'] = serialize_headers(request.get('headers'))
+
+    These run *after* ``_before_request`` so the hook still sees (and can
+    mutate) plain dicts, while anything it adds is serialized too.
     """
-    # Build the dict comprehension: {k: v for k, v in params.items() if v is not None}
-    dict_comp = ast.DictComp(
-        key=_name('k'),
-        value=_name('v'),
-        generators=[
-            ast.comprehension(
-                target=ast.Tuple(
-                    elts=[
-                        ast.Name(id='k', ctx=ast.Store()),
-                        ast.Name(id='v', ctx=ast.Store()),
-                    ],
-                    ctx=ast.Store(),
-                ),
-                iter=_call(_attr('params', 'items')),
-                ifs=[
-                    ast.Compare(
-                        left=_name('v'),
-                        ops=[ast.IsNot()],
-                        comparators=[ast.Constant(value=None)],
-                    )
-                ],
-                is_async=0,
-            )
-        ],
-    )
 
-    # Build the conditional: dict_comp if params else None
-    return ast.IfExp(
-        test=_name('params'),
-        body=dict_comp,
-        orelse=ast.Constant(value=None),
-    )
+    def _request_item(key: str) -> ast.expr:
+        return ast.Subscript(
+            value=_name('request'),
+            slice=ast.Constant(value=key),
+            ctx=ast.Store(),
+        )
+
+    def _request_get(key: str) -> ast.expr:
+        return _call(_attr('request', 'get'), args=[ast.Constant(value=key)])
+
+    return [
+        _assign(
+            _request_item('params'),
+            _call(
+                _name('serialize_query_params'),
+                args=[_request_get('params'), _name('param_styles')],
+            ),
+        ),
+        _assign(
+            _request_item('headers'),
+            _call(_name('serialize_headers'), args=[_request_get('headers')]),
+        ),
+    ]
 
 
 def _build_request_dict(
@@ -1555,7 +1564,7 @@ def _build_request_dict(
         values=[
             _name('method'),
             url_expr,
-            _name('filtered_params'),
+            _name('params'),
             merged_headers,
             _name('json'),
             _name('data'),
@@ -1687,10 +1696,6 @@ def _build_sync_request_body(
     url_expr: ast.expr, merged_headers: ast.expr, timeout_expr: ast.expr
 ) -> list[ast.stmt]:
     """Build the body for sync _request method with retry loop."""
-    filtered_params_stmt = _assign(
-        _name('filtered_params'), _build_filtered_params_expr()
-    )
-
     request_dict_stmt = _assign(
         _name('request'), _build_request_dict(url_expr, merged_headers, timeout_expr)
     )
@@ -1707,6 +1712,7 @@ def _build_sync_request_body(
     try_body = [
         request_dict_stmt,
         before_request_stmt,
+        *_build_wire_format_stmts(),
         request_stmt,
         _build_retry_check('_backoff_sleep', is_async=False),
         ast.Return(value=_name('response')),
@@ -1735,7 +1741,7 @@ def _build_sync_request_body(
         orelse=[],
     )
 
-    return [filtered_params_stmt, for_loop]
+    return [for_loop]
 
 
 def _build_async_request_body(
@@ -1747,10 +1753,6 @@ def _build_async_request_body(
     tests), otherwise creates a per-call AsyncClient to avoid event-loop binding
     issues when coroutines are dispatched to a thread via run_sync / run_concurrently.
     """
-    filtered_params_stmt = _assign(
-        _name('filtered_params'), _build_filtered_params_expr()
-    )
-
     request_dict_stmt = _assign(
         _name('request'), _build_request_dict(url_expr, merged_headers, timeout_expr)
     )
@@ -1795,6 +1797,7 @@ def _build_async_request_body(
     try_body = [
         request_dict_stmt,
         before_request_stmt,
+        *_build_wire_format_stmts(),
         client_if,
         _build_retry_check('_backoff_sleep_async', is_async=True),
         ast.Return(value=_name('response')),
@@ -1825,7 +1828,7 @@ def _build_async_request_body(
         orelse=[],
     )
 
-    return [filtered_params_stmt, for_loop]
+    return [for_loop]
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:
