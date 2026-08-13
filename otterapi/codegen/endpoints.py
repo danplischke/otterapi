@@ -39,7 +39,6 @@ from otterapi.codegen.ast_utils import (
     _name,
     _subscript,
     _union_expr,
-    strip_optional,
 )
 from otterapi.openapi.constants import MediaType
 
@@ -2267,17 +2266,21 @@ def flattened_body_args(
     kwonlyargs: list[ast.arg] = []
     kw_defaults: list[ast.expr] = []
 
+    optional_fields = [f for f in (body.flattened_fields or []) if not f.required]
+    if optional_fields:
+        imports.setdefault('._serialization', set()).update({'NOTSET', 'NotSet'})
+
     for body_field in body.flattened_fields or []:
         if body_field.required:
             args.append(_argument(body_field.name, body_field.annotation_ast))
             continue
-        annotation = body_field.annotation_ast
-        # A field with a non-None schema default is optional here but annotated
-        # bare; defaulting it to None needs the union.
-        if strip_optional(annotation) is annotation:
-            annotation = _union_expr([annotation, ast.Constant(value=None)])
+        # NOTSET rather than None: None already means "send a JSON null" for a
+        # nullable field, and one default cannot carry both meanings. The
+        # annotation is left otherwise untouched, so a field the model will not
+        # accept as null does not advertise that it would.
+        annotation = _union_expr([body_field.annotation_ast, _name('NotSet')])
         kwonlyargs.append(_argument(body_field.name, annotation))
-        kw_defaults.append(ast.Constant(value=None))
+        kw_defaults.append(_name('NOTSET'))
 
     return args, kwonlyargs, kw_defaults
 

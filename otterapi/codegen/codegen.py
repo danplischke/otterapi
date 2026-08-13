@@ -2044,6 +2044,10 @@ class Codegen(OpenAPIProcessor):
             '_concurrency',
             ['run_concurrently', 'run_concurrently_async', 'run_sync'],
         )
+        if self.config.request_body.flatten or self.config.request_body.paths:
+            # Callers need NOTSET to build a flattened call programmatically,
+            # e.g. passing a value or the sentinel from a conditional.
+            self._add_reexport(body, all_names, '_serialization', ['NOTSET', 'NotSet'])
 
     def _generate_init_file(
         self,

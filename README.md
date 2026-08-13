@@ -937,11 +937,36 @@ place_order(id=7, quantity=2)
 ```
 
 Required fields stay positional so you cannot forget them; the rest are
-keyword-only and default to `None`. Fields inherited through `allOf` are
+keyword-only and default to `NOTSET`. Fields inherited through `allOf` are
 included. The request that goes on the wire is identical either way —
 flattening changes the signature, not the protocol.
 
-Two details worth knowing:
+### `NOTSET` vs `None`
+
+A nullable field has two distinct "empty" states, and one default cannot carry
+both. Omitted fields therefore default to `NOTSET`, which leaves `None`
+meaning what it says:
+
+```python
+place_order(id=7)                 # -> {"id": 7}
+place_order(id=7, note=None)      # -> {"id": 7, "note": null}
+place_order(id=7, note=NOTSET)    # -> {"id": 7}   (same as omitting)
+```
+
+`NOTSET` is exported from the generated package, so you can pass it from a
+conditional rather than branching on the call itself:
+
+```python
+from myclient import NOTSET, place_order
+
+place_order(id=7, note=note if include_note else NOTSET)
+```
+
+It is a single-member enum, so type checkers treat it as a literal: inside the
+client, `value is not NOTSET` narrows `int | None | NotSet` to `int | None`.
+It is also falsy, so `if value:` reads as "was anything given".
+
+Two more details worth knowing:
 
 - **A body field can collide with a path or query parameter.** The parameter
   keeps its name and the body field gains a `_body` suffix, so a spec with

@@ -193,7 +193,7 @@ class TestSignature:
         assert params['name'].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
         assert params['name'].default is inspect.Parameter.empty
         assert params['tag'].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params['tag'].default is None
+        assert params['tag'].default is flat.NOTSET
 
     def test_inherited_fields_are_included(self, flat):
         """AllOf composition puts required fields on a base class."""
@@ -392,3 +392,53 @@ def test_unflattenable_bodies_keep_the_body_parameter(tmp_path: Path):
     finally:
         sys.path.remove(str(tmp_path))
     assert 'body' in inspect.signature(mod.bulk_create).parameters
+
+
+# ---------------------------------------------------------------------------
+# The NOTSET sentinel
+# ---------------------------------------------------------------------------
+
+
+class TestNotSet:
+    """Optional flattened fields default to NOTSET, not None.
+
+    ``None`` already means "send a JSON null" for a nullable field, so it
+    cannot also mean "leave this out" -- the two need different defaults or
+    one of them is unreachable.
+    """
+
+    def test_omitting_a_field_leaves_it_out(self, flat):
+        sent = Sent()
+        flat.place_order(id=7, client=sent.bind(flat.Client()))
+        assert json.loads(sent.body) == {'id': 7}
+
+    def test_an_explicit_none_sends_a_json_null(self, flat):
+        sent = Sent()
+        flat.place_order(id=7, note=None, client=sent.bind(flat.Client()))
+        assert json.loads(sent.body) == {'id': 7, 'note': None}
+
+    def test_passing_notset_is_the_same_as_omitting(self, flat):
+        """So a caller can decide field-by-field from a variable."""
+        sent = Sent()
+        flat.place_order(id=7, note=flat.NOTSET, client=sent.bind(flat.Client()))
+        assert json.loads(sent.body) == {'id': 7}
+
+    def test_notset_is_exported_from_the_package(self, flat):
+        assert flat.NOTSET is flat.NotSet.NOTSET
+        assert repr(flat.NOTSET) == 'NOTSET'
+        # Falsy, so `if value:` guards treat it as absent.
+        assert not flat.NOTSET
+
+    def test_the_sentinel_never_reaches_the_wire(self, flat):
+        """Even if one is handed to a query parameter by mistake."""
+        sent = Sent()
+        flat.add_note(
+            1, 'open', 'api', status=flat.NOTSET, client=sent.bind(flat.Client())
+        )
+        assert 'status' not in sent.url.params
+
+    def test_required_fields_take_no_sentinel(self, flat):
+        import inspect
+
+        params = inspect.signature(flat.add_pet).parameters
+        assert params['name'].default is inspect.Parameter.empty
