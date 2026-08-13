@@ -848,10 +848,17 @@ class TypeGenerator(OpenAPIProcessor):
         else:
             mapped = Any
 
+        # Constant, not Name('None'): the nullable guards match Constant, and a
+        # Name would make ``str | None`` read as non-nullable and gain a second
+        # ``| None``.
+        annotation_ast: ast.expr = (
+            _name(mapped.__name__) if mapped is not None else ast.Constant(value=None)
+        )
+
         type_ = Type(
             None,
             sanitize_identifier(schema.title) if schema.title else None,
-            annotation_ast=_name(mapped.__name__ if mapped is not None else 'None'),
+            annotation_ast=annotation_ast,
             implementation_ast=None,
             type='primitive',
         )
