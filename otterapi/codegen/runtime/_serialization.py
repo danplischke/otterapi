@@ -27,10 +27,38 @@ from typing import Any
 from urllib.parse import quote
 
 __all__ = [
+    'NOTSET',
+    'NotSet',
+    'build_request_body',
     'format_path_param',
     'serialize_headers',
     'serialize_query_params',
 ]
+
+
+class NotSet(Enum):
+    """Type of the :data:`NOTSET` sentinel.
+
+    An ``Enum`` with exactly one member, so a type checker treats it as a
+    literal: ``x is not NOTSET`` narrows ``int | None | NotSet`` down to
+    ``int | None``, which a plain sentinel object would not do.
+    """
+
+    NOTSET = 'NOTSET'
+
+    def __repr__(self) -> str:
+        return 'NOTSET'
+
+    def __bool__(self) -> bool:
+        return False
+
+
+#: Default for arguments the caller may legitimately want to pass as ``None``.
+#:
+#: ``None`` cannot mean both "leave this out" and "send an explicit null", so
+#: omitted arguments default to this instead and ``None`` keeps its literal
+#: meaning.
+NOTSET = NotSet.NOTSET
 
 # ``(style, explode)`` exactly as the pair appears on an OpenAPI parameter.
 # Callers pass the *resolved* pair; the spec's per-style defaults for
@@ -140,9 +168,10 @@ def serialize_query_params(
 ) -> list[tuple[str, str]] | None:
     """Flatten query parameters into httpx-ready ``(key, value)`` pairs.
 
-    ``None`` values are dropped (an unset optional parameter is an absent
-    parameter, not an empty one).  A list of pairs rather than a dict is
-    returned so that exploded arrays and objects can repeat a key.
+    ``None`` and :data:`NOTSET` values are dropped (an unset optional
+    parameter is an absent parameter, not an empty one).  A list of pairs
+    rather than a dict is returned so that exploded arrays and objects can
+    repeat a key.
 
     Args:
         params: Raw parameter mapping from the endpoint call site, or None.
@@ -160,7 +189,7 @@ def serialize_query_params(
     styles = styles or {}
     pairs: list[tuple[str, str]] = []
     for name, value in params.items():
-        if value is None:
+        if value is None or value is NOTSET:
             continue
         style, explode = styles.get(name, DEFAULT_QUERY_STYLE)
         pairs.extend(_query_pairs(name, value, style, explode))
@@ -181,13 +210,48 @@ def serialize_headers(headers: Any) -> dict[str, str]:
         return {}
     rendered: dict[str, str] = {}
     for name, value in headers.items():
-        if value is None:
+        if value is None or value is NOTSET:
             continue
         if _is_sequence(value):
             rendered[name] = ','.join(_scalar(v) for v in value if v is not None)
         else:
             rendered[name] = _scalar(value)
     return rendered
+
+
+def build_request_body(
+    model: Any,
+    fields: Mapping[str, Any],
+    *,
+    exclude_unset: bool = True,
+    optional: bool = False,
+) -> Any:
+    """Assemble a JSON body from individually-passed field values.
+
+    Used by endpoints whose request body was flattened into parameters.  The
+    arguments the caller left alone arrive as :data:`NOTSET` and are dropped,
+    so the validated model marks exactly the supplied fields as set -- which is
+    what keeps ``exclude_unset`` meaning the same thing it does for an
+    unflattened body.  An explicit ``None`` is a value like any other and goes
+    out as a JSON null.
+
+    Args:
+        model: The Pydantic model the body validates against.
+        fields: Field values keyed by wire name (a field's alias when it has
+            one, since generated models do not set ``populate_by_name``).
+        exclude_unset: Passed through to ``model_dump``.
+        optional: When the body is optional, returning None for an empty
+            payload sends no body at all, as the unflattened form does.
+
+    Returns:
+        The JSON-ready dict, or None when an optional body has no fields.
+    """
+    supplied = {key: value for key, value in fields.items() if value is not NOTSET}
+    if optional and not supplied:
+        return None
+    return model.model_validate(supplied).model_dump(
+        mode='json', by_alias=True, exclude_unset=exclude_unset
+    )
 
 
 def format_path_param(

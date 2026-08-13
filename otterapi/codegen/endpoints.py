@@ -81,6 +81,7 @@ __all__ = [
     'build_query_params',
     'build_path_params',
     'build_param_styles',
+    'flattened_body_args',
     'build_body_params',
     'prepare_call_from_parameters',
     'build_default_client_code',
@@ -319,6 +320,9 @@ class FunctionSignatureBuilder:
         if not body:
             return self
 
+        if body.flattened_fields is not None:
+            return self._add_flattened_body(body)
+
         if body.type:
             body_annotation = body.type.annotation_ast or _name('Any')
             self._merge_imports(body.type.annotation_imports)
@@ -337,6 +341,16 @@ class FunctionSignatureBuilder:
             self._kwonlyargs.append(_argument('body', optional_body_annotation))
             self._kw_defaults.append(ast.Constant(value=None))
 
+        return self
+
+    def _add_flattened_body(self, body: RequestBodyInfo) -> Self:
+        """Add the body model's fields as parameters instead of one ``body=``."""
+        imports: ImportDict = {}
+        args, kwonlyargs, kw_defaults = flattened_body_args(body, imports)
+        self._args.extend(args)
+        self._kwonlyargs.extend(kwonlyargs)
+        self._kw_defaults.extend(kw_defaults)
+        self._merge_imports(imports)
         return self
 
     def add_client_parameter(self, client_type: str = 'Client') -> Self:
@@ -598,8 +612,8 @@ class ParameterASTBuilder:
 
         body_name = 'body'
 
-        def _dump() -> ast.expr:
-            """``body.model_dump(mode='json', by_alias=True, exclude_unset=True)``.
+        def _dump(source: ast.expr) -> ast.expr:
+            """``<source>.model_dump(mode='json', by_alias=True, exclude_unset=True)``.
 
             The default ``model_dump()`` is Python-mode, so a ``datetime``,
             ``UUID`` or ``Decimal`` field reaches ``json=`` as a native object
@@ -617,13 +631,48 @@ class ParameterASTBuilder:
                 keywords.append(
                     ast.keyword(arg='exclude_unset', value=ast.Constant(value=True))
                 )
-            dump: ast.expr = _call(
-                func=_attr(_name(body_name), 'model_dump'),
-                args=[],
+            return _call(func=_attr(source, 'model_dump'), args=[], keywords=keywords)
+
+        def _flattened_call() -> ast.expr:
+            """``build_request_body(Model, {'id': id, ...}, optional=...)``.
+
+            The filtering, the empty-payload case and the dump all live in the
+            runtime helper: inlining them here produced a call expression no
+            one could read.
+            """
+            fields = body.flattened_fields or []
+            model = (
+                body.type.annotation_ast
+                if body.type and body.type.annotation_ast
+                else _name('Any')
+            )
+            keywords: list[ast.keyword] = []
+            if not body.exclude_unset:
+                keywords.append(
+                    ast.keyword(arg='exclude_unset', value=ast.Constant(value=False))
+                )
+            if not body.required:
+                keywords.append(
+                    ast.keyword(arg='optional', value=ast.Constant(value=True))
+                )
+            return _call(
+                func=_name('build_request_body'),
+                args=[
+                    model,
+                    ast.Dict(
+                        keys=[ast.Constant(value=item.wire_name) for item in fields],
+                        values=[_name(item.name) for item in fields],
+                    ),
+                ],
                 keywords=keywords,
             )
+
+        def _body_value() -> ast.expr:
+            """The ``json=``/``data=`` value for a model-backed body."""
+            if body.flattened_fields is not None:
+                return _flattened_call()
             if body.required:
-                return dump
+                return _dump(_name(body_name))
             # An optional body defaults to None, and None has no model_dump.
             return ast.IfExp(
                 test=ast.Compare(
@@ -631,18 +680,18 @@ class ParameterASTBuilder:
                     ops=[ast.IsNot()],
                     comparators=[ast.Constant(value=None)],
                 ),
-                body=dump,
+                body=_dump(_name(body_name)),
                 orelse=ast.Constant(value=None),
             )
 
         body_expr: ast.expr
         if body.is_json and body.type and body.type.type in ('model', 'root'):
-            body_expr = _dump()
+            body_expr = _body_value()
         elif body.is_multipart:
             body_expr = _name(body_name)
         elif body.is_form:
             if body.type and body.type.type in ('model', 'root'):
-                body_expr = _dump()
+                body_expr = _body_value()
             else:
                 body_expr = _name(body_name)
         else:
@@ -2186,6 +2235,56 @@ def prepare_call_from_parameters(
 # =============================================================================
 
 
+def flattened_body_args(
+    body: RequestBodyInfo,
+    imports: ImportDict,
+) -> tuple[list[ast.arg], list[ast.arg], list[ast.expr]]:
+    """Build the parameters that replace ``body=`` for a flattened body.
+
+    Required fields stay positional so a caller cannot forget them; everything
+    else is keyword-only with a ``None`` default, matching how optional
+    endpoint parameters already read.
+
+    Registers the imports the field annotations need into *imports* in place.
+
+    Args:
+        body: The request body, whose ``flattened_fields`` drive the result.
+        imports: Import dict to extend.
+
+    Returns:
+        A tuple of (args, kwonlyargs, kw_defaults).
+    """
+    # The model's own imports cover the field annotations (datetime, UUID,
+    # referenced enums). Registering the whole set is deliberately optimistic
+    # -- write_mod prunes whatever the module ends up not using.
+    if body.type:
+        for source in (body.type.annotation_imports, body.type.implementation_imports):
+            for module, names in source.items():
+                imports.setdefault(module, set()).update(names)
+
+    args: list[ast.arg] = []
+    kwonlyargs: list[ast.arg] = []
+    kw_defaults: list[ast.expr] = []
+
+    optional_fields = [f for f in (body.flattened_fields or []) if not f.required]
+    if optional_fields:
+        imports.setdefault('._serialization', set()).update({'NOTSET', 'NotSet'})
+
+    for body_field in body.flattened_fields or []:
+        if body_field.required:
+            args.append(_argument(body_field.name, body_field.annotation_ast))
+            continue
+        # NOTSET rather than None: None already means "send a JSON null" for a
+        # nullable field, and one default cannot carry both meanings. The
+        # annotation is left otherwise untouched, so a field the model will not
+        # accept as null does not advertise that it would.
+        annotation = _union_expr([body_field.annotation_ast, _name('NotSet')])
+        kwonlyargs.append(_argument(body_field.name, annotation))
+        kw_defaults.append(_name('NOTSET'))
+
+    return args, kwonlyargs, kw_defaults
+
+
 def _build_endpoint_fn_signature(
     parameters: list[Parameter] | None,
     request_body_info: RequestBodyInfo | None,
@@ -2198,7 +2297,14 @@ def _build_endpoint_fn_signature(
     else:
         args, kwonlyargs, kw_defaults = [], [], []
 
-    if request_body_info:
+    if request_body_info and request_body_info.flattened_fields is not None:
+        body_args, body_kwonly, body_defaults = flattened_body_args(
+            request_body_info, imports
+        )
+        args.extend(body_args)
+        kwonlyargs.extend(body_kwonly)
+        kw_defaults.extend(body_defaults)
+    elif request_body_info:
         body_annotation = (
             request_body_info.type.annotation_ast
             if request_body_info.type and request_body_info.type.annotation_ast
