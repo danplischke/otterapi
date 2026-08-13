@@ -152,7 +152,7 @@ def _query_pairs(
     name: str, value: Any, style: str, explode: bool
 ) -> list[tuple[str, str]]:
     """Expand one query parameter into the pairs that go on the wire."""
-    if isinstance(value, Enum) or isinstance(value, (str, bytes, bytearray)):
+    if isinstance(value, (Enum, str, bytes, bytearray)):
         return [(name, _scalar(value))]
     mapping = _as_mapping(value)
     if mapping is not None:
@@ -272,7 +272,7 @@ def format_path_param(
     Returns:
         The encoded string to interpolate into the request path.
     """
-    if isinstance(value, Enum) or isinstance(value, (str, bytes, bytearray)):
+    if isinstance(value, (Enum, str, bytes, bytearray)):
         rendered = _quote(_scalar(value))
     else:
         mapping = _as_mapping(value)
