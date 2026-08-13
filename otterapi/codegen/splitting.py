@@ -1253,9 +1253,12 @@ class SplitModuleEmitter:
     ) -> ast.If | None:
         """Register Client/model/DataFrame/pagination imports; return the optional TYPE_CHECKING block."""
         import_collector.add_imports({'.client': {'Client'}})
-        # Registered optimistically: pruned away for modules with no path
-        # parameters (see write_mod's import pruning).
-        import_collector.add_imports({'._serialization': {'format_path_param'}})
+        # Registered optimistically: pruned away for modules that use
+        # neither path parameters nor a flattened request body (see
+        # write_mod's import pruning).
+        import_collector.add_imports(
+            {'._serialization': {'format_path_param', 'build_request_body'}}
+        )
 
         model_names = self._collect_used_model_names(endpoints)
         if model_names:

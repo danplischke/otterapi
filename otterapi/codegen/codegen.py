@@ -43,6 +43,7 @@ from otterapi.codegen.pagination import (
 )
 from otterapi.codegen.schema import SchemaLoader
 from otterapi.codegen.types import (
+    BodyField,
     Endpoint,
     Parameter,
     RequestBodyInfo,
@@ -100,6 +101,60 @@ def _resolve_param_serialization(param: OpenAPIParameter) -> tuple[str, bool]:
     if explode is None:
         explode = style == 'form'
     return style, bool(explode)
+
+
+def _field_from_annassign(node: ast.AnnAssign) -> BodyField | None:
+    """Read one model field off its ``AnnAssign``, or None if unreadable.
+
+    A field is optional exactly when its ``Field(...)`` call carries a
+    ``default`` -- which is how ``_create_pydantic_field`` writes it -- and its
+    input key is the ``alias`` when one was needed to reach a name that is not
+    a Python identifier.
+    """
+    if not isinstance(node.target, ast.Name) or node.annotation is None:
+        return None
+
+    name = node.target.id
+    wire_name = name
+    required = node.value is None
+
+    if isinstance(node.value, ast.Call):
+        keywords = {kw.arg: kw.value for kw in node.value.keywords if kw.arg}
+        required = 'default' not in keywords
+        alias = keywords.get('alias')
+        if isinstance(alias, ast.Constant) and isinstance(alias.value, str):
+            wire_name = alias.value
+
+    return BodyField(
+        name=name,
+        wire_name=wire_name,
+        annotation_ast=node.annotation,
+        required=required,
+    )
+
+
+def _disambiguate_flattened_fields(
+    parameters: list[Parameter], fields: list[BodyField]
+) -> None:
+    """Rename flattened body fields that collide with a real parameter.
+
+    A body field named ``status`` and a query parameter named ``status`` would
+    otherwise emit a function with a duplicate argument.  The parameter keeps
+    its name -- it is the one tied to a URL -- and the body field gains a
+    ``_body`` suffix.  ``wire_name`` is untouched, so the payload is unchanged.
+    """
+    taken = {p.name_sanitized for p in parameters}
+    for field in fields:
+        if field.name not in taken:
+            taken.add(field.name)
+            continue
+        candidate = f'{field.name}_body'
+        suffix = 2
+        while candidate in taken:
+            candidate = f'{field.name}_body_{suffix}'
+            suffix += 1
+        field.name = candidate
+        taken.add(candidate)
 
 
 def _snapshot_directory(directory: UPath) -> dict[str, bytes]:
@@ -550,6 +605,75 @@ class Codegen(OpenAPIProcessor):
 
         return all_params
 
+    def _flatten_body_fields(self, info: RequestBodyInfo) -> list[BodyField] | None:
+        """Return the body model's fields for flattening, or None if it cannot be.
+
+        Only a JSON body backed by a generated model can be spread: there is
+        nothing to spread a bare array, a primitive, or a multipart upload
+        into.  Anything unflattenable keeps the single ``body=`` parameter and
+        says so once in the log, rather than silently looking like it worked.
+        """
+        body_type = info.type
+        if not info.is_json or body_type is None or body_type.type != 'model':
+            logger.warning(
+                'Cannot flatten the %s request body: flattening needs a JSON '
+                'object model. Keeping the single body parameter.',
+                info.content_type,
+            )
+            return None
+
+        assert self.typegen is not None
+        fields = self._collect_model_fields(body_type.name, set())
+        if not fields:
+            logger.warning(
+                'Request body model %r has no fields to flatten; keeping the '
+                'single body parameter.',
+                body_type.name,
+            )
+            return None
+        return fields
+
+    def _collect_model_fields(
+        self, model_name: str | None, seen: set[str]
+    ) -> list[BodyField]:
+        """Collect a model's fields, including those it inherits.
+
+        ``allOf`` composition becomes real base classes, so a required field
+        can live on a base.  Missing those would emit a client that cannot
+        satisfy its own model, failing at validation time rather than here.
+        """
+        assert self.typegen is not None
+        if not model_name or model_name in seen:
+            return []
+        seen.add(model_name)
+
+        registered = self.typegen.types.get(model_name)
+        class_def = registered.implementation_ast if registered else None
+        if not isinstance(class_def, ast.ClassDef):
+            return []
+
+        inherited: list[BodyField] = []
+        for base in class_def.bases:
+            if isinstance(base, ast.Name):
+                inherited.extend(self._collect_model_fields(base.id, seen))
+
+        own = [
+            field
+            for field in (
+                _field_from_annassign(stmt)
+                for stmt in class_def.body
+                if isinstance(stmt, ast.AnnAssign)
+            )
+            if field is not None
+        ]
+
+        # A subclass redeclaring a field wins over the base's version.
+        by_name = {field.name: field for field in inherited}
+        for field in own:
+            by_name[field.name] = field
+        # Required first, so the generated signature can make them positional.
+        return sorted(by_name.values(), key=lambda f: not f.required)
+
     def _auth_schemes(self) -> list[AuthScheme]:
         """Security schemes to wire into the generated client.
 
@@ -685,11 +809,14 @@ class Codegen(OpenAPIProcessor):
 
         return body_or_ref
 
-    def _extract_request_body(self, operation: Operation) -> RequestBodyInfo | None:
+    def _extract_request_body(
+        self, operation: Operation, path: str = ''
+    ) -> RequestBodyInfo | None:
         """Extract request body information from an operation.
 
         Args:
             operation: The OpenAPI operation to extract request body from.
+            path: The URL path, used to resolve per-path body configuration.
 
         Returns:
             RequestBodyInfo object with content type and schema, or None if no body exists.
@@ -713,22 +840,30 @@ class Codegen(OpenAPIProcessor):
                 base_name=f'{sanitize_identifier(operation.operationId or "")}RequestBody',
             )
 
-        return RequestBodyInfo(
+        resolved = self.config.request_body.for_path(path)
+        info = RequestBodyInfo(
             content_type=selected_content_type,
             type=body_type,
             required=body.required or False,
             description=body.description,
-            exclude_unset=self.config.request_body.exclude_unset,
+            exclude_unset=resolved.exclude_unset,
         )
+        if resolved.flatten:
+            info.flattened_fields = self._flatten_body_fields(info)
+        return info
 
     def _get_param_model(
-        self, operation: Operation, path_item_parameters: list | None = None
+        self,
+        operation: Operation,
+        path_item_parameters: list | None = None,
+        path: str = '',
     ) -> tuple[list[Parameter], RequestBodyInfo | None]:
         """Get all parameters and request body info for an operation.
 
         Args:
             operation: The OpenAPI operation to extract parameters from.
             path_item_parameters: Optional path-level parameters to inherit.
+            path: The URL path, used to resolve per-path body configuration.
 
         Returns:
             A tuple of (parameters, request_body_info) where:
@@ -736,7 +871,9 @@ class Codegen(OpenAPIProcessor):
             - request_body_info: RequestBodyInfo object or None
         """
         params = self._extract_operation_parameters(operation, path_item_parameters)
-        body_info = self._extract_request_body(operation)
+        body_info = self._extract_request_body(operation, path)
+        if body_info is not None and body_info.flattened_fields:
+            _disambiguate_flattened_fields(params, body_info.flattened_fields)
 
         return params, body_info
 
@@ -805,7 +942,7 @@ class Codegen(OpenAPIProcessor):
         async_fn_name = f'async_{fn_name}'
 
         parameters, request_body_info = self._get_param_model(
-            operation, path_item_parameters
+            operation, path_item_parameters, path
         )
         response_infos, response_model = self._get_response_models(operation)
         docs = self._build_operation_docs(operation)
@@ -1536,9 +1673,12 @@ class Codegen(OpenAPIProcessor):
         )
 
         import_collector.add_imports({'.client': {'Client'}})
-        # Registered optimistically: pruned away for modules with no path
-        # parameters (see write_mod's import pruning).
-        import_collector.add_imports({'._serialization': {'format_path_param'}})
+        # Registered optimistically: pruned away for modules that use
+        # neither path parameters nor a flattened request body (see
+        # write_mod's import pruning).
+        import_collector.add_imports(
+            {'._serialization': {'format_path_param', 'build_request_body'}}
+        )
 
         model_names = self._collect_used_model_names(endpoints)
         if model_names:
@@ -1904,6 +2044,10 @@ class Codegen(OpenAPIProcessor):
             '_concurrency',
             ['run_concurrently', 'run_concurrently_async', 'run_sync'],
         )
+        if self.config.request_body.flatten or self.config.request_body.paths:
+            # Callers need NOTSET to build a flattened call programmatically,
+            # e.g. passing a value or the sentinel from a conditional.
+            self._add_reexport(body, all_names, '_serialization', ['NOTSET', 'NotSet'])
 
     def _generate_init_file(
         self,

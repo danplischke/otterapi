@@ -7,6 +7,7 @@ environment variable overrides.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -750,6 +751,36 @@ class EndpointResponseUnwrapConfig(BaseModel):
     model_config = {'extra': 'forbid'}
 
 
+class EndpointRequestBodyConfig(BaseModel):
+    """Per-path request body overrides.
+
+    Every field defaults to ``None``, meaning "inherit the document setting".
+
+    Attributes:
+        exclude_unset: Override the document's ``exclude_unset``.
+        flatten: Override the document's ``flatten``.
+    """
+
+    exclude_unset: bool | None = Field(
+        default=None,
+        description='Override whether unset fields are dropped from the body.',
+    )
+
+    flatten: bool | None = Field(
+        default=None,
+        description='Override whether the body is spread into parameters.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+
+class ResolvedRequestBodyConfig(BaseModel):
+    """A document's request-body settings after per-path overrides are applied."""
+
+    exclude_unset: bool
+    flatten: bool
+
+
 class RequestBodyConfig(BaseModel):
     """Configuration for how request bodies are serialized.
 
@@ -759,6 +790,11 @@ class RequestBodyConfig(BaseModel):
             explicit ``null`` -- which some APIs read as "clear this field".
             Turn it off when an endpoint genuinely needs those nulls, for
             instance a PUT that replaces a whole resource.
+        flatten: Spread the body model's fields into individual keyword
+            parameters instead of taking one ``body=`` argument.
+        paths: Per-path overrides, keyed by a glob over the URL path.  The
+            longest matching pattern wins, so a specific path beats the
+            wildcard that also covers it.
     """
 
     exclude_unset: bool = Field(
@@ -768,6 +804,54 @@ class RequestBodyConfig(BaseModel):
             'every untouched optional field.'
         ),
     )
+
+    flatten: bool = Field(
+        default=False,
+        description=(
+            "Spread the body model's fields into individual keyword parameters "
+            'instead of a single body= argument.'
+        ),
+    )
+
+    paths: dict[str, EndpointRequestBodyConfig] = Field(
+        default_factory=dict,
+        description=(
+            'Per-path overrides keyed by a glob over the URL path; the longest '
+            'matching pattern wins.'
+        ),
+    )
+
+    def for_path(self, path: str) -> ResolvedRequestBodyConfig:
+        """Resolve the settings that apply to *path*.
+
+        Patterns are matched with :mod:`fnmatch`, the same syntax as
+        ``include_paths``/``exclude_paths``.  When several match, the longest
+        pattern wins -- which makes an exact path beat the ``/pet/**`` that
+        also covers it, without needing a separate precedence rule.
+
+        Args:
+            path: The URL path from the spec, e.g. ``/store/order``.
+
+        Returns:
+            The effective settings for that path.
+        """
+        override = EndpointRequestBodyConfig()
+        matching = [
+            pattern
+            for pattern in self.paths
+            if pattern == path or fnmatch.fnmatch(path, pattern)
+        ]
+        if matching:
+            override = self.paths[max(matching, key=len)]
+
+        return ResolvedRequestBodyConfig(
+            exclude_unset=(
+                self.exclude_unset
+                if override.exclude_unset is None
+                else override.exclude_unset
+            ),
+            flatten=self.flatten if override.flatten is None else override.flatten,
+        )
 
 
 class AuthConfig(BaseModel):

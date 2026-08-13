@@ -280,6 +280,24 @@ class ResponseInfo:
 
 
 @dataclasses.dataclass
+class BodyField:
+    """One field of a request body model, as a flattened endpoint parameter.
+
+    Attributes:
+        name: The parameter name in the generated function.
+        wire_name: The key the model expects on input -- the field's alias when
+            it has one, since generated models do not set ``populate_by_name``.
+        annotation_ast: The parameter's type annotation.
+        required: Whether the schema marks the field required.
+    """
+
+    name: str
+    wire_name: str
+    annotation_ast: ast.expr
+    required: bool = False
+
+
+@dataclasses.dataclass
 class RequestBodyInfo:
     """Information about a request body including its content type.
 
@@ -291,6 +309,9 @@ class RequestBodyInfo:
         exclude_unset: Whether the emitted ``model_dump`` drops fields the
             caller never set.  Carried here rather than passed down separately
             so the AST builders keep their existing signatures.
+        flattened_fields: The body model's fields, when the endpoint should
+            take them as individual parameters instead of one ``body=``
+            argument.  ``None`` means the body stays a single parameter.
     """
 
     content_type: str
@@ -298,6 +319,7 @@ class RequestBodyInfo:
     required: bool = False
     description: str | None = None
     exclude_unset: bool = True
+    flattened_fields: list['BodyField'] | None = None
 
     @property
     def is_json(self) -> bool:
