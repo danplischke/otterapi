@@ -236,7 +236,13 @@ def _forward_call_keywords(
         name = param.name_sanitized
         keywords.append(ast.keyword(arg=name, value=_name(name)))
     if request_body_info is not None:
-        keywords.append(ast.keyword(arg='body', value=_name('body')))
+        if request_body_info.flattened_fields is not None:
+            for body_field in request_body_info.flattened_fields:
+                keywords.append(
+                    ast.keyword(arg=body_field.name, value=_name(body_field.name))
+                )
+        else:
+            keywords.append(ast.keyword(arg='body', value=_name('body')))
     for kw_name in extra_kw_names:
         keywords.append(ast.keyword(arg=kw_name, value=_name(kw_name)))
     return keywords
