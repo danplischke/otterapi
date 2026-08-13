@@ -75,7 +75,9 @@ test = [
 dev = [
     { include-group = "test" },
     "ruff>=0.14.2",
-    "twine>=6.2.0",
+    # >=7: earlier twine monkeypatches packaging's metadata allow-list to stop
+    # at 2.4 and so rejects hatchling's Metadata-Version 2.5.
+    "twine>=7.0.0",
     "vulture>=2.14",
     # mypy was invoked by `just typecheck` and by CI without ever being
     # declared, so `uv run mypy` picked up whatever stray tool install was on
