@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import quote
 
 __all__ = [
+    'build_request_body',
     'format_path_param',
     'serialize_headers',
     'serialize_query_params',
@@ -188,6 +189,40 @@ def serialize_headers(headers: Any) -> dict[str, str]:
         else:
             rendered[name] = _scalar(value)
     return rendered
+
+
+def build_request_body(
+    model: Any,
+    fields: Mapping[str, Any],
+    *,
+    exclude_unset: bool = True,
+    optional: bool = False,
+) -> Any:
+    """Assemble a JSON body from individually-passed field values.
+
+    Used by endpoints whose request body was flattened into parameters.  The
+    arguments the caller left alone arrive as ``None`` and are dropped, so the
+    validated model marks exactly the supplied fields as set -- which is what
+    keeps ``exclude_unset`` meaning the same thing it does for an unflattened
+    body.
+
+    Args:
+        model: The Pydantic model the body validates against.
+        fields: Field values keyed by wire name (a field's alias when it has
+            one, since generated models do not set ``populate_by_name``).
+        exclude_unset: Passed through to ``model_dump``.
+        optional: When the body is optional, returning None for an empty
+            payload sends no body at all, as the unflattened form does.
+
+    Returns:
+        The JSON-ready dict, or None when an optional body has no fields.
+    """
+    supplied = {key: value for key, value in fields.items() if value is not None}
+    if optional and not supplied:
+        return None
+    return model.model_validate(supplied).model_dump(
+        mode='json', by_alias=True, exclude_unset=exclude_unset
+    )
 
 
 def format_path_param(

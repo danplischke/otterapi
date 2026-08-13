@@ -914,11 +914,71 @@ documents:
 place_order(body=Order(id=7))     # -> {"id": 7, "shipDate": null, "note": null}
 ```
 
+### Flattening the body into parameters
+
+By default a POST/PUT/PATCH takes the body as one model:
+
+```python
+place_order(body=Order(id=7, quantity=2))
+```
+
+Set `flatten` and the model's fields become parameters instead:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    request_body:
+      flatten: true
+```
+
+```python
+place_order(id=7, quantity=2)
+```
+
+Required fields stay positional so you cannot forget them; the rest are
+keyword-only and default to `None`. Fields inherited through `allOf` are
+included. The request that goes on the wire is identical either way —
+flattening changes the signature, not the protocol.
+
+Two details worth knowing:
+
+- **A body field can collide with a path or query parameter.** The parameter
+  keeps its name and the body field gains a `_body` suffix, so a spec with
+  both a `status` query param and a `status` body field generates
+  `add_note(status_body, *, status=None)`. The payload still uses `status`.
+- **Only object-shaped JSON bodies can flatten.** An array body, a bare
+  string, or a multipart upload has nothing to spread; those keep the single
+  `body=` parameter and log why.
+
+### Per-path overrides
+
+`paths` overrides the document setting for matching URL paths, using the same
+glob syntax as `include_paths`. When several patterns match, the longest wins,
+so a specific path beats the wildcard covering it:
+
+```yaml
+request_body:
+  flatten: true
+  paths:
+    /reports/**:                 # a big nested body reads better as a model
+      flatten: false
+    /reports/summary:            # …except this one
+      flatten: true
+    /users/{id}:
+      exclude_unset: false       # this PUT replaces the whole resource
+```
+
 ### Request Body Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `exclude_unset` | bool | `true` | Send only the fields the caller set, rather than an explicit null for every untouched optional field |
+| `flatten` | bool | `false` | Spread the body model's fields into individual parameters instead of one `body=` argument |
+| `paths` | map | `{}` | Per-path overrides keyed by a glob over the URL path; longest match wins |
+
+Each path override accepts `exclude_unset` and `flatten`; anything omitted
+inherits the document setting.
 
 ---
 
