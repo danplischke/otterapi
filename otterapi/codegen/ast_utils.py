@@ -34,6 +34,9 @@ __all__ = [
     'collect_bound_names',
     'find_unresolved_names',
     'prune_unused_imports',
+    # Import ordering
+    'IMPORT_SECTION_SEPARATOR',
+    'sort_import_blocks',
     # Annotation inspection
     'strip_optional',
     # Shared constants / type aliases
@@ -854,3 +857,174 @@ def prune_unused_imports(body: list[ast.stmt]) -> list[ast.stmt]:
             return pruned
         current = pruned
     return current
+
+
+# ---------------------------------------------------------------------------
+# Import ordering
+# ---------------------------------------------------------------------------
+
+# Emitted between two import sections and turned into a blank line once the
+# module has been unparsed.  ``ast.unparse`` writes no blank lines at all, and
+# isort-style sections have to be separated by one, so the separator has to
+# survive as a statement until the source exists.
+IMPORT_SECTION_SEPARATOR = '__otterapi_import_section__'
+
+# isort's section order: __future__, standard library, third party, first
+# party, then local (relative) imports.  Codegen emits nothing first-party --
+# a generated package refers to its own modules relatively -- so that section
+# stays empty.
+_SECTION_FUTURE = 0
+_SECTION_STDLIB = 1
+_SECTION_THIRD_PARTY = 2
+_SECTION_LOCAL = 4
+
+
+def _module_root(stmt: ast.Import | ast.ImportFrom) -> str:
+    """The top-level package an import statement pulls from."""
+    if isinstance(stmt, ast.ImportFrom):
+        return (stmt.module or '').split('.')[0]
+    return stmt.names[0].name.split('.')[0]
+
+
+def _import_section(stmt: ast.Import | ast.ImportFrom) -> int:
+    """The isort section *stmt* belongs to."""
+    if isinstance(stmt, ast.ImportFrom):
+        if stmt.level:
+            return _SECTION_LOCAL
+        if stmt.module == '__future__':
+            return _SECTION_FUTURE
+    root = _module_root(stmt)
+    if root in sys.stdlib_module_names:
+        return _SECTION_STDLIB
+    return _SECTION_THIRD_PARTY
+
+
+def _member_rank(name: str) -> int:
+    """Rank for isort's ``order_by_type``: constants, classes, then the rest."""
+    stripped = name.lstrip('_')
+    if not stripped:
+        return 2
+    if stripped.isupper():
+        return 0
+    if stripped[0].isupper():
+        return 1
+    return 2
+
+
+def _sorted_aliases(aliases: list[ast.alias]) -> list[ast.alias]:
+    """Order the names inside one ``from x import a, b`` the way isort does."""
+    return sorted(
+        aliases, key=lambda alias: (_member_rank(alias.name), alias.name.lower())
+    )
+
+
+def _import_sort_key(stmt: ast.Import | ast.ImportFrom) -> tuple:
+    """Sort key placing plain ``import x`` before ``from x import y``."""
+    if isinstance(stmt, ast.ImportFrom):
+        # Relative imports run furthest-to-closest, so a deeper level sorts
+        # first; ``-level`` gets that without a second key.
+        return (1, -stmt.level, (stmt.module or '').lower())
+    return (0, 0, stmt.names[0].name.lower())
+
+
+def _sorted_import_run(run: list[ast.stmt]) -> list[ast.stmt]:
+    """Sort one contiguous run of imports, separators included."""
+    sections: dict[int, list[ast.stmt]] = {}
+    for stmt in run:
+        imp = cast('ast.Import | ast.ImportFrom', stmt)
+        if isinstance(imp, ast.ImportFrom):
+            imp = ast.ImportFrom(
+                module=imp.module, names=_sorted_aliases(imp.names), level=imp.level
+            )
+        else:
+            imp = ast.Import(names=sorted(imp.names, key=lambda a: a.name.lower()))
+        sections.setdefault(_import_section(imp), []).append(imp)
+
+    ordered: list[ast.stmt] = []
+    for index, section in enumerate(sorted(sections)):
+        if index:
+            ordered.append(ast.Expr(value=ast.Constant(value=IMPORT_SECTION_SEPARATOR)))
+        ordered.extend(
+            sorted(
+                sections[section],
+                key=lambda s: _import_sort_key(cast('ast.Import | ast.ImportFrom', s)),
+            )
+        )
+    return ordered
+
+
+def _separator() -> ast.stmt:
+    """One blank line, as a statement that survives until unparsing."""
+    return ast.Expr(value=ast.Constant(value=IMPORT_SECTION_SEPARATOR))
+
+
+def _separators_after_imports(next_stmt: ast.stmt) -> int:
+    """Separators to emit between a module's imports and what follows.
+
+    isort wants one blank line before a plain statement and two before a
+    definition.  ``ast.unparse`` already writes one of its own ahead of a
+    class or function, so a single separator covers both cases.
+    """
+    del next_stmt
+    return 1
+
+
+def sort_import_blocks(
+    body: list[ast.stmt], *, top_level: bool = True
+) -> list[ast.stmt]:
+    """Order every run of imports in *body* the way isort would.
+
+    Codegen collects imports as it discovers the names that need them, so a
+    generated module's import block comes out in discovery order -- which
+    ruff reports as ``I001`` in the user's own tree, where the generated
+    package is linted.  Sorting at emission makes the output clean without
+    the user's linter having to fix it, and without otterapi depending on a
+    formatter being installed.
+
+    Runs are sorted in place: statements around them, and the relative order
+    of anything that is not an import, are left alone.  ``if TYPE_CHECKING:``
+    blocks are recursed into, being the other place codegen emits imports.
+
+    Args:
+        body: The module body about to be written. Not mutated.
+        top_level: Whether *body* is the module body itself, which is the only
+            place isort wants blank lines after the imports.
+
+    Returns:
+        A new list of statements with each import run ordered, and
+        ``IMPORT_SECTION_SEPARATOR`` markers where blank lines belong.
+    """
+    ordered: list[ast.stmt] = []
+    run: list[ast.stmt] = []
+
+    def flush(next_stmt: ast.stmt | None = None) -> None:
+        if not run:
+            return
+        ordered.extend(_sorted_import_run(run))
+        run.clear()
+        # Without a formatter installed the emitted source is whatever
+        # ``ast.unparse`` produced, so the blank lines after the block have to
+        # be emitted too -- isort counts them as part of the import block.
+        if top_level and next_stmt is not None:
+            ordered.extend(
+                _separator() for _ in range(_separators_after_imports(next_stmt))
+            )
+
+    for stmt in body:
+        if isinstance(stmt, ast.Import | ast.ImportFrom):
+            run.append(stmt)
+            continue
+        flush(stmt)
+        if _is_type_checking_block(stmt):
+            block = cast('ast.If', stmt)
+            ordered.append(
+                ast.If(
+                    test=block.test,
+                    body=sort_import_blocks(block.body, top_level=False),
+                    orelse=block.orelse,
+                )
+            )
+        else:
+            ordered.append(stmt)
+    flush()
+    return ordered

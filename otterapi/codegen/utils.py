@@ -9,7 +9,12 @@ from urllib.parse import urlparse
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import find_unresolved_names, prune_unused_imports
+from otterapi.codegen.ast_utils import (
+    IMPORT_SECTION_SEPARATOR,
+    find_unresolved_names,
+    prune_unused_imports,
+    sort_import_blocks,
+)
 from otterapi.exceptions import CodeGenerationError
 from otterapi.openapi.v3_2 import OpenAPI, Reference, Schema
 
@@ -176,6 +181,14 @@ def validate_name_resolution(body: list[ast.stmt], filename: str) -> None:
         )
 
 
+def _apply_import_separators(source: str) -> str:
+    """Turn the section markers left by ``sort_import_blocks`` into blank lines."""
+    marker = ast.unparse(ast.Expr(value=ast.Constant(value=IMPORT_SECTION_SEPARATOR)))
+    return '\n'.join(
+        '' if line.strip() == marker else line for line in source.splitlines()
+    ) + ('\n' if source.endswith('\n') else '')
+
+
 def _add_blank_lines(source: str) -> str:
     """Add blank lines after certain blocks for better readability.
 
@@ -247,7 +260,8 @@ def write_mod(
     """Write a list of AST statements to a Python file.
 
     This method:
-    1. Optionally drops imports the module body never references
+    1. Optionally drops imports the module body never references, then orders
+       every import run the way isort would
     2. Creates an AST Module from the statements
     3. Fixes missing locations in the AST
     4. Unparses the AST to Python source code
@@ -283,6 +297,11 @@ def write_mod(
     if prune_imports:
         body = prune_unused_imports(body)
 
+    # Ordering is part of generation, not formatting: the generated package is
+    # linted by the user's ruff, not this repo's, and an import block in
+    # discovery order is an I001 finding in their tree.
+    body = sort_import_blocks(body)
+
     if validate_code:
         validate_name_resolution(body, path.name)
 
@@ -291,7 +310,7 @@ def write_mod(
     ast.fix_missing_locations(mod)
 
     # Convert AST to Python source code
-    file_content = ast.unparse(mod)
+    file_content = _apply_import_separators(ast.unparse(mod))
 
     # Validate the generated code by compiling it
     if validate_code:
