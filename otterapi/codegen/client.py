@@ -215,7 +215,13 @@ def generate_api_error_class() -> ast.ClassDef:
                                                         'join',
                                                     ),
                                                     args=[
-                                                        ast.GeneratorExp(
+                                                        # A list comprehension, not
+                                                        # a generator: ``ast.unparse``
+                                                        # parenthesizes a lone
+                                                        # generator argument, which
+                                                        # users' linters flag as
+                                                        # UP034 in their tree.
+                                                        ast.ListComp(
                                                             elt=_call(
                                                                 _name('str'),
                                                                 args=[_name('x')],
@@ -493,79 +499,53 @@ _API_ERROR_HIERARCHY_SOURCE = '''\
 class ClientError(BaseAPIError):
     """Base class for 4xx HTTP errors."""
 
-    pass
-
 
 class ServerError(BaseAPIError):
     """Base class for 5xx HTTP errors."""
-
-    pass
 
 
 class BadRequestError(ClientError):
     """Raised on HTTP 400."""
 
-    pass
-
 
 class UnauthorizedError(ClientError):
     """Raised on HTTP 401."""
-
-    pass
 
 
 class ForbiddenError(ClientError):
     """Raised on HTTP 403."""
 
-    pass
-
 
 class NotFoundError(ClientError):
     """Raised on HTTP 404."""
-
-    pass
 
 
 class ConflictError(ClientError):
     """Raised on HTTP 409."""
 
-    pass
-
 
 class UnprocessableEntityError(ClientError):
     """Raised on HTTP 422."""
-
-    pass
 
 
 class RateLimitError(ClientError):
     """Raised on HTTP 429."""
 
-    pass
-
 
 class InternalServerError(ServerError):
     """Raised on HTTP 500."""
-
-    pass
 
 
 class BadGatewayError(ServerError):
     """Raised on HTTP 502."""
 
-    pass
-
 
 class ServiceUnavailableError(ServerError):
     """Raised on HTTP 503."""
 
-    pass
-
 
 class GatewayTimeoutError(ServerError):
     """Raised on HTTP 504."""
-
-    pass
 
 
 _STATUS_ERROR_MAP: dict[int, type[BaseAPIError]] = {
@@ -1090,10 +1070,9 @@ def _build_validate_response_method() -> ast.FunctionDef:
                     )
         """
 
-    body: list[ast.stmt] = [
-        ast.Expr(value=ast.Constant(value=docstring)),
-        ast.Pass(),
-    ]
+    # The docstring is the whole body: a trailing ``pass`` next to it is
+    # PIE790 in the user's tree.
+    body: list[ast.stmt] = [ast.Expr(value=ast.Constant(value=docstring))]
 
     return _function_def(
         name='_validate_response',
@@ -1912,9 +1891,14 @@ def generate_client_stub(
     )
     all_names = sorted([class_name, 'Client', 'APIError', 'Error'])
     all_repr = '[' + ', '.join(f'"{n}"' for n in all_names) + ']'
+    # The base class name is derived from the spec's title, so which of the two
+    # imported names sorts first is only known here.  Emitting them in isort
+    # order keeps the stub free of I001 in the user's tree.
+    stub_imports = ', '.join(sorted([base_class_name, 'BaseAPIError'], key=str.lower))
     return (
         template.replace('__CLASS_NAME__', class_name)
         .replace('__BASE_CLASS_NAME__', base_class_name)
         .replace('__MODULE_NAME__', module_name)
+        .replace('__STUB_IMPORTS__', stub_imports)
         .replace('__ALL__', all_repr)
     )
