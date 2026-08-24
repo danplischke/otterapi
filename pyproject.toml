@@ -111,6 +111,11 @@ extend-select = [
     "Q",
     "RUF100",
     "RUF018", # https://docs.astral.sh/ruff/rules/assignment-in-assert,
+    # The runtime helpers under otterapi/codegen/runtime are copied verbatim
+    # into every generated package, where they are linted by the user's own
+    # ruff config.  SIM101 (merge repeated isinstance calls) shipped to users
+    # as an unfixable finding in their tree, so it is checked here instead.
+    "SIM101",
     "UP",
     "I",
     "TID251",
