@@ -86,8 +86,13 @@ class TestWriteEnabledFeatures:
         )
         written = write_enabled_features(doc, tmp_path, all_features())
         names = sorted(p.name for p in written)
-        # _concurrency.py and _retry.py are always-on
-        assert names == ['_concurrency.py', '_pagination.py', '_retry.py']
+        # _concurrency.py, _retry.py and _serialization.py are always-on
+        assert names == [
+            '_concurrency.py',
+            '_pagination.py',
+            '_retry.py',
+            '_serialization.py',
+        ]
 
     def test_writes_all_when_all_enabled(self, tmp_path: Path):
         doc = _doc(
@@ -102,12 +107,17 @@ class TestWriteEnabledFeatures:
             '_export.py',
             '_pagination.py',
             '_retry.py',
+            '_serialization.py',
         ]
 
     def test_writes_none_when_all_disabled(self, tmp_path: Path):
-        # _concurrency.py and _retry.py are always-on even when other features are off
+        # The always-on modules stay written even when every feature is off
         written = write_enabled_features(_doc(), tmp_path, all_features())
-        assert sorted(p.name for p in written) == ['_concurrency.py', '_retry.py']
+        assert sorted(p.name for p in written) == [
+            '_concurrency.py',
+            '_retry.py',
+            '_serialization.py',
+        ]
 
 
 class TestExtensibility:

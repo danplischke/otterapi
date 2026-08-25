@@ -9,7 +9,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+from inspect import signature
 from pathlib import Path
+from types import TracebackType
+from typing import get_type_hints
 from unittest.mock import patch
 
 import httpx
@@ -178,6 +181,32 @@ class TestLifecycle:
         client = Client(async_http_client=async_http)
         await client.aclose()
         assert async_http.is_closed
+
+
+class TestExitAnnotations:
+    """``__exit__``/``__aexit__`` carry the typeshed protocol types.
+
+    ``exc_type: Any`` trips flake8-pyi's PYI036 in projects that lint the
+    generated package, and the annotations evaluate at import time (generated
+    modules have no ``from __future__ import annotations``), so this doubles
+    as a check that everything they name is importable.
+    """
+
+    EXPECTED = {
+        'exc_type': type[BaseException] | None,
+        'exc_val': BaseException | None,
+        'exc_tb': TracebackType | None,
+        'return': type(None),
+    }
+
+    @pytest.mark.parametrize('method', ['__exit__', '__aexit__'])
+    def test_annotations(self, retry_pkg, method):
+        assert get_type_hints(getattr(retry_pkg.Client, method)) == self.EXPECTED
+
+    @pytest.mark.parametrize('method', ['__exit__', '__aexit__'])
+    def test_argument_order(self, retry_pkg, method):
+        params = list(signature(getattr(retry_pkg.Client, method)).parameters)
+        assert params == ['self', 'exc_type', 'exc_val', 'exc_tb']
 
 
 class TestBeforeRequestHook:

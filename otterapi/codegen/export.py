@@ -236,7 +236,13 @@ def _forward_call_keywords(
         name = param.name_sanitized
         keywords.append(ast.keyword(arg=name, value=_name(name)))
     if request_body_info is not None:
-        keywords.append(ast.keyword(arg='body', value=_name('body')))
+        if request_body_info.flattened_fields is not None:
+            for body_field in request_body_info.flattened_fields:
+                keywords.append(
+                    ast.keyword(arg=body_field.name, value=_name(body_field.name))
+                )
+        else:
+            keywords.append(ast.keyword(arg='body', value=_name('body')))
     for kw_name in extra_kw_names:
         keywords.append(ast.keyword(arg=kw_name, value=_name(kw_name)))
     return keywords
@@ -457,7 +463,8 @@ def build_standalone_paginated_export_fn(
     is_async: bool,
     default_format: str = 'csv',
     default_batch_size: int = 1000,
-    pagination_limit_param: str = 'limit',
+    pagination_style: str | None = None,
+    pagination_config: dict | None = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an export wrapper around a paginated endpoint's ``_iter`` variant.
 
@@ -466,15 +473,37 @@ def build_standalone_paginated_export_fn(
     iterator, and pipes items into ``export(...)`` (sync) or
     ``export_async(...)`` (async). Memory stays bounded by ``batch_size``.
 
-    The raw OpenAPI ``limit`` parameter (or ``pagination_limit_param``) is
-    intentionally excluded: the ``_iter`` function manages page size
-    internally via ``page_size`` / ``max_items``.
+    The spec's own paging parameters are excluded, because ``_iter`` drives
+    them internally via ``page_size`` / ``max_items``. Which ones those are
+    depends on the style, so they are resolved through the same helper
+    ``_iter``'s own signature uses -- forwarding them would produce a wrapper
+    whose arguments ``_iter`` does not accept.
+
+    Args:
+        fn_name: Name of the export function to generate.
+        target_iter_fn_name: Name of the ``_iter`` function it drives.
+        parameters: The endpoint's parameters, before paging ones are stripped.
+        request_body_info: Request body info, or None for a bodiless endpoint.
+        item_type_ast: Annotation of the item model handed to ``export``.
+        item_type_imports: Imports the item annotation needs, or None.
+        docs: Docstring for the generated function, or None.
+        is_async: Whether to generate the async variant.
+        default_format: Default value for the wrapper's ``format`` argument.
+        default_batch_size: Default value for the wrapper's ``batch_size``.
+        pagination_style: The resolved pagination style ('offset', 'cursor',
+            'page'). Required to strip the right parameters.
+        pagination_config: The resolved pagination config dict holding the
+            spec's parameter names.
+
+    Returns:
+        A tuple of (function AST, required imports).
     """
-    # Strip the raw pagination limit param — the _iter fn handles it internally.
+    # Local import avoids a circular dependency at module load.
+    from otterapi.codegen.endpoints import pagination_owned_param_names
+
+    owned = pagination_owned_param_names(pagination_style, pagination_config)
     filtered_parameters = (
-        [p for p in parameters if p.name != pagination_limit_param]
-        if parameters
-        else parameters
+        [p for p in parameters if p.name not in owned] if parameters else parameters
     )
     return _build_export_function(
         fn_name=fn_name,

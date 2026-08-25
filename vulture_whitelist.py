@@ -41,6 +41,13 @@ _.validate_and_convert_paths
 _._coerce_style
 
 # ---------------------------------------------------------------------------
+# ast.NodeVisitor hooks  (dispatched by node type, never called by name)
+# ---------------------------------------------------------------------------
+
+# ast_utils.py — _ReferenceCollector
+_.visit_AnnAssign
+
+# ---------------------------------------------------------------------------
 # Enum members  (accessed as EnumClass.MEMBER, not by bare name)
 # ---------------------------------------------------------------------------
 

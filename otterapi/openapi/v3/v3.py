@@ -350,8 +350,7 @@ class OpenAPI(BaseModel):
     components: Components | None = None
 
     def upgrade(self) -> tuple[openapi_v3_1.OpenAPI, list[str]]:
-        """
-        Upgrade this OpenAPI 3.0 specification to OpenAPI 3.1.
+        """Upgrade this OpenAPI 3.0 specification to OpenAPI 3.1.
 
         Returns:
             A tuple of (OpenAPI 3.1 model, list of warnings)
@@ -650,7 +649,8 @@ class OpenAPI(BaseModel):
                 for name, prop in schema.properties.items()
             }
 
-        additional_properties = None
+        # bool ('any extra property allowed') or a converted schema.
+        additional_properties: Any = None
         if schema.additionalProperties is not None:
             if isinstance(schema.additionalProperties, bool):
                 additional_properties = schema.additionalProperties
@@ -1110,8 +1110,10 @@ class OpenAPI(BaseModel):
         if not self.paths:
             return None
 
-        # Paths is a RootModel containing a dict
-        paths_dict = {}
+        # Paths is a RootModel containing a dict. Typed loosely because
+        # vendor-extension keys pass through as 3.0 objects while real
+        # paths are converted to their 3.1 equivalents.
+        paths_dict: dict[str, Any] = {}
 
         for path, path_item in self.paths.root.items():
             if path.startswith('x-'):

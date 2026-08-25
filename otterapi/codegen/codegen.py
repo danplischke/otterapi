@@ -19,9 +19,12 @@ from otterapi.codegen.ast_utils import (
     ImportCollector,
     _all,
     _assign,
+    _class_def,
     _name,
     _union_expr,
+    strip_optional,
 )
+from otterapi.codegen.auth import AuthScheme, collect_auth_schemes
 from otterapi.codegen.client import (
     _exported_error_names,
     generate_api_error_hierarchy,
@@ -42,6 +45,7 @@ from otterapi.codegen.emit import (
 from otterapi.codegen.endpoints import async_request_fn, request_fn
 from otterapi.codegen.schema import SchemaLoader
 from otterapi.codegen.types import (
+    BodyField,
     Endpoint,
     Parameter,
     RequestBodyInfo,
@@ -76,6 +80,142 @@ def _load_models_mixin_source() -> str:
         .joinpath('_models_mixin.py')
         .read_text('utf-8')
     )
+
+
+#: Default ``style`` per parameter location, per the OpenAPI specification.
+_DEFAULT_PARAM_STYLE = {
+    'query': 'form',
+    'cookie': 'form',
+    'path': 'simple',
+    'header': 'simple',
+}
+
+
+def _resolve_param_serialization(param: OpenAPIParameter) -> tuple[str, bool]:
+    """Resolve a parameter's ``(style, explode)`` against the spec defaults.
+
+    ``explode`` defaults to ``True`` for ``form`` and ``False`` for every other
+    style, so it cannot be defaulted without first knowing the style.
+    """
+    style = getattr(param, 'style', None) or _DEFAULT_PARAM_STYLE.get(param.in_, 'form')
+    explode = getattr(param, 'explode', None)
+    if explode is None:
+        explode = style == 'form'
+    return style, bool(explode)
+
+
+def _field_from_annassign(node: ast.AnnAssign) -> BodyField | None:
+    """Read one model field off its ``AnnAssign``, or None if unreadable.
+
+    A field is optional exactly when its ``Field(...)`` call carries a
+    ``default`` -- which is how ``_create_pydantic_field`` writes it -- and its
+    input key is the ``alias`` when one was needed to reach a name that is not
+    a Python identifier.
+    """
+    if not isinstance(node.target, ast.Name) or node.annotation is None:
+        return None
+
+    name = node.target.id
+    wire_name = name
+    required = node.value is None
+
+    if isinstance(node.value, ast.Call):
+        keywords = {kw.arg: kw.value for kw in node.value.keywords if kw.arg}
+        required = 'default' not in keywords
+        alias = keywords.get('alias')
+        if isinstance(alias, ast.Constant) and isinstance(alias.value, str):
+            wire_name = alias.value
+
+    return BodyField(
+        name=name,
+        wire_name=wire_name,
+        annotation_ast=node.annotation,
+        required=required,
+    )
+
+
+def _disambiguate_flattened_fields(
+    parameters: list[Parameter], fields: list[BodyField]
+) -> None:
+    """Rename flattened body fields that collide with a real parameter.
+
+    A body field named ``status`` and a query parameter named ``status`` would
+    otherwise emit a function with a duplicate argument.  The parameter keeps
+    its name -- it is the one tied to a URL -- and the body field gains a
+    ``_body`` suffix.  ``wire_name`` is untouched, so the payload is unchanged.
+    """
+    taken = {p.name_sanitized for p in parameters}
+    for field in fields:
+        if field.name not in taken:
+            taken.add(field.name)
+            continue
+        candidate = f'{field.name}_body'
+        suffix = 2
+        while candidate in taken:
+            candidate = f'{field.name}_body_{suffix}'
+            suffix += 1
+        field.name = candidate
+        taken.add(candidate)
+
+
+def _snapshot_directory(directory: UPath) -> dict[str, bytes]:
+    """Read every file under *directory* into memory, keyed by relative path.
+
+    Generated packages are a handful of Python source files, so holding them
+    in memory costs less than the temp-directory bookkeeping the alternative
+    would need -- and it works the same for a remote ``UPath``.
+    """
+    snapshot: dict[str, bytes] = {}
+    for path in directory.rglob('*'):
+        if path.is_file():
+            snapshot[str(path.relative_to(directory))] = path.read_bytes()
+    return snapshot
+
+
+def _restore_directory(
+    directory: UPath, snapshot: dict[str, bytes] | None, *, existed: bool
+) -> None:
+    """Put *directory* back the way it was before generation started.
+
+    Best-effort: a failure here must not mask the generation error that
+    triggered the rollback, so cleanup problems are logged rather than raised.
+    """
+    try:
+        if not existed:
+            if directory.exists():
+                _remove_tree(directory)
+            return
+
+        for path in list(directory.rglob('*')):
+            if path.is_file():
+                path.unlink()
+        for path in sorted(
+            (p for p in directory.rglob('*') if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            path.rmdir()
+
+        for relative, content in (snapshot or {}).items():
+            target = directory / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+    except OSError as exc:  # pragma: no cover - depends on filesystem state
+        logger.warning(
+            'Could not fully roll back %s after a failed generation: %s',
+            directory,
+            exc,
+        )
+
+
+def _remove_tree(directory: UPath) -> None:
+    """Delete *directory* and everything under it."""
+    for path in sorted(directory.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        if path.is_file():
+            path.unlink()
+        else:
+            path.rmdir()
+    directory.rmdir()
 
 
 def _topo_sort_by_base_classes(
@@ -466,12 +606,98 @@ class Codegen(OpenAPIProcessor):
 
         return all_params
 
+    def _flatten_body_fields(self, info: RequestBodyInfo) -> list[BodyField] | None:
+        """Return the body model's fields for flattening, or None if it cannot be.
+
+        Only a JSON body backed by a generated model can be spread: there is
+        nothing to spread a bare array, a primitive, or a multipart upload
+        into.  Anything unflattenable keeps the single ``body=`` parameter and
+        says so once in the log, rather than silently looking like it worked.
+        """
+        body_type = info.type
+        if not info.is_json or body_type is None or body_type.type != 'model':
+            logger.warning(
+                'Cannot flatten the %s request body: flattening needs a JSON '
+                'object model. Keeping the single body parameter.',
+                info.content_type,
+            )
+            return None
+
+        assert self.typegen is not None
+        fields = self._collect_model_fields(body_type.name, set())
+        if not fields:
+            logger.warning(
+                'Request body model %r has no fields to flatten; keeping the '
+                'single body parameter.',
+                body_type.name,
+            )
+            return None
+        return fields
+
+    def _collect_model_fields(
+        self, model_name: str | None, seen: set[str]
+    ) -> list[BodyField]:
+        """Collect a model's fields, including those it inherits.
+
+        ``allOf`` composition becomes real base classes, so a required field
+        can live on a base.  Missing those would emit a client that cannot
+        satisfy its own model, failing at validation time rather than here.
+        """
+        assert self.typegen is not None
+        if not model_name or model_name in seen:
+            return []
+        seen.add(model_name)
+
+        registered = self.typegen.types.get(model_name)
+        class_def = registered.implementation_ast if registered else None
+        if not isinstance(class_def, ast.ClassDef):
+            return []
+
+        inherited: list[BodyField] = []
+        for base in class_def.bases:
+            if isinstance(base, ast.Name):
+                inherited.extend(self._collect_model_fields(base.id, seen))
+
+        own = [
+            field
+            for field in (
+                _field_from_annassign(stmt)
+                for stmt in class_def.body
+                if isinstance(stmt, ast.AnnAssign)
+            )
+            if field is not None
+        ]
+
+        # A subclass redeclaring a field wins over the base's version.
+        by_name = {field.name: field for field in inherited}
+        for field in own:
+            by_name[field.name] = field
+        # Required first, so the generated signature can make them positional.
+        return sorted(by_name.values(), key=lambda f: not f.required)
+
+    def _auth_schemes(self) -> list[AuthScheme]:
+        """Security schemes to wire into the generated client.
+
+        Returns an empty list when the feature is switched off or the document
+        declares no supported scheme, in which case no credential parameters
+        and no ``_apply_auth`` method are emitted.
+        """
+        if not self.config.auth.enabled or self.openapi is None:
+            return []
+        return collect_auth_schemes(
+            self._adapter,
+            self.config.auth.env_prefix,
+            self.config.auth.env_vars,
+        )
+
     def _build_parameter(self, param: OpenAPIParameter) -> Parameter:
         """Build a Parameter from a resolved OpenAPI parameter object."""
         param_type = None
         if param.schema_:
             assert self.typegen is not None
             param_type = self.typegen.schema_to_type(param.schema_)
+
+        style, explode = _resolve_param_serialization(param)
 
         return Parameter(
             name=param.name,
@@ -482,6 +708,8 @@ class Codegen(OpenAPIProcessor):
             required=param.required or False,
             type=param_type,
             description=param.description,
+            style=style,
+            explode=explode,
         )
 
     def _resolve_parameter_reference(
@@ -582,11 +810,14 @@ class Codegen(OpenAPIProcessor):
 
         return body_or_ref
 
-    def _extract_request_body(self, operation: Operation) -> RequestBodyInfo | None:
+    def _extract_request_body(
+        self, operation: Operation, path: str = ''
+    ) -> RequestBodyInfo | None:
         """Extract request body information from an operation.
 
         Args:
             operation: The OpenAPI operation to extract request body from.
+            path: The URL path, used to resolve per-path body configuration.
 
         Returns:
             RequestBodyInfo object with content type and schema, or None if no body exists.
@@ -610,21 +841,30 @@ class Codegen(OpenAPIProcessor):
                 base_name=f'{sanitize_identifier(operation.operationId or "")}RequestBody',
             )
 
-        return RequestBodyInfo(
+        resolved = self.config.request_body.for_path(path)
+        info = RequestBodyInfo(
             content_type=selected_content_type,
             type=body_type,
             required=body.required or False,
             description=body.description,
+            exclude_unset=resolved.exclude_unset,
         )
+        if resolved.flatten:
+            info.flattened_fields = self._flatten_body_fields(info)
+        return info
 
     def _get_param_model(
-        self, operation: Operation, path_item_parameters: list | None = None
+        self,
+        operation: Operation,
+        path_item_parameters: list | None = None,
+        path: str = '',
     ) -> tuple[list[Parameter], RequestBodyInfo | None]:
         """Get all parameters and request body info for an operation.
 
         Args:
             operation: The OpenAPI operation to extract parameters from.
             path_item_parameters: Optional path-level parameters to inherit.
+            path: The URL path, used to resolve per-path body configuration.
 
         Returns:
             A tuple of (parameters, request_body_info) where:
@@ -632,7 +872,9 @@ class Codegen(OpenAPIProcessor):
             - request_body_info: RequestBodyInfo object or None
         """
         params = self._extract_operation_parameters(operation, path_item_parameters)
-        body_info = self._extract_request_body(operation)
+        body_info = self._extract_request_body(operation, path)
+        if body_info is not None and body_info.flattened_fields:
+            _disambiguate_flattened_fields(params, body_info.flattened_fields)
 
         return params, body_info
 
@@ -701,7 +943,7 @@ class Codegen(OpenAPIProcessor):
         async_fn_name = f'async_{fn_name}'
 
         parameters, request_body_info = self._get_param_model(
-            operation, path_item_parameters
+            operation, path_item_parameters, path
         )
         response_infos, response_model = self._get_response_models(operation)
         docs = self._build_operation_docs(operation)
@@ -918,6 +1160,511 @@ class Codegen(OpenAPIProcessor):
 
         return baseurl
 
+<<<<<<< HEAD
+=======
+    def _collect_used_model_names(self, endpoints: list[Endpoint]) -> set[str]:
+        """Collect model names that are actually used in endpoint signatures.
+
+        Only collects models that have implementations (defined in models.py)
+        and are referenced in endpoint parameters, request bodies, or responses.
+
+        Args:
+            endpoints: List of Endpoint objects to check for model usage.
+
+        Returns:
+            Set of model names actually used in endpoints.
+
+        Note:
+            This method delegates to collect_used_model_names() from builders.model_collector.
+        """
+        assert self.typegen is not None
+        return collect_used_model_names(endpoints, self.typegen.types)
+
+    def _build_endpoint_file_body(
+        self, endpoints: list[Endpoint]
+    ) -> tuple[list[ast.stmt], ImportCollector, set[str], ast.If | None]:
+        """Build the body of the endpoints file with standalone functions.
+
+        Generates standalone functions with full implementations that use the Client.
+
+        Args:
+            endpoints: List of Endpoint objects to include.
+
+        Returns:
+            Tuple of (body statements, import collector, endpoint names).
+        """
+        from otterapi.codegen.endpoints import build_default_client_code
+
+        body: list[ast.stmt] = []
+        import_collector = ImportCollector()
+
+        # Add default client variable and _get_client() function
+        client_stmts, client_imports = build_default_client_code()
+        body.extend(client_stmts)
+        import_collector.add_imports(client_imports)
+
+        # Track if we need DataFrame type hints
+        has_dataframe_methods = False
+
+        # Track if we need pagination imports
+        has_pagination_methods = False
+
+        # Add standalone endpoint functions
+        endpoint_names: set[str] = set()
+        for endpoint in endpoints:
+            # Track whether paginated DataFrame methods were generated for this endpoint
+            generated_paginated_df = False
+
+            # Check if this endpoint has pagination configured
+            pag_config = None
+            if self.config.pagination.enabled:
+                pag_config = self._get_pagination_config(endpoint)
+
+            # Generate pagination methods if configured, otherwise regular functions
+            if pag_config:
+                has_pagination_methods = True
+                generated_paginated_df = self._emit_paginated_endpoint_methods(
+                    body, import_collector, endpoint_names, endpoint, pag_config
+                )
+                if generated_paginated_df:
+                    has_dataframe_methods = True
+            else:
+                self._emit_standalone_endpoint_pair(
+                    body, import_collector, endpoint_names, endpoint
+                )
+
+            # Non-paginated DataFrame methods (skipped if a paginated DF pair
+            # already covered this endpoint above).
+            if not generated_paginated_df and self._emit_standalone_dataframe_pair(
+                body, import_collector, endpoint_names, endpoint
+            ):
+                has_dataframe_methods = True
+
+            # Non-paginated export methods (paginated case is handled in the
+            # ``if pag_config`` branch above).
+            if not pag_config:
+                self._emit_standalone_export_pair(
+                    body, import_collector, endpoint_names, endpoint
+                )
+
+        type_checking_block = None
+        if has_dataframe_methods:
+            type_checking_block = self._build_dataframe_type_checking_block(
+                import_collector
+            )
+        if has_pagination_methods:
+            self._add_pagination_imports(import_collector)
+
+        return body, import_collector, endpoint_names, type_checking_block
+
+    @staticmethod
+    def _build_pagination_config_dict(pag_config) -> dict:
+        """Build the pagination config dict passed to the endpoint builders."""
+        return {
+            'offset_param': pag_config.offset_param,
+            'limit_param': pag_config.limit_param,
+            'cursor_param': pag_config.cursor_param,
+            'page_param': pag_config.page_param,
+            'per_page_param': pag_config.per_page_param,
+            'data_path': pag_config.data_path,
+            'total_path': pag_config.total_path,
+            'next_cursor_path': pag_config.next_cursor_path,
+            'total_pages_path': pag_config.total_pages_path,
+            'default_page_size': pag_config.default_page_size,
+            'send_page_size': pag_config.send_page_size,
+        }
+
+    def _emit_paginated_endpoint_methods(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+        pag_config,
+    ) -> bool:
+        """Emit sync/async paginated functions, iterators, DataFrame and export pairs.
+
+        Returns True if a paginated DataFrame pair was emitted (so the caller
+        can flag ``has_dataframe_methods`` and skip the non-paginated DF block).
+        """
+        from otterapi.codegen.endpoints import (
+            build_standalone_paginated_fn,
+            build_standalone_paginated_iter_fn,
+        )
+
+        item_type_ast, item_type_imports = self._get_item_type_ast(
+            endpoint, pag_config.data_path
+        )
+        pag_dict = self._build_pagination_config_dict(pag_config)
+
+        for is_async, fn_name in self._sync_async_pair(endpoint):
+            fn, imports = build_standalone_paginated_fn(
+                fn_name=fn_name,
+                method=endpoint.method,
+                path=endpoint.path,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                response_type=endpoint.response_type,
+                pagination_style=pag_config.style,
+                pagination_config=pag_dict,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+            )
+            endpoint_names.add(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+
+        for is_async, base_fn_name in self._sync_async_pair(endpoint):
+            iter_fn_name = f'{base_fn_name}_iter'
+            iter_fn, iter_imports = build_standalone_paginated_iter_fn(
+                fn_name=iter_fn_name,
+                method=endpoint.method,
+                path=endpoint.path,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                response_type=endpoint.response_type,
+                pagination_style=pag_config.style,
+                pagination_config=pag_dict,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+            )
+            endpoint_names.add(iter_fn_name)
+            body.append(iter_fn)
+            import_collector.add_imports(iter_imports)
+
+        generated_paginated_df = self._emit_paginated_dataframe_pair(
+            body,
+            import_collector,
+            endpoint_names,
+            endpoint,
+            pag_config,
+            pag_dict,
+            item_type_ast,
+            item_type_imports,
+        )
+
+        self._emit_paginated_export_pair(
+            body,
+            import_collector,
+            endpoint_names,
+            endpoint,
+            item_type_ast,
+            item_type_imports,
+            pag_config,
+            pag_dict,
+        )
+
+        return generated_paginated_df
+
+    def _emit_standalone_endpoint_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+    ) -> None:
+        """Emit the regular (non-paginated) sync and async standalone functions."""
+        from otterapi.codegen.endpoints import build_standalone_endpoint_fn
+
+        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+        unwrap_type_ast = None
+        unwrap_type_imports = None
+        if should_unwrap and unwrap_path:
+            unwrap_type_ast, unwrap_type_imports = self._get_unwrapped_type_ast(
+                endpoint, unwrap_path
+            )
+
+        response_type_imports = None
+        if endpoint.response_type and endpoint.response_type.annotation_ast:
+            response_type_imports = self._collect_model_imports_from_ast(
+                endpoint.response_type.annotation_ast
+            )
+
+        for is_async, fn_name in self._sync_async_pair(endpoint):
+            fn, imports = build_standalone_endpoint_fn(
+                fn_name=fn_name,
+                method=endpoint.method,
+                path=endpoint.path,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                response_type=endpoint.response_type,
+                response_infos=endpoint.response_infos,
+                docs=endpoint.description,
+                is_async=is_async,
+                unwrap_data_path=unwrap_path if should_unwrap else None,
+                unwrap_type_ast=unwrap_type_ast,
+                unwrap_type_imports=unwrap_type_imports,
+                response_type_imports=response_type_imports,
+            )
+            endpoint_names.add(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+
+    @staticmethod
+    def _build_dataframe_type_checking_block(
+        import_collector: ImportCollector,
+    ) -> ast.If:
+        """Build the ``if TYPE_CHECKING`` block for DataFrame type hints."""
+        import_collector.add_imports({'typing': {'TYPE_CHECKING'}})
+        import_collector.add_imports({'._dataframe': {'to_pandas', 'to_polars'}})
+        return ast.If(
+            test=_name('TYPE_CHECKING'),
+            body=[
+                ast.Import(names=[ast.alias(name='pandas', asname='pd')]),
+                ast.Import(names=[ast.alias(name='polars', asname='pl')]),
+            ],
+            orelse=[],
+        )
+
+    @staticmethod
+    def _add_pagination_imports(import_collector: ImportCollector) -> None:
+        """Register the shared imports required by generated pagination helpers."""
+        import_collector.add_imports({'collections.abc': {'Iterator', 'AsyncIterator'}})
+        import_collector.add_imports(
+            {
+                '._pagination': {
+                    'paginate_offset',
+                    'paginate_offset_async',
+                    'paginate_cursor',
+                    'paginate_cursor_async',
+                    'paginate_page',
+                    'paginate_page_async',
+                    'iterate_offset',
+                    'iterate_offset_async',
+                    'iterate_cursor',
+                    'iterate_cursor_async',
+                    'iterate_page',
+                    'iterate_page_async',
+                    'extract_path',
+                }
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Per-feature emitters extracted from ``_build_endpoint_file_body``
+    # ------------------------------------------------------------------
+
+    def _sync_async_pair(self, endpoint: Endpoint) -> list[tuple[bool, str]]:
+        """Return the (is_async, base_fn_name) pair every feature emitter loops over.
+
+        Factoring this out removes the four near-identical inline tuples in
+        the paired emitters below and keeps the "sync first, async second"
+        emission order consistent across DataFrame / export / paginated
+        variants.
+
+        Respects ``generate_sync`` and ``generate_async`` from the document config.
+        """
+        result = []
+        if self.config.generate_sync:
+            result.append((False, endpoint.sync_fn_name))
+        if self.config.generate_async:
+            result.append((True, endpoint.async_fn_name))
+        return result
+
+    def _emit_paginated_dataframe_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+        pag_config,
+        pag_dict: dict,
+        item_type_ast,
+        item_type_imports,
+    ) -> bool:
+        """Emit sync+async paginated DataFrame methods (pandas / polars).
+
+        Returns True if any method was emitted (used by the orchestrator to
+        flag ``has_dataframe_methods`` and skip the non-paginated DF block).
+        """
+        if not self.config.dataframe.enabled:
+            return False
+
+        endpoint_df_config = self.config.dataframe.endpoints.get(endpoint.sync_fn_name)
+        if endpoint_df_config and endpoint_df_config.enabled is False:
+            return False
+
+        from otterapi.codegen.endpoints import (
+            build_standalone_paginated_dataframe_fn,
+        )
+
+        emitted = False
+        libraries: list[Literal['pandas', 'polars']] = []
+        if self.config.dataframe.pandas:
+            libraries.append('pandas')
+        if self.config.dataframe.polars:
+            libraries.append('polars')
+
+        for library in libraries:
+            suffix = '_df' if library == 'pandas' else '_pl'
+            for is_async, base_name in self._sync_async_pair(endpoint):
+                fn_name = f'{base_name}{suffix}'
+                fn, imports = build_standalone_paginated_dataframe_fn(
+                    fn_name=fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    response_type=endpoint.response_type,
+                    pagination_style=pag_config.style,
+                    pagination_config=pag_dict,
+                    library=library,
+                    item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
+                    docs=endpoint.description,
+                    is_async=is_async,
+                )
+                endpoint_names.add(fn_name)
+                body.append(fn)
+                import_collector.add_imports(imports)
+                emitted = True
+
+        return emitted
+
+    def _emit_paginated_export_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+        item_type_ast,
+        item_type_imports,
+        pag_config,
+        pag_dict: dict,
+    ) -> bool:
+        """Emit sync+async export wrappers around the paginated ``_iter`` fns."""
+        if not self.config.export.enabled or item_type_ast is None:
+            return False
+        should_generate, formats, _path = (
+            self.config.export.should_generate_for_endpoint(
+                endpoint_name=endpoint.sync_fn_name,
+                returns_list=True,
+            )
+        )
+        if not should_generate:
+            return False
+
+        from otterapi.codegen.export import build_standalone_paginated_export_fn
+
+        default_format = formats[0] if formats else 'csv'
+        for is_async, base_name in self._sync_async_pair(endpoint):
+            fn_name = f'{base_name}_export'
+            fn, imports = build_standalone_paginated_export_fn(
+                fn_name=fn_name,
+                target_iter_fn_name=f'{base_name}_iter',
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+                default_format=default_format,
+                default_batch_size=self.config.export.batch_size,
+                pagination_style=pag_config.style,
+                pagination_config=pag_dict,
+            )
+            endpoint_names.add(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+        return True
+
+    def _emit_standalone_dataframe_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+    ) -> bool:
+        """Emit sync+async DataFrame wrappers for a non-paginated endpoint."""
+        if not self.config.dataframe.enabled:
+            return False
+
+        df_config = self._get_dataframe_config(endpoint)
+        if not (df_config.generate_pandas or df_config.generate_polars):
+            return False
+
+        from otterapi.codegen.endpoints import build_standalone_dataframe_fn
+
+        emitted = False
+        for library, generate, suffix in (
+            ('pandas', df_config.generate_pandas, '_df'),
+            ('polars', df_config.generate_polars, '_pl'),
+        ):
+            if not generate:
+                continue
+            for is_async, base_name in self._sync_async_pair(endpoint):
+                fn_name = f'{base_name}{suffix}'
+                fn, imports = build_standalone_dataframe_fn(
+                    fn_name=fn_name,
+                    method=endpoint.method,
+                    path=endpoint.path,
+                    parameters=endpoint.parameters,
+                    request_body_info=endpoint.request_body,
+                    library=cast("Literal['pandas', 'polars']", library),
+                    default_path=df_config.path,
+                    docs=endpoint.description,
+                    is_async=is_async,
+                )
+                endpoint_names.add(fn_name)
+                body.append(fn)
+                import_collector.add_imports(imports)
+                emitted = True
+        return emitted
+
+    def _emit_standalone_export_pair(
+        self,
+        body: list[ast.stmt],
+        import_collector: ImportCollector,
+        endpoint_names: set[str],
+        endpoint: Endpoint,
+    ) -> bool:
+        """Emit sync+async export wrappers for a non-paginated list endpoint."""
+        if not self.config.export.enabled:
+            return False
+        # When response unwrapping is active, the list lives behind the data
+        # path (e.g. envelope.data) rather than directly on the response type,
+        # so resolve the item type through that path.
+        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+        data_path = unwrap_path if should_unwrap else None
+        item_type_ast, item_type_imports = self._get_item_type_ast(endpoint, data_path)
+        if item_type_ast is None:
+            return False
+        should_generate, formats, _path = (
+            self.config.export.should_generate_for_endpoint(
+                endpoint_name=endpoint.sync_fn_name,
+                returns_list=True,
+            )
+        )
+        if not should_generate:
+            return False
+
+        from otterapi.codegen.export import build_standalone_export_fn
+
+        default_format = formats[0] if formats else 'csv'
+        for is_async, base_name in self._sync_async_pair(endpoint):
+            fn_name = f'{base_name}_export'
+            fn, imports = build_standalone_export_fn(
+                fn_name=fn_name,
+                target_fn_name=base_name,
+                parameters=endpoint.parameters,
+                request_body_info=endpoint.request_body,
+                item_type_ast=item_type_ast,
+                item_type_imports=item_type_imports,
+                docs=endpoint.description,
+                is_async=is_async,
+                default_format=default_format,
+                default_batch_size=self.config.export.batch_size,
+            )
+            endpoint_names.add(fn_name)
+            body.append(fn)
+            import_collector.add_imports(imports)
+        return True
+
+>>>>>>> origin/main
     def _generate_endpoint_file(
         self, path: UPath, endpoints: list[Endpoint]
     ) -> set[str]:
@@ -938,6 +1685,45 @@ class Codegen(OpenAPIProcessor):
             reexport_models=self.config.reexport_models,
             reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
         )
+<<<<<<< HEAD
+=======
+
+        import_collector.add_imports({'.client': {'Client'}})
+        # Registered optimistically: pruned away for modules that use
+        # neither path parameters nor a flattened request body (see
+        # write_mod's import pruning).
+        import_collector.add_imports(
+            {'._serialization': {'format_path_param', 'build_request_body'}}
+        )
+
+        model_names = self._collect_used_model_names(endpoints)
+        if model_names:
+            for name in model_names:
+                import_collector.add_imports({MODELS_MODULE: {name}})
+
+        final_body: list[ast.stmt] = []
+        final_body.extend(import_collector.to_ast())
+
+        if type_checking_block:
+            final_body.append(type_checking_block)
+
+        all_names: set[str] = set(endpoint_names)
+        if self.config.reexport_models:
+            model_names = import_collector._imports.get(MODELS_MODULE, set())
+            if self.config.reexport_model_exclude_patterns:
+                model_names = {
+                    n
+                    for n in model_names
+                    if not any(
+                        fnmatch.fnmatch(n, pat)
+                        for pat in self.config.reexport_model_exclude_patterns
+                    )
+                }
+            all_names |= model_names
+        final_body.append(_all(sorted(all_names)))
+        final_body.extend(body)
+
+>>>>>>> origin/main
         write_mod(
             body,
             path,
@@ -1086,14 +1872,14 @@ class Codegen(OpenAPIProcessor):
         )
         if has_model_base:
             return impl
-        return ast.ClassDef(
+        return _class_def(
             name=impl.name,
             bases=[
                 ast.Name(id='_HtmlReprMixin', ctx=ast.Load()),
                 *impl.bases,
             ],
-            keywords=impl.keywords,
             body=impl.body,
+            keywords=impl.keywords,
             decorator_list=impl.decorator_list,
         )
 
@@ -1225,6 +2011,17 @@ class Codegen(OpenAPIProcessor):
         )
 
     def generate(self):
+        """Generate the client, leaving the output directory untouched on failure.
+
+        Generation writes many files and can fail partway through -- an
+        unresolvable relative server URL, a schema the type generator rejects,
+        a validation error on an emitted module. Without the rollback below,
+        the user is left with a half-written package that imports but is
+        wrong, which is worse than no package at all.
+
+        Returns:
+            The list of generated file paths, relative to the output directory.
+        """
         self._load_schema()
 
         if self.openapi is None:
@@ -1236,6 +2033,20 @@ class Codegen(OpenAPIProcessor):
             raise ValueError('OpenAPI spec has no paths to generate endpoints from')
 
         directory = UPath(self.config.output)
+        existed = directory.exists()
+        # Snapshot rather than generate-then-swap: client.py is deliberately
+        # preserved across runs, as is anything else the user keeps in the
+        # output directory, and a swap would discard both.
+        snapshot = _snapshot_directory(directory) if existed else None
+
+        try:
+            return self._generate_into(directory)
+        except BaseException:
+            _restore_directory(directory, snapshot, existed=existed)
+            raise
+
+    def _generate_into(self, directory: UPath):
+        """Write every generated file into *directory*."""
         directory.mkdir(parents=True, exist_ok=True)
 
         if not os.access(str(directory), os.W_OK):
@@ -1385,6 +2196,10 @@ class Codegen(OpenAPIProcessor):
             '_concurrency',
             ['run_concurrently', 'run_concurrently_async', 'run_sync'],
         )
+        if self.config.request_body.flatten or self.config.request_body.paths:
+            # Callers need NOTSET to build a flattened call programmatically,
+            # e.g. passing a value or the sentinel from a conditional.
+            self._add_reexport(body, all_names, '_serialization', ['NOTSET', 'NotSet'])
 
     def _generate_init_file(
         self,
@@ -1513,7 +2328,9 @@ class Codegen(OpenAPIProcessor):
         output_name = self.config.output
         generated_files = []
         for module in emitted:
-            rel_path = str(module.path.relative_to(directory))
+            # Both sides may be UPath; PurePath.relative_to's overloads only
+            # cover str / os.PathLike, which UPath satisfies at runtime.
+            rel_path = str(module.path.relative_to(str(directory)))
             generated_files.append(f'{output_name}/{rel_path}')
 
         # Add __init__.py files
@@ -1572,6 +2389,7 @@ class Codegen(OpenAPIProcessor):
             default_base_url=base_url,
             default_timeout=30.0,
             pydantic_version=self.config.pydantic_version,
+            auth_schemes=self._auth_schemes(),
         )
 
         # Build the _client.py file
@@ -1620,3 +2438,274 @@ class Codegen(OpenAPIProcessor):
             generated_files.append(f'{output_name}/client.py')
 
         return generated_files
+<<<<<<< HEAD
+=======
+
+    def _get_dataframe_config(self, endpoint: Endpoint) -> DataFrameMethodConfig:
+        """Get the DataFrame method configuration for an endpoint.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            DataFrameMethodConfig with generation flags and path.
+
+        Note:
+            This method delegates to get_dataframe_config_for_endpoint() from dataframe_utils.
+            When response unwrapping is active, the unwrapped data type is the
+            endpoint's real return type, so it is passed through for list
+            detection -- otherwise non-paginated envelope list endpoints (e.g.
+            ``ResponseWithStatusEnvelope*``) would be misclassified and lose
+            their DataFrame variants.
+        """
+        unwrap_type_ast = None
+        should_unwrap, unwrap_path = self._get_unwrap_config(endpoint)
+        if should_unwrap and unwrap_path:
+            unwrap_type_ast, _ = self._get_unwrapped_type_ast(endpoint, unwrap_path)
+
+        return get_dataframe_config_for_endpoint(
+            endpoint, self.config.dataframe, unwrap_type_ast=unwrap_type_ast
+        )
+
+    def _get_pagination_config(
+        self, endpoint: Endpoint
+    ) -> PaginationMethodConfig | None:
+        """Get the pagination method configuration for an endpoint.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            PaginationMethodConfig if pagination is configured, None otherwise.
+        """
+        return get_pagination_config_for_endpoint(
+            endpoint.sync_fn_name,
+            self.config.pagination,
+            endpoint.parameters,
+        )
+
+    def _get_item_type_ast(
+        self, endpoint: Endpoint, data_path: str | None = None
+    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
+        """Extract the item type AST from a list response type.
+
+        For example, if response_type is list[User], returns the AST for User.
+        For paginated endpoints with envelope response types (e.g.,
+        PaginatedResponse with a 'data' field), this method uses data_path
+        to look up the field type from the response model.
+
+        Args:
+            endpoint: The endpoint to check.
+            data_path: Optional path to the data field in envelope response types
+                (e.g., "data"). If provided and the response type is not directly
+                a list, this will look up the field type from the response model.
+
+        Returns:
+            A tuple of (ast_expression, imports) where:
+            - ast_expression: The AST for the item type, or None if not determinable.
+            - imports: Dictionary of imports needed for the item type.
+        """
+        if not endpoint.response_type or not endpoint.response_type.annotation_ast:
+            return None, {}
+
+        ann = endpoint.response_type.annotation_ast
+
+        # First, check if the response type itself is list[X]
+        item_type, imports = self._extract_list_item_type(ann)
+        if item_type is not None:
+            return item_type, imports
+
+        # If data_path is provided, try to extract item type from envelope response
+        if data_path:
+            field_type_ast = self._get_field_type_from_response(endpoint, data_path)
+            item_type, imports = self._extract_list_item_type(field_type_ast)
+            if item_type is not None:
+                return item_type, imports
+
+        return None, {}
+
+    def _extract_list_item_type(
+        self, type_ast: ast.expr | None
+    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
+        """Extract the item type AST and imports if ``type_ast`` is ``list[X]``.
+
+        Looks through an optional wrapper, so an envelope field declared
+        ``list[Thing] | None`` still yields ``Thing``.
+        """
+        type_ast = strip_optional(type_ast)
+        if (
+            isinstance(type_ast, ast.Subscript)
+            and isinstance(type_ast.value, ast.Name)
+            and type_ast.value.id == 'list'
+        ):
+            item_type = type_ast.slice
+            return item_type, self._collect_model_imports_from_ast(item_type)
+        return None, {}
+
+    def _get_field_type_from_response(
+        self, endpoint: Endpoint, field_path: str
+    ) -> ast.expr | None:
+        """Extract the type AST for a field from the response model.
+
+        For union response types (e.g., SuccessResponse | ErrorResponse),
+        this method looks for the 2xx success response in response_infos
+        to find the correct type.
+
+        Args:
+            endpoint: The endpoint to check.
+            field_path: The dotted path to the field (e.g., "data").
+
+        Returns:
+            The AST expression for the field type, or None if not found.
+        """
+        if not endpoint.response_type:
+            return None
+
+        # Get the first part of the path (for nested paths like "data.items")
+        field_name = field_path.split('.')[0]
+
+        type_name = self._resolve_response_type_name(endpoint)
+        if not type_name:
+            return None
+
+        # Find the type definition (typegen.types is keyed by name, not reference)
+        assert self.typegen is not None
+        type_def = self.typegen.types.get(type_name)
+        if not type_def or not type_def.implementation_ast:
+            return None
+
+        impl = type_def.implementation_ast
+        if not isinstance(impl, ast.ClassDef):
+            return None
+
+        return self._find_field_annotation(impl, field_name)
+
+    @staticmethod
+    def _resolve_response_type_name(endpoint: Endpoint) -> str | None:
+        """Resolve the model name backing an endpoint's response type.
+
+        Union response types (e.g. ``SuccessResponse | ErrorResponse``) have no
+        name on ``response_type`` directly, so fall back to the 2xx success
+        response in ``response_infos``.
+        """
+        type_name = endpoint.response_type.name if endpoint.response_type else None
+        if type_name or not endpoint.response_infos:
+            return type_name
+
+        for response_info in endpoint.response_infos:
+            if 200 <= response_info.status_code < 300 and response_info.type:
+                return response_info.type.name
+
+        return None
+
+    @staticmethod
+    def _find_field_annotation(
+        class_def: ast.ClassDef, field_name: str
+    ) -> ast.expr | None:
+        """Find the annotation AST for a field declared in a class body."""
+        for stmt in class_def.body:
+            if (
+                isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+                and stmt.target.id == field_name
+            ):
+                return stmt.annotation
+        return None
+
+    def _get_unwrap_config(self, endpoint: Endpoint) -> tuple[bool, str | None]:
+        """Get the response unwrap configuration for an endpoint.
+
+        Args:
+            endpoint: The endpoint to check.
+
+        Returns:
+            A tuple of (should_unwrap, data_path).
+        """
+        return self.config.response_unwrap.get_unwrap_config_for_endpoint(
+            endpoint.sync_fn_name
+        )
+
+    def _collect_model_imports_from_ast(
+        self, annotation_ast: ast.expr
+    ) -> dict[str, set[str]]:
+        """Collect model imports needed for an AST annotation.
+
+        Walks the AST and finds all Name nodes that correspond to
+        model types in typegen.types, then collects their annotation imports.
+
+        Args:
+            annotation_ast: The annotation AST to scan for model references.
+
+        Returns:
+            Dictionary mapping module names to sets of import names.
+        """
+        imports: dict[str, set[str]] = {}
+
+        # Get all available model names
+        assert self.typegen is not None
+        available_models = {
+            name
+            for name, type_ in self.typegen.types.items()
+            if type_.implementation_ast is not None
+        }
+
+        # Walk the AST to find Name nodes
+        for node in ast.walk(annotation_ast):
+            if isinstance(node, ast.Name) and node.id in available_models:
+                # This is a model reference - add it to imports
+                # Models are imported from the models module
+                if MODELS_MODULE not in imports:
+                    imports[MODELS_MODULE] = set()
+                imports[MODELS_MODULE].add(node.id)
+
+        return imports
+
+    def _get_unwrapped_type_ast(
+        self,
+        endpoint: Endpoint,
+        data_path: str,
+    ) -> tuple[ast.expr | None, dict[str, set[str]]]:
+        """Extract the type AST for the unwrapped data field.
+
+        Looks up the response type model in typegen and finds the field
+        matching the data_path to determine its type.
+
+        For union response types (e.g., SuccessResponse | ErrorResponse),
+        this method looks for the 2xx success response in response_infos
+        to find the correct type to unwrap.
+
+        Args:
+            endpoint: The endpoint to check.
+            data_path: The dotted path to the data field (e.g., "data").
+
+        Returns:
+            A tuple of (ast_expression, imports) where:
+            - ast_expression: The AST for the unwrapped type, or None if not found.
+            - imports: Dictionary of imports needed for the unwrapped type.
+        """
+        if not endpoint.response_type:
+            return None, {}
+
+        # Get the first part of the path (for nested paths like "data.items")
+        field_name = data_path.split('.')[0]
+
+        type_name = self._resolve_response_type_name(endpoint)
+        if not type_name:
+            return None, {}
+
+        # Find the type definition (typegen.types is keyed by name, not reference)
+        assert self.typegen is not None
+        type_def = self.typegen.types.get(type_name)
+        if not type_def or not type_def.implementation_ast:
+            return None, {}
+
+        impl = type_def.implementation_ast
+        if not isinstance(impl, ast.ClassDef):
+            return None, {}
+
+        annotation = self._find_field_annotation(impl, field_name)
+        if annotation is None:
+            return None, {}
+
+        return annotation, self._collect_model_imports_from_ast(annotation)
+>>>>>>> origin/main

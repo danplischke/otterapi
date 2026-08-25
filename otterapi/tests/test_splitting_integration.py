@@ -6,13 +6,18 @@ and importable.
 """
 
 import ast
+import importlib
+import json
+import sys
+from pathlib import Path
 
+from otterapi.codegen.codegen import Codegen
 from otterapi.codegen.splitting import (
     ModuleMapResolver,
     ModuleTreeBuilder,
 )
 from otterapi.codegen.types import Endpoint
-from otterapi.config import ModuleDefinition, ModuleSplitConfig
+from otterapi.config import DocumentConfig, ModuleDefinition, ModuleSplitConfig
 
 
 def make_endpoint(
@@ -424,3 +429,116 @@ class TestFlattenedOutput:
         assert 'orders' in flattened
         assert len(flattened['users']) == 2
         assert len(flattened['orders']) == 1
+
+
+class TestNestedSplitImports:
+    """A nested module_map puts endpoints in subpackages.
+
+    ``client.py``, ``models.py`` and the runtime helpers stay at the package
+    root, so a module in ``store/`` has to reach up a level to import them.
+    Emitting a plain ``from .client import Client`` there produced a package
+    that raised ``ModuleNotFoundError`` on import.
+    """
+
+    SPEC = {
+        'openapi': '3.1.0',
+        'info': {'title': 'Nested', 'version': '1.0'},
+        'servers': [{'url': 'https://example.test'}],
+        'paths': {
+            '/pet/{petId}': {
+                'get': {
+                    'operationId': 'getPet',
+                    'parameters': [
+                        {
+                            'name': 'petId',
+                            'in': 'path',
+                            'required': True,
+                            'schema': {'type': 'integer'},
+                        }
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'ok',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/Pet'}
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            '/store/order': {
+                'get': {
+                    'operationId': 'getOrder',
+                    'responses': {
+                        '200': {
+                            'description': 'ok',
+                            'content': {
+                                'application/json': {'schema': {'type': 'object'}}
+                            },
+                        }
+                    },
+                }
+            },
+        },
+        'components': {
+            'schemas': {
+                'Pet': {
+                    'type': 'object',
+                    'properties': {'name': {'type': 'string'}},
+                }
+            }
+        },
+    }
+
+    def _generate(self, tmp_path: Path):
+        spec_file = tmp_path / 'openapi.json'
+        spec_file.write_text(json.dumps(self.SPEC), encoding='utf-8')
+        output = tmp_path / 'nested_pkg'
+        Codegen(
+            DocumentConfig(
+                source=str(spec_file),
+                output=str(output),
+                module_split=ModuleSplitConfig(
+                    enabled=True,
+                    strategy='custom',
+                    # Without this the one-endpoint modules fall back to
+                    # common.py and never exercise the nested layout.
+                    min_endpoints=1,
+                    module_map={
+                        'store': {'pets': ['/pet/**'], 'orders': ['/store/**']}
+                    },
+                ),
+            )
+        ).generate()
+        return output
+
+    def test_nested_module_reaches_root_for_siblings(self, tmp_path: Path):
+        output = self._generate(tmp_path)
+        source = (output / 'store' / 'pets.py').read_text(encoding='utf-8')
+        assert 'from ..client import Client' in source
+        assert 'from ..models import' in source
+        assert 'from .._serialization import' in source
+        # The single-dot form would resolve to nested_pkg.store.client.
+        assert 'from .client import' not in source
+
+    def test_nested_package_is_importable(self, tmp_path: Path):
+        self._generate(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        try:
+            for name in [
+                m
+                for m in list(sys.modules)
+                if m == 'nested_pkg' or m.startswith('nested_pkg.')
+            ]:
+                sys.modules.pop(name, None)
+            module = importlib.import_module('nested_pkg.store.pets')
+            assert callable(module.get_pet)
+            root = importlib.import_module('nested_pkg')
+            assert hasattr(root, 'get_pet')
+        finally:
+            try:
+                sys.path.remove(str(tmp_path))
+            except ValueError:
+                pass

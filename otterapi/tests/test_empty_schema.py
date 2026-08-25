@@ -52,8 +52,10 @@ class TestEmptySchemaEmitsAny:
         assert ast.unparse(result.annotation_ast) == 'list[Any]'
 
     def test_array_with_empty_items_matches_absent_items(self):
-        """An explicit empty ``items`` and an absent ``items`` must agree --
-        both mean "any element" and must both yield ``list[Any]``."""
+        """An explicit empty ``items`` and an absent ``items`` must agree.
+
+        Both mean "any element", so both yield ``list[Any]``.
+        """
         explicit = _typegen().schema_to_type(
             Schema.model_validate({'type': 'array', 'items': {}}), 'Explicit'
         )
@@ -86,8 +88,10 @@ class TestEmptySchemaEmitsAny:
 
 
 class TestObjectSchemasStillMapToDict:
-    """Regression guard: the empty-schema fallback must NOT over-broaden --
-    schemas that genuinely describe an object/map keep their ``dict`` shape."""
+    """Regression guard: the empty-schema fallback must not over-broaden.
+
+    Schemas that genuinely describe an object/map keep their ``dict`` shape.
+    """
 
     def test_explicit_type_object_is_dict(self):
         """An explicit ``type: object`` (no properties) stays ``dict[str, Any]``."""

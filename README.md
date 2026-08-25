@@ -107,7 +107,7 @@ These sit at the root of your config file, outside of `documents:`.
 | `documents` | list | — | List of OpenAPI documents to process (required) |
 | `generate_endpoints` | bool | `true` | Whether to generate endpoint functions |
 | `format_output` | bool | `true` | Format generated code with ruff/black |
-| `validate_output` | bool | `true` | Validate generated code syntax after writing |
+| `validate_output` | bool | `true` | Validate generated code: syntax, plus every referenced name resolving to an import or definition |
 | `create_py_typed` | bool | `true` | Create `py.typed` marker files |
 | `lenient` | bool | `false` | Drop unrecognized, invalid fields instead of failing (see [Strict vs Lenient Validation](#-strict-vs-lenient-validation)) |
 
@@ -120,6 +120,13 @@ documents:
   - source: https://api.example.com/openapi.json
     output: ./client
 ```
+
+> `format_output` only controls *cosmetic* formatting (line wrapping, quote
+> style). The import block of every generated module is computed from the
+> names the module actually references, so generated code never carries unused
+> imports — with or without ruff/black installed. `validate_output` checks the
+> other direction: generation fails rather than emitting a module that
+> references a name nothing imports or defines.
 
 ### Document Options
 
@@ -142,6 +149,8 @@ Each entry under `documents:` supports these fields:
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
+| `target_python` | `3.10` … `3.14` | `3.10` | Oldest Python the generated code has to run on. `3.12`+ emits PEP 695 type parameters in the runtime helpers |
+| `pydantic_version` | `1` \| `2` | `2` | Target Pydantic version for generated models and helpers |
 
 #### Function Naming
 
@@ -173,6 +182,38 @@ documents:
 ```
 
 Patterns follow standard glob syntax (`*` = single segment, `**` = any depth).
+
+#### Target Python Version
+
+Generated code defaults to running on Python 3.10, so the runtime helpers
+(`_pagination.py`, `_concurrency.py`) declare their generics with module-level
+`TypeVar`s:
+
+```python
+T = TypeVar('T')
+
+def paginate_offset(..., extract_items: Callable[[Any], list[T]]) -> list[T]:
+```
+
+That is the only spelling that works before 3.12, but a project whose linter is
+configured for a newer Python flags it as legacy (ruff's
+[UP047](https://docs.astral.sh/ruff/rules/non-pep695-generic-function/)). If the
+generated client only has to run on 3.12+, say so and the same helpers are
+emitted with [PEP 695](https://peps.python.org/pep-0695/) type parameters:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    target_python: "3.12"
+```
+
+```python
+def paginate_offset[T](..., extract_items: Callable[[Any], list[T]]) -> list[T]:
+```
+
+The setting describes the *generated* code — OtterAPI itself still runs on any
+supported interpreter, including when it emits 3.12-only syntax.
 
 ### Environment Variable Support
 
@@ -867,6 +908,225 @@ print(user.id, user.email)
 
 ---
 
+## 🔐 Authentication
+
+Every scheme under `components.securitySchemes` becomes a keyword-only
+parameter on the generated client, applied automatically to every request.
+
+```yaml
+# spec
+components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: X-API-Key
+      in: header
+    bearerAuth:
+      type: http
+      scheme: bearer
+```
+
+```python
+from client import Client
+
+client = Client(api_key='...', bearer_auth='...')
+user = get_user(user_id=123, client=client)
+```
+
+| Scheme | Parameter type | Sent as |
+|--------|----------------|---------|
+| `apiKey` in `header` | `str` | the header named in the spec |
+| `apiKey` in `query` | `str` | the query parameter named in the spec |
+| `apiKey` in `cookie` | `str` | appended to the `Cookie` header |
+| `http` / `bearer` | `str` | `Authorization: Bearer <token>` |
+| `http` / `basic` | `tuple[str, str]` | `Authorization: Basic <base64>` |
+| `oauth2`, `openIdConnect` | `str` | `Authorization: Bearer <token>` — you supply an already-obtained token |
+
+Schemes OtterAPI does not recognize are skipped with a warning rather than
+failing generation.
+
+### Credentials from the environment
+
+Omit a credential and the client reads it from `<env_prefix>_<SCHEME_NAME>`,
+upper-cased — so the `api_key` scheme above falls back to `OTTER_API_KEY`.
+Set `env_prefix` per document when one project generates several clients:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    auth:
+      env_prefix: MYAPI    # -> MYAPI_API_KEY
+```
+
+When a credential already lives in a variable the prefix rule would never
+derive, name it outright with `env_vars`. Keys are scheme names from
+`components.securitySchemes` (the generated parameter name works too), and
+only the schemes you name are affected — the rest keep the derived default:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    auth:
+      env_prefix: MYAPI
+      env_vars:
+        api_key: STRIPE_SECRET_KEY   # this one exactly
+        # bearerAuth still falls back to MYAPI_BEARER_AUTH
+```
+
+A constructor argument always beats the environment. Basic auth needs two
+values, so it has no environment fallback at all.
+
+### Auth Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Generate credential parameters from `securitySchemes` |
+| `env_prefix` | string | `OTTER` | Prefix for the environment variables consulted when an argument is omitted. Empty string drops the prefix |
+| `env_vars` | map | `{}` | Exact environment variable per scheme, keyed by scheme name. Overrides `env_prefix` for the schemes it names |
+
+### Customizing
+
+`_apply_auth` runs before the `_before_request` hook, so the hook can still
+override or refresh whatever it set — useful for rotating an OAuth token:
+
+```python
+class MyClient(Client):
+    def _before_request(self, request):
+        if self._token_expired():
+            request['headers']['Authorization'] = f'Bearer {self._refresh()}'
+        return request
+```
+
+Set `auth.enabled: false` to opt out entirely and wire authentication by hand
+in the user-owned `client.py`.
+
+---
+
+## 📤 Request Bodies
+
+Bodies are serialized with `model_dump(mode='json', by_alias=True,
+exclude_unset=True)`: JSON mode so `datetime`, `UUID` and `Decimal` fields
+reach the wire as strings rather than raising, and aliases so fields whose
+spec name is not a Python identifier keep their wire name.
+
+`exclude_unset` means only the fields you actually set are sent:
+
+```python
+place_order(body=Order(id=7))     # -> {"id": 7}
+```
+
+Most APIs read an explicit `null` as "clear this field", so omitting the
+fields you never touched is the safer default — and it is what makes partial
+updates work. If an endpoint genuinely needs those nulls, a PUT that replaces
+a whole resource for instance, turn it off:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    request_body:
+      exclude_unset: false
+```
+
+```python
+place_order(body=Order(id=7))     # -> {"id": 7, "shipDate": null, "note": null}
+```
+
+### Flattening the body into parameters
+
+By default a POST/PUT/PATCH takes the body as one model:
+
+```python
+place_order(body=Order(id=7, quantity=2))
+```
+
+Set `flatten` and the model's fields become parameters instead:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    request_body:
+      flatten: true
+```
+
+```python
+place_order(id=7, quantity=2)
+```
+
+Required fields stay positional so you cannot forget them; the rest are
+keyword-only and default to `NOTSET`. Fields inherited through `allOf` are
+included. The request that goes on the wire is identical either way —
+flattening changes the signature, not the protocol.
+
+### `NOTSET` vs `None`
+
+A nullable field has two distinct "empty" states, and one default cannot carry
+both. Omitted fields therefore default to `NOTSET`, which leaves `None`
+meaning what it says:
+
+```python
+place_order(id=7)                 # -> {"id": 7}
+place_order(id=7, note=None)      # -> {"id": 7, "note": null}
+place_order(id=7, note=NOTSET)    # -> {"id": 7}   (same as omitting)
+```
+
+`NOTSET` is exported from the generated package, so you can pass it from a
+conditional rather than branching on the call itself:
+
+```python
+from myclient import NOTSET, place_order
+
+place_order(id=7, note=note if include_note else NOTSET)
+```
+
+It is a single-member enum, so type checkers treat it as a literal: inside the
+client, `value is not NOTSET` narrows `int | None | NotSet` to `int | None`.
+It is also falsy, so `if value:` reads as "was anything given".
+
+Two more details worth knowing:
+
+- **A body field can collide with a path or query parameter.** The parameter
+  keeps its name and the body field gains a `_body` suffix, so a spec with
+  both a `status` query param and a `status` body field generates
+  `add_note(status_body, *, status=None)`. The payload still uses `status`.
+- **Only object-shaped JSON bodies can flatten.** An array body, a bare
+  string, or a multipart upload has nothing to spread; those keep the single
+  `body=` parameter and log why.
+
+### Per-path overrides
+
+`paths` overrides the document setting for matching URL paths, using the same
+glob syntax as `include_paths`. When several patterns match, the longest wins,
+so a specific path beats the wildcard covering it:
+
+```yaml
+request_body:
+  flatten: true
+  paths:
+    /reports/**:                 # a big nested body reads better as a model
+      flatten: false
+    /reports/summary:            # …except this one
+      flatten: true
+    /users/{id}:
+      exclude_unset: false       # this PUT replaces the whole resource
+```
+
+### Request Body Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `exclude_unset` | bool | `true` | Send only the fields the caller set, rather than an explicit null for every untouched optional field |
+| `flatten` | bool | `false` | Spread the body model's fields into individual parameters instead of one `body=` argument |
+| `paths` | map | `{}` | Per-path overrides keyed by a glob over the URL path; longest match wins |
+
+Each path override accepts `exclude_unset` and `flatten`; anything omitted
+inherits the document setting.
+
+---
+
 ## 🔧 CLI Reference
 
 ```bash
@@ -875,6 +1135,13 @@ otter generate
 
 # Generate from specific config file
 otter generate -c my-config.yml
+
+# Generate without a config file
+otter generate -s ./api.yaml -o ./client
+
+# Override the base URL — required when a file-loaded spec's servers are
+# relative (e.g. `url: /api/v3`), and applies to every document in a config
+otter generate -s ./api.yaml -o ./client -b https://api.example.com
 
 # Tolerate malformed specs (drop unknown/invalid fields with a warning)
 otter generate --lenient
@@ -885,6 +1152,12 @@ otter init
 # Validate configuration
 otter validate
 ```
+
+Generation is all-or-nothing: if a run fails partway through, the output
+directory is restored to exactly what it was before, so a failure never
+leaves a half-written client behind. Files you own inside it — `client.py`
+and anything else you keep there — survive both a failed run and a
+successful regeneration.
 
 ---
 

@@ -1,5 +1,7 @@
-"""Tests that v3.0 ``nullable: true`` upgrades to the same Pydantic
-annotation shape as v3.1+'s ``type: [..., "null"]``.
+"""Tests for the v3.0 ``nullable: true`` upgrade path.
+
+It must reach the same Pydantic annotation shape as v3.1+'s
+``type: [..., "null"]``.
 
 The audit flagged these as handled differently; this file verifies they
 produce byte-identical output today so the Wave 1.1/1.2 correctness
@@ -131,9 +133,10 @@ class TestNullableUpgrade:
 
 
 class TestNullableWithoutTypeDoesNotCrash:
-    """v3.0 allows ``nullable: true`` on a property without a primitive
-    ``type``. The upgrader promotes it to ``type: [null]``; the
-    TypeGenerator must not crash when it sees that edge case.
+    """``nullable: true`` without a primitive ``type`` must not crash.
+
+    v3.0 allows it; the upgrader promotes it to ``type: [null]``, and the
+    TypeGenerator has to cope with that edge case.
 
     Known cosmetic wart: the resulting annotation is spelled
     ``None | None | None`` (equivalent to ``None`` at type-check time).
@@ -176,9 +179,10 @@ class TestNullableWithoutTypeDoesNotCrash:
 
 
 class TestV2NullableArrayItems:
-    """Regression guard: a Swagger 2.0 scalar array whose items carry a
-    ``["string", "null"]`` type array must survive the v2 -> v3.0 -> v3.1
-    upgrade as ``list[str | None]``.
+    """A Swagger 2.0 nullable scalar array survives the upgrade chain.
+
+    Items carrying a ``["string", "null"]`` type array must come out of
+    v2 -> v3.0 -> v3.1 as ``list[str | None]``.
 
     The v2 -> v3.0 converter previously collapsed the item type to the first
     non-null member and discarded ``null`` outright, which meant a

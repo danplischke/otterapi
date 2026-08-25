@@ -1,6 +1,7 @@
-"""Tests that ``oneOf`` / ``anyOf`` schemas with a ``discriminator`` are
-emitted as ``Annotated[Union[...], Field(discriminator=...)]`` so Pydantic
-v2 dispatches by the tag field at validation time.
+"""Tests for discriminated ``oneOf`` / ``anyOf`` schemas.
+
+A ``discriminator`` must emit ``Annotated[Union[...], Field(discriminator=...)]``
+so Pydantic v2 dispatches by the tag field at validation time.
 """
 
 from __future__ import annotations
@@ -106,9 +107,10 @@ class TestDiscriminatorASTEmission:
 
 
 class TestDiscriminatorRuntimeDispatch:
-    """End-to-end: hand-build variants with ``Literal`` discriminator fields and
-    confirm the generated ``Annotated[Union[...], Field(discriminator=...)]``
-    actually drives Pydantic's tag-based dispatch.
+    """End-to-end: the generated annotation drives Pydantic's dispatch.
+
+    Hand-builds variants with ``Literal`` discriminator fields and confirms
+    ``Annotated[Union[...], Field(discriminator=...)]`` really tags on them.
     """
 
     def test_pydantic_uses_emitted_discriminator(self):

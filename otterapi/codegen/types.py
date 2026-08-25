@@ -12,7 +12,7 @@ import logging
 from collections.abc import Iterable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -228,6 +228,22 @@ class Parameter:
     required: bool
     type: Type | None = None
     description: str | None = None
+    # OpenAPI serialization rules. Both are already resolved against the
+    # per-location defaults ('form' for query/cookie, 'simple' for path/header;
+    # explode defaults to True for 'form' and False for everything else), so
+    # consumers never have to re-derive them.
+    style: str = 'form'
+    explode: bool = True
+
+    @property
+    def uses_default_style(self) -> bool:
+        """True when httpx's own rendering already matches the spec.
+
+        Endpoints only emit a ``param_styles`` entry for parameters that
+        deviate, keeping the common case free of generated noise.
+        """
+        default_style = 'simple' if self.location in ('path', 'header') else 'form'
+        return self.style == default_style and self.explode == (default_style == 'form')
 
 
 @dataclasses.dataclass
@@ -275,6 +291,24 @@ class ResponseInfo:
 
 
 @dataclasses.dataclass
+class BodyField:
+    """One field of a request body model, as a flattened endpoint parameter.
+
+    Attributes:
+        name: The parameter name in the generated function.
+        wire_name: The key the model expects on input -- the field's alias when
+            it has one, since generated models do not set ``populate_by_name``.
+        annotation_ast: The parameter's type annotation.
+        required: Whether the schema marks the field required.
+    """
+
+    name: str
+    wire_name: str
+    annotation_ast: ast.expr
+    required: bool = False
+
+
+@dataclasses.dataclass
 class RequestBodyInfo:
     """Information about a request body including its content type.
 
@@ -283,12 +317,20 @@ class RequestBodyInfo:
         type: The Type object for the body schema, or None if no schema.
         required: Whether the request body is required.
         description: Optional description of the request body.
+        exclude_unset: Whether the emitted ``model_dump`` drops fields the
+            caller never set.  Carried here rather than passed down separately
+            so the AST builders keep their existing signatures.
+        flattened_fields: The body model's fields, when the endpoint should
+            take them as individual parameters instead of one ``body=``
+            argument.  ``None`` means the body stays a single parameter.
     """
 
     content_type: str
     type: Type | None = None
     required: bool = False
     description: str | None = None
+    exclude_unset: bool = True
+    flattened_fields: list['BodyField'] | None = None
 
     @property
     def is_json(self) -> bool:
@@ -485,9 +527,11 @@ class TypeGenerator(OpenAPIProcessor):
             candidate = f'{prefix}{counter}'
 
     def add_type(self, type_: Type, base_name: str | None = None) -> Type:
-        """Add a type to the registry. If a type with the same name but different definition
-        already exists, generate a unique name using the base_name prefix.
-        Returns the type (potentially with a modified name).
+        """Add a type to the registry, renaming it on a name collision.
+
+        If a differently-defined type already holds the name, a unique one is
+        generated from the ``base_name`` prefix.  Returns the type, which may
+        carry the modified name.
         """
         # Skip types without names (primitive types, inline types, etc.)
         if not type_.name:
@@ -760,8 +804,10 @@ class TypeGenerator(OpenAPIProcessor):
 
     @staticmethod
     def _make_any_type() -> Type:
-        """Build a bare ``Any`` type (accepts strings, numbers, null, arrays,
-        and objects alike)."""
+        """Build a bare ``Any`` type.
+
+        Accepts strings, numbers, null, arrays, and objects alike.
+        """
         any_type = Type(
             reference=None,
             name=None,
@@ -834,10 +880,17 @@ class TypeGenerator(OpenAPIProcessor):
         else:
             mapped = Any
 
+        # Constant, not Name('None'): the nullable guards match Constant, and a
+        # Name would make ``str | None`` read as non-nullable and gain a second
+        # ``| None``.
+        annotation_ast: ast.expr = (
+            _name(mapped.__name__) if mapped is not None else ast.Constant(value=None)
+        )
+
         type_ = Type(
             None,
             sanitize_identifier(schema.title) if schema.title else None,
-            annotation_ast=_name(mapped.__name__ if mapped is not None else 'None'),
+            annotation_ast=annotation_ast,
             implementation_ast=None,
             type='primitive',
         )
@@ -919,6 +972,7 @@ class TypeGenerator(OpenAPIProcessor):
             # Only add default=None for optional (not required) fields
             # Nullable but required fields should NOT have a default
             field_keywords.append(ast.keyword(arg='default', value=ast.Constant(None)))
+<<<<<<< HEAD
             defaults_to_none = True
 
         # Wrap the annotation in ``| None`` when the schema is nullable OR when
@@ -930,6 +984,14 @@ class TypeGenerator(OpenAPIProcessor):
             annotation_ast = _union_expr(
                 [field_type.annotation_ast, ast.Constant(value=None)]
             )
+=======
+            # A field that defaults to None can hold None, so the annotation has
+            # to say so.  Without this the model advertises `id: int` while
+            # `Model().id` is None -- a lie to both the reader and the type
+            # checker.
+            if not self._annotation_includes_none(annotation_ast):
+                annotation_ast = _union_expr([annotation_ast, ast.Constant(value=None)])
+>>>>>>> origin/main
 
         if sanitized_field_name != field_name:
             field_keywords.append(
@@ -958,19 +1020,27 @@ class TypeGenerator(OpenAPIProcessor):
             simple=1,
         )
 
+    @classmethod
+    def _type_already_nullable(cls, type_: Type) -> bool:
+        """Check if a type's annotation already includes None."""
+        return cls._annotation_includes_none(type_.annotation_ast)
+
     @staticmethod
-    def _type_already_nullable(type_: Type) -> bool:
-        """Check if a type annotation already includes None.
+    def _annotation_includes_none(annotation: ast.expr | None) -> bool:
+        """Check if an annotation expression already includes None.
 
         Handles both the ``Union[X, None]`` (Subscript) form and the
         ``X | None`` (BinOp chain) form generated by ``_union_expr``.
         """
+<<<<<<< HEAD
         annotation = type_.annotation_ast
         # A bare ``None`` annotation (from a ``null``-typed schema) is already
         # None -- wrapping it would produce the invalid ``None | None``, which
         # raises ``TypeError`` when pydantic evaluates the annotation.
         if TypeGenerator._is_none_annotation(annotation):
             return True
+=======
+>>>>>>> origin/main
         # Union[..., None] form
         if isinstance(annotation, ast.Subscript):
             if (
@@ -997,8 +1067,7 @@ class TypeGenerator(OpenAPIProcessor):
         ]
 
     def _discriminator_is_literal(self, schema: Schema) -> bool:
-        """Return True only if every variant has the discriminator property
-        constrained to a single ``enum`` value.
+        """Check that every variant pins the discriminator to one enum value.
 
         Pydantic v2 requires ``Literal`` types on the discriminator field.
         If any variant is missing the constraint we fall back to a plain union.
@@ -1012,7 +1081,7 @@ class TypeGenerator(OpenAPIProcessor):
                 return False
             props = resolved.properties or {}
             disc_prop = props.get(prop_name)
-            if disc_prop is None:
+            if disc_prop is None or not isinstance(disc_prop, Schema):
                 return False
             # A single-value enum is the only reliable source of Literal.
             if not (disc_prop.enum and len(disc_prop.enum) == 1):
@@ -1088,7 +1157,7 @@ class TypeGenerator(OpenAPIProcessor):
         required_fields = set(schema.required or [])
         for property_name, property_schema in (schema.properties or {}).items():
             # Resolve reference to check for nullable
-            resolved_schema = property_schema
+            resolved_schema = cast('Schema', property_schema)
             if hasattr(property_schema, 'ref') and property_schema.ref:
                 resolved_schema, _ = self._resolve_reference(property_schema)
 
@@ -1101,7 +1170,11 @@ class TypeGenerator(OpenAPIProcessor):
             )
             is_required = property_name in required_fields
             field = self._create_pydantic_field(
-                property_name, property_schema, type_, is_required, is_nullable
+                property_name,
+                cast('Schema', property_schema),
+                type_,
+                is_required,
+                is_nullable,
             )
 
             body.append(field)
@@ -1479,7 +1552,8 @@ class TypeGenerator(OpenAPIProcessor):
         return type_
 
     def get_sorted_types(self) -> list[Type]:
-        """Returns the types sorted in dependency order using topological sort.
+        """Return the types in dependency order via a topological sort.
+
         Types with no dependencies come first.
         """
         sorted_types: list[Type] = []

@@ -28,6 +28,12 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
+from otterapi.codegen._pep695 import (
+    PEP695_MIN_VERSION,
+    modernize_type_aliases,
+    modernize_type_params,
+)
+
 if TYPE_CHECKING:
     from otterapi.config import DocumentConfig
 
@@ -100,6 +106,12 @@ class FeatureModule(ABC):
         content = self.module_content
         if config is not None:
             content = self.transform_content(content, config)
+            if config.target_python_version >= PEP695_MIN_VERSION:
+                # Applied after the per-feature transform so subclasses keep
+                # matching against the pre-3.12 template text they were
+                # written against.
+                content = modernize_type_params(content)
+                content = modernize_type_aliases(content)
         target = output_dir / self.module_filename
         target.write_text(content, encoding='utf-8')
         return target
@@ -126,7 +138,11 @@ def all_features() -> list[FeatureModule]:
         ExportFeature(),
         ConcurrencyFeature(),
         RetryFeature(),
+<<<<<<< HEAD
         QueryFeature(),
+=======
+        SerializationFeature(),
+>>>>>>> origin/main
     ]
 
 
@@ -226,6 +242,7 @@ class RetryFeature(FeatureModule):
         return True
 
 
+<<<<<<< HEAD
 class QueryFeature(FeatureModule):
     """Emits ``_query.py`` (deferred ``Query`` / ``AsyncQuery`` result objects).
 
@@ -240,3 +257,16 @@ class QueryFeature(FeatureModule):
             'client',
             'resource',
         )
+=======
+class SerializationFeature(FeatureModule):
+    """Emits ``_serialization.py`` (OpenAPI wire-format parameter rendering).
+
+    Always enabled: every generated client sends query, header, or path
+    parameters, and all three go through these helpers.
+    """
+
+    module_filename = '_serialization.py'
+
+    def is_enabled(self, _config: DocumentConfig) -> bool:
+        return True
+>>>>>>> origin/main

@@ -5,7 +5,7 @@ You can safely customize this file to add authentication, logging,
 error handling, or other client-specific functionality.
 """
 
-from .__MODULE_NAME__ import __BASE_CLASS_NAME__, BaseAPIError
+from .__MODULE_NAME__ import __STUB_IMPORTS__
 
 
 class __CLASS_NAME__(__BASE_CLASS_NAME__):
@@ -45,8 +45,6 @@ class __CLASS_NAME__(__BASE_CLASS_NAME__):
         >>> client = __CLASS_NAME__(max_retries=0)  # disable retry
         >>> client = __CLASS_NAME__(timeout=60.0, headers={"X-Request-ID": "abc"})
     """
-
-    pass
 
     # Add custom methods or override base class methods below.
     #
@@ -93,7 +91,9 @@ class APIError(BaseAPIError):
                         or json_body.get('detail')
                         or json_body
                     )
-                except Exception:
+                except ValueError:
+                    # Every way a body fails to become JSON -- malformed JSON,
+                    # undecodable bytes -- raises a ValueError subclass.
                     detail = body if body else None
                 return cls(
                     f'HTTP {status_code} Error: {detail}',
@@ -103,8 +103,6 @@ class APIError(BaseAPIError):
                     body=body,
                 )
     """
-
-    pass
 
 
 # Convenience aliases for shorter imports

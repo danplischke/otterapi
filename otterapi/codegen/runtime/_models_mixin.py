@@ -3,7 +3,10 @@ def _html_val(v):
         return '<em style="color:#aaa">None</em>'
     if isinstance(v, list):
         n = len(v)
-        preview = ', '.join(str(x) for x in v[:3])
+        # Bracketed on purpose: this module is re-unparsed into the
+        # generated package, and ``ast.unparse`` parenthesizes a lone
+        # generator argument (UP034 in the user's tree).
+        preview = ', '.join([str(x) for x in v[:3]])
         suffix = f', … ({n})' if n > 3 else ''
         return f'[{preview}{suffix}]'
     if hasattr(v, '_repr_html_'):

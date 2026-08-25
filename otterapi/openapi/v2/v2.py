@@ -1,5 +1,4 @@
-"""
-Pydantic V2 models for Swagger/OpenAPI 2.0 specification.
+"""Pydantic V2 models for Swagger/OpenAPI 2.0 specification.
 
 Based on the JSON Schema at: http://swagger.io/v2/schema.json
 
@@ -182,8 +181,10 @@ class BaseModelWithVendorExtensions(BaseModel):
 
 
 class LenientModelWithVendorExtensions(BaseModel):
-    """Base model that preserves vendor extensions (``x-*``) and, when lenient
-    parsing is requested, drops other unknown, structurally-invalid fields.
+    """Base model that preserves vendor extensions (``x-*``).
+
+    When lenient parsing is requested it also drops other unknown,
+    structurally-invalid fields.
 
     Some upstream generators (e.g. NSwag) emit malformed Swagger 2.0 with stray
     keys, such as HTTP status codes placed directly on an operation object. Those
@@ -326,8 +327,7 @@ class XML(BaseModelWithVendorExtensions):
 
 
 class Schema(BaseModelWithVendorExtensions):
-    """
-    JSON Schema object for Swagger 2.0.
+    """JSON Schema object for Swagger 2.0.
 
     Note: This is a simplified version. Full schema validation is complex
     and may require recursive type definitions.
@@ -511,8 +511,7 @@ ResponseValue = Response | JsonReference
 
 
 class Responses(BaseModelWithVendorExtensions):
-    """
-    Response definitions for an operation.
+    """Response definitions for an operation.
 
     Keys can be HTTP status codes (as strings) or "default".
     """
@@ -521,7 +520,8 @@ class Responses(BaseModelWithVendorExtensions):
 
     def __getitem__(self, key: str) -> ResponseValue | None:
         """Allow dict-like access to response codes."""
-        return self.__pydantic_extra__.get(key) or getattr(self, key, None)
+        extra = self.__pydantic_extra__ or {}
+        return extra.get(key) or getattr(self, key, None)
 
     @staticmethod
     def _validate_response_key(key: str) -> None:
@@ -595,8 +595,7 @@ class PathItem(LenientModelWithVendorExtensions):
 
 
 class Paths(RootModel[dict[str, PathItem | Any]]):
-    """
-    Paths object containing all API paths.
+    """Paths object containing all API paths.
 
     Keys must start with "/" (except vendor extensions starting with "x-").
     """
@@ -701,8 +700,7 @@ SecurityScheme = (
 
 
 class Swagger(LenientModelWithVendorExtensions):
-    """
-    Root Swagger 2.0 specification object.
+    """Root Swagger 2.0 specification object.
 
     This is the main model representing a complete Swagger/OpenAPI 2.0 document.
     """
@@ -726,8 +724,7 @@ class Swagger(LenientModelWithVendorExtensions):
     external_docs: ExternalDocs | None = Field(None, alias='externalDocs')
 
     def upgrade(self) -> tuple[OpenAPI, list[str]]:
-        """
-        Upgrade this Swagger 2.0 specification to OpenAPI 3.0.
+        """Upgrade this Swagger 2.0 specification to OpenAPI 3.0.
 
         Returns:
             A tuple of (OpenAPI 3.0 model, list of warnings)
@@ -959,7 +956,8 @@ class Swagger(LenientModelWithVendorExtensions):
             patch=patch,
             parameters=parameters,
         )
-        obj.__pydantic_extra__.update(self._extract_vendor_extensions(path_item))
+        if obj.__pydantic_extra__ is not None:
+            obj.__pydantic_extra__.update(self._extract_vendor_extensions(path_item))
         return obj
 
     def _apply_operation_parameters(
@@ -1052,7 +1050,8 @@ class Swagger(LenientModelWithVendorExtensions):
             security=security,
             servers=servers,
         )
-        obj.__pydantic_extra__.update(self._extract_vendor_extensions(operation))
+        if obj.__pydantic_extra__ is not None:
+            obj.__pydantic_extra__.update(self._extract_vendor_extensions(operation))
         return obj
 
     def _convert_parameters(
@@ -1061,8 +1060,7 @@ class Swagger(LenientModelWithVendorExtensions):
         consumes: list[str] | None,
         warnings: WarningCollector,
     ) -> dict[str, Any]:
-        """
-        Convert parameters list, separating body/formData into requestBody.
+        """Convert parameters list, separating body/formData into requestBody.
 
         Returns dict with 'parameters', 'requestBody', and 'body_schema' keys.
         The 'body_schema' is used for inferring response schemas when not specified.
@@ -1195,7 +1193,8 @@ class Swagger(LenientModelWithVendorExtensions):
             style=style,
             explode=explode,
         )
-        obj.__pydantic_extra__.update(self._extract_vendor_extensions(param))
+        if obj.__pydantic_extra__ is not None:
+            obj.__pydantic_extra__.update(self._extract_vendor_extensions(param))
         return obj
 
     def _convert_parameter_to_schema(
@@ -1259,8 +1258,7 @@ class Swagger(LenientModelWithVendorExtensions):
         in_: ParameterLocation,
         warnings: WarningCollector,
     ) -> tuple[str | None, bool | None]:
-        """
-        Convert collectionFormat to style and explode.
+        """Convert collectionFormat to style and explode.
 
         Returns (style, explode) tuple.
         """
@@ -1427,7 +1425,8 @@ class Swagger(LenientModelWithVendorExtensions):
             description=header.description if header.description else None,
             schema_=schema,
         )
-        obj.__pydantic_extra__.update(self._extract_vendor_extensions(header))
+        if obj.__pydantic_extra__ is not None:
+            obj.__pydantic_extra__.update(self._extract_vendor_extensions(header))
         return obj
 
     @staticmethod
@@ -1474,7 +1473,8 @@ class Swagger(LenientModelWithVendorExtensions):
                 for name, prop in schema.properties.items()
             }
 
-        additional_properties = None
+        # bool ('any extra property allowed') or a converted schema.
+        additional_properties: Any = None
         if schema.additional_properties is not None:
             if isinstance(schema.additional_properties, bool):
                 additional_properties = schema.additional_properties
@@ -1551,7 +1551,8 @@ class Swagger(LenientModelWithVendorExtensions):
             externalDocs=external_docs,
             example=schema.example,
         )
-        obj.__pydantic_extra__.update(self._extract_vendor_extensions(schema))
+        if obj.__pydantic_extra__ is not None:
+            obj.__pydantic_extra__.update(self._extract_vendor_extensions(schema))
         return obj
 
     def _convert_component_parameter_to_dict(
@@ -1778,10 +1779,14 @@ class Swagger(LenientModelWithVendorExtensions):
 
         return ref
 
-    def _extract_vendor_extensions(
-        self, obj: BaseModelWithVendorExtensions
-    ) -> dict[str, Any]:
-        """Extract vendor extensions (x-*) from an object."""
+    def _extract_vendor_extensions(self, obj: BaseModel) -> dict[str, Any]:
+        """Extract vendor extensions (x-*) from an object.
+
+        Typed as ``BaseModel`` rather than one specific extras-allowing base:
+        callers pass PathItem, Operation, NonBodyParameter and the security
+        scheme union, which do not share a single vendor-extension base, and
+        the body only duck-types ``__pydantic_extra__``.
+        """
         if hasattr(obj, '__pydantic_extra__') and obj.__pydantic_extra__:
             return {
                 k: v for k, v in obj.__pydantic_extra__.items() if k.startswith('x-')

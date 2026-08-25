@@ -24,7 +24,7 @@ lint:
 
 [group('development')]
 typecheck:
-	uv run mypy {{pkg_src}} --ignore-missing-imports
+	uv run mypy
 
 [group('development')]
 deadcode:

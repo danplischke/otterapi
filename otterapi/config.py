@@ -7,13 +7,14 @@ environment variable overrides.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
@@ -651,7 +652,7 @@ class ExportConfig(BaseModel):
     )
 
     formats: list[ExportFormat] = Field(
-        default_factory=lambda: ['csv', 'jsonl'],
+        default_factory=lambda: cast('list[ExportFormat]', ['csv', 'jsonl']),
         description='Default formats supported by generated helpers.',
     )
 
@@ -748,6 +749,155 @@ class EndpointResponseUnwrapConfig(BaseModel):
     )
 
     model_config = {'extra': 'forbid'}
+
+
+class EndpointRequestBodyConfig(BaseModel):
+    """Per-path request body overrides.
+
+    Every field defaults to ``None``, meaning "inherit the document setting".
+
+    Attributes:
+        exclude_unset: Override the document's ``exclude_unset``.
+        flatten: Override the document's ``flatten``.
+    """
+
+    exclude_unset: bool | None = Field(
+        default=None,
+        description='Override whether unset fields are dropped from the body.',
+    )
+
+    flatten: bool | None = Field(
+        default=None,
+        description='Override whether the body is spread into parameters.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+
+class ResolvedRequestBodyConfig(BaseModel):
+    """A document's request-body settings after per-path overrides are applied."""
+
+    exclude_unset: bool
+    flatten: bool
+
+
+class RequestBodyConfig(BaseModel):
+    """Configuration for how request bodies are serialized.
+
+    Attributes:
+        exclude_unset: Send only the fields the caller actually set.  With this
+            off, a model's every untouched optional field goes out as an
+            explicit ``null`` -- which some APIs read as "clear this field".
+            Turn it off when an endpoint genuinely needs those nulls, for
+            instance a PUT that replaces a whole resource.
+        flatten: Spread the body model's fields into individual keyword
+            parameters instead of taking one ``body=`` argument.
+        paths: Per-path overrides, keyed by a glob over the URL path.  The
+            longest matching pattern wins, so a specific path beats the
+            wildcard that also covers it.
+    """
+
+    exclude_unset: bool = Field(
+        default=True,
+        description=(
+            'Send only fields the caller set, rather than an explicit null for '
+            'every untouched optional field.'
+        ),
+    )
+
+    flatten: bool = Field(
+        default=False,
+        description=(
+            "Spread the body model's fields into individual keyword parameters "
+            'instead of a single body= argument.'
+        ),
+    )
+
+    paths: dict[str, EndpointRequestBodyConfig] = Field(
+        default_factory=dict,
+        description=(
+            'Per-path overrides keyed by a glob over the URL path; the longest '
+            'matching pattern wins.'
+        ),
+    )
+
+    def for_path(self, path: str) -> ResolvedRequestBodyConfig:
+        """Resolve the settings that apply to *path*.
+
+        Patterns are matched with :mod:`fnmatch`, the same syntax as
+        ``include_paths``/``exclude_paths``.  When several match, the longest
+        pattern wins -- which makes an exact path beat the ``/pet/**`` that
+        also covers it, without needing a separate precedence rule.
+
+        Args:
+            path: The URL path from the spec, e.g. ``/store/order``.
+
+        Returns:
+            The effective settings for that path.
+        """
+        override = EndpointRequestBodyConfig()
+        matching = [
+            pattern
+            for pattern in self.paths
+            if pattern == path or fnmatch.fnmatch(path, pattern)
+        ]
+        if matching:
+            override = self.paths[max(matching, key=len)]
+
+        return ResolvedRequestBodyConfig(
+            exclude_unset=(
+                self.exclude_unset
+                if override.exclude_unset is None
+                else override.exclude_unset
+            ),
+            flatten=self.flatten if override.flatten is None else override.flatten,
+        )
+
+
+class AuthConfig(BaseModel):
+    """Configuration for generating authentication from ``securitySchemes``.
+
+    Each supported scheme in the document becomes a keyword-only constructor
+    parameter on the generated client, applied automatically to every request.
+
+    Attributes:
+        enabled: Whether to generate credential parameters at all.  Turn this
+            off to keep the previous behaviour of wiring auth by hand in the
+            user-owned ``client.py``.
+        env_prefix: Prefix for the environment variables an omitted credential
+            falls back to, e.g. ``OTTER`` gives ``OTTER_API_KEY`` for a scheme
+            named ``apiKey``.  Set it per document when a project generates
+            more than one client, so their variables do not collide.  An empty
+            string drops the prefix entirely.
+        env_vars: Exact environment variable name per security scheme, keyed by
+            the scheme's name in ``components.securitySchemes``.  Use it when a
+            credential already lives somewhere the prefix rule would never
+            derive -- an existing ``STRIPE_SECRET_KEY``, say.  Takes precedence
+            over ``env_prefix`` for the schemes it names; the rest keep the
+            derived default.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description='Generate client credential parameters from securitySchemes.',
+    )
+
+    env_prefix: str = Field(
+        default='OTTER',
+        description=(
+            'Prefix for the environment variables that supply credentials when '
+            'the constructor argument is omitted.'
+        ),
+    )
+
+    env_vars: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'Exact environment variable name per security scheme, keyed by the '
+            'scheme name in components.securitySchemes. Overrides env_prefix '
+            'for the schemes it names.'
+        ),
+    )
 
 
 class ResponseUnwrapConfig(BaseModel):
@@ -1099,6 +1249,18 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    target_python: Literal['3.10', '3.11', '3.12', '3.13', '3.14'] = Field(
+        default='3.10',
+        description=(
+            'Oldest Python version the generated code has to run on. The '
+            'default keeps the emitted runtime helpers compatible with '
+            'Python 3.10. From "3.12" on, the helpers use PEP 695 type '
+            'parameters (``def paginate_offset[T](...)``) instead of module-'
+            'level ``TypeVar``s, which is what linters configured for a modern '
+            'Python expect (the UP047 rule in ruff).'
+        ),
+    )
+
     pydantic_version: Literal[1, 2] = Field(
         default=2,
         description=(
@@ -1134,6 +1296,16 @@ class DocumentConfig(BaseModel):
         description='Configuration for tabular file export helpers.',
     )
 
+    auth: AuthConfig = Field(
+        default_factory=AuthConfig,
+        description="Configuration for the spec's security schemes.",
+    )
+
+    request_body: RequestBodyConfig = Field(
+        default_factory=RequestBodyConfig,
+        description='Configuration for request body serialization.',
+    )
+
     @field_validator('source')
     @classmethod
     def validate_source(cls, v: str) -> str:
@@ -1158,6 +1330,7 @@ class DocumentConfig(BaseModel):
             raise ValueError(f'File name must end with .py, got: {v}')
         return v
 
+<<<<<<< HEAD
     @model_validator(mode='after')
     def _validate_client_options(self) -> DocumentConfig:
         """Cross-field checks for the client-style options."""
@@ -1167,6 +1340,13 @@ class DocumentConfig(BaseModel):
                 'it has no effect with the default client_style="functions".'
             )
         return self
+=======
+    @property
+    def target_python_version(self) -> tuple[int, int]:
+        """``target_python`` as a comparable ``(major, minor)`` tuple."""
+        major, minor = self.target_python.split('.')
+        return int(major), int(minor)
+>>>>>>> origin/main
 
 
 class CodegenConfig(BaseSettings):
@@ -1291,7 +1471,12 @@ def load_toml(path: str | Path) -> dict:
         FileNotFoundError: If the file doesn't exist.
         KeyError: If the file doesn't contain otterapi configuration.
     """
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
+        # tomllib landed in 3.11; tomli is the same parser, installed via the
+        # version-conditional dependency in pyproject.toml.
+        import tomli as tomllib  # type: ignore[no-redef]
 
     path = Path(path)
     if not path.exists():
@@ -1347,8 +1532,7 @@ def load_config_file(path: str | Path) -> dict:
 
 
 class ConfigValidationError(ValueError):
-    """Raised when an OtterAPI config file is syntactically loadable but
-    semantically invalid.
+    """Raised when a config file loads but is semantically invalid.
 
     Wraps :class:`pydantic.ValidationError` with a friendlier multi-line
     message that includes the source file path and, when known, the

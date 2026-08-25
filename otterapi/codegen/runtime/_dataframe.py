@@ -114,11 +114,11 @@ def to_pandas(data: list | dict, path: str | None = None):
     """
     try:
         import pandas as pd
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
             'pandas is required for DataFrame conversion. '
             'Install with: pip install pandas'
-        )
+        ) from exc
 
     # Extract nested data if path specified
     target_data = extract_path(data, path)
@@ -146,11 +146,11 @@ def to_polars(data: list | dict, path: str | None = None):
     """
     try:
         import polars as pl
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
             'polars is required for DataFrame conversion. '
             'Install with: pip install polars'
-        )
+        ) from exc
 
     # Extract nested data if path specified
     target_data = extract_path(data, path)
