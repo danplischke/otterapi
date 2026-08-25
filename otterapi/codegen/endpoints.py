@@ -613,22 +613,6 @@ class ParameterASTBuilder:
 
         body_name = 'body'
 
-<<<<<<< HEAD
-        # A model body is serialized with ``body.model_dump()``; anything else
-        # (multipart, raw/primitive JSON, form without a model) passes through.
-        serializes_model = bool(
-            body.type
-            and body.type.type in ('model', 'root')
-            and (body.is_json or body.is_form)
-        )
-
-        body_expr: ast.expr
-        if serializes_model:
-            body_expr = _call(
-                func=_attr(_name(body_name), 'model_dump'),
-                args=[],
-            )
-=======
         def _dump(source: ast.expr) -> ast.expr:
             """``<source>.model_dump(mode='json', by_alias=True, exclude_unset=True)``.
 
@@ -688,9 +672,15 @@ class ParameterASTBuilder:
             """The ``json=``/``data=`` value for a model-backed body."""
             if body.flattened_fields is not None:
                 return _flattened_call()
-            if body.required:
+            may_be_none = not body.required or (
+                body.type is not None
+                and body.type.annotation_ast is not None
+                and annotation_includes_none(body.type.annotation_ast)
+            )
+            if not may_be_none:
                 return _dump(_name(body_name))
-            # An optional body defaults to None, and None has no model_dump.
+            # An optional or nullable body may be None, and None has no
+            # model_dump; guard the call and pass None straight through.
             return ast.IfExp(
                 test=ast.Compare(
                     left=_name(body_name),
@@ -711,29 +701,8 @@ class ParameterASTBuilder:
                 body_expr = _body_value()
             else:
                 body_expr = _name(body_name)
->>>>>>> origin/main
         else:
             body_expr = _name(body_name)
-
-        # The body may be ``None`` at call time -- either because it is optional
-        # (keyword-only, defaults to None) or because its schema is nullable even
-        # though it is required (``body: Model | None`` positional). Either way
-        # ``body.model_dump()`` would raise ``AttributeError`` on None, so guard
-        # the access and pass ``None`` through (httpx reads ``json=None`` /
-        # ``data=None`` as "no body").
-        body_may_be_none = not body.required or (
-            body.type is not None and annotation_includes_none(body.type.annotation_ast)
-        )
-        if serializes_model and body_may_be_none:
-            body_expr = ast.IfExp(
-                test=ast.Compare(
-                    left=_name(body_name),
-                    ops=[ast.IsNot()],
-                    comparators=[ast.Constant(value=None)],
-                ),
-                body=body_expr,
-                orelse=ast.Constant(value=None),
-            )
 
         return body_expr, body.httpx_param_name
 
@@ -1000,10 +969,21 @@ class EndpointFunctionFactory:
         return _name('Response')
 
     def _dataframe_return_type(self) -> ast.expr:
-        """Build the return type annotation for DataFrame-returning methods."""
-        if self.config.dataframe_library == DataFrameLibrary.PANDAS:
-            return ast.Constant(value=_PANDAS_DATAFRAME_ANNOTATION)
-        return ast.Constant(value=_POLARS_DATAFRAME_ANNOTATION)
+        """Build the return type annotation for DataFrame-returning methods.
+
+        Emitted unquoted (``pd.DataFrame`` / ``pl.DataFrame``): every generated
+        module carries ``from __future__ import annotations``, so the annotation
+        is a deferred string at runtime and ``pandas`` / ``polars`` only need to
+        resolve under ``TYPE_CHECKING``. A quoted string constant would be
+        redundant there (ruff ``UP037``).
+        """
+        annotation = (
+            _PANDAS_DATAFRAME_ANNOTATION
+            if self.config.dataframe_library == DataFrameLibrary.PANDAS
+            else _POLARS_DATAFRAME_ANNOTATION
+        )
+        module, _, attr = annotation.partition('.')
+        return _attr(module, attr)
 
     def _iterator_return_type(self, item_type_ast: ast.expr) -> ast.expr:
         """Build an ``Iterator[X]`` / ``AsyncIterator[X]`` return type annotation."""
@@ -1081,15 +1061,6 @@ class EndpointFunctionFactory:
             self._merge_imports(self.config.response_type_imports)
 
         if self._is_raw_response_type(self.config.response_type):
-<<<<<<< HEAD
-            # Raw responses skip Pydantic parsing. A ``str`` (text/plain) or
-            # ``bytes`` (octet-stream) response type must still be extracted
-            # from the httpx Response -- returning the Response object itself
-            # would contradict the declared return type.
-            return builder.add_return(
-                self._raw_response_return_expr(_request_call())
-            ).build()
-=======
             # Raw types skip Pydantic parsing, but a function annotated
             # ``-> str`` returning the httpx Response is a lie: the caller gets
             # an object, not the text it asked for. Pull the body out for the
@@ -1105,7 +1076,6 @@ class EndpointFunctionFactory:
                 is_async=self.config.is_async,
             )
             return builder.add_return(_attr('response', attribute)).build()
->>>>>>> origin/main
 
         # JSON response: request, parse, optionally unwrap.
         builder.add_method_call_assignment(
@@ -1145,28 +1115,7 @@ class EndpointFunctionFactory:
             return elt.id in ('Response', 'bytes', 'str', 'None')
         return isinstance(elt, ast.Constant) and elt.value is None
 
-<<<<<<< HEAD
-    def _raw_response_return_expr(self, request_call: ast.expr) -> ast.expr:
-        """Turn the raw ``_request`` call into the declared raw return value.
-
-        ``str`` (text/plain) becomes ``<response>.text`` and ``bytes``
-        (octet-stream) becomes ``<response>.content``; every other raw type
-        (``Response`` itself, or a union) returns the httpx Response unchanged.
-        Only a bare ``str`` / ``bytes`` annotation is unwrapped -- a union such
-        as ``str | None`` keeps the Response so we never guess wrongly.
-        """
-        ann = self.config.response_type.annotation_ast
-        if isinstance(ann, ast.Name):
-            if ann.id == 'str':
-                return _attr(request_call, 'text')
-            if ann.id == 'bytes':
-                return _attr(request_call, 'content')
-        return request_call
-
-    def _is_raw_response_type(self, response_type: 'Type') -> bool:
-=======
     def _is_raw_response_type(self, response_type: Type) -> bool:
->>>>>>> origin/main
         """Check if the response type is a raw type that doesn't need JSON parsing.
 
         Raw types include: Response, bytes, str (for non-JSON content types).

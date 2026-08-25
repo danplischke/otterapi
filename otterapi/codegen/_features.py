@@ -138,11 +138,8 @@ def all_features() -> list[FeatureModule]:
         ExportFeature(),
         ConcurrencyFeature(),
         RetryFeature(),
-<<<<<<< HEAD
         QueryFeature(),
-=======
         SerializationFeature(),
->>>>>>> origin/main
     ]
 
 
@@ -242,7 +239,6 @@ class RetryFeature(FeatureModule):
         return True
 
 
-<<<<<<< HEAD
 class QueryFeature(FeatureModule):
     """Emits ``_query.py`` (deferred ``Query`` / ``AsyncQuery`` result objects).
 
@@ -257,7 +253,8 @@ class QueryFeature(FeatureModule):
             'client',
             'resource',
         )
-=======
+
+
 class SerializationFeature(FeatureModule):
     """Emits ``_serialization.py`` (OpenAPI wire-format parameter rendering).
 
@@ -269,4 +266,3 @@ class SerializationFeature(FeatureModule):
 
     def is_enabled(self, _config: DocumentConfig) -> bool:
         return True
->>>>>>> origin/main

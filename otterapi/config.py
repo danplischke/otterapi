@@ -1330,7 +1330,6 @@ class DocumentConfig(BaseModel):
             raise ValueError(f'File name must end with .py, got: {v}')
         return v
 
-<<<<<<< HEAD
     @model_validator(mode='after')
     def _validate_client_options(self) -> DocumentConfig:
         """Cross-field checks for the client-style options."""
@@ -1340,13 +1339,12 @@ class DocumentConfig(BaseModel):
                 'it has no effect with the default client_style="functions".'
             )
         return self
-=======
+
     @property
     def target_python_version(self) -> tuple[int, int]:
         """``target_python`` as a comparable ``(major, minor)`` tuple."""
         major, minor = self.target_python.split('.')
         return int(major), int(minor)
->>>>>>> origin/main
 
 
 class CodegenConfig(BaseSettings):

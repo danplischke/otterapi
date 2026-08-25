@@ -1768,23 +1768,7 @@ def _build_sync_request_body(
         orelse=[],
     )
 
-<<<<<<< HEAD
-    return [filtered_params_stmt, for_loop, _unreachable_retry_raise()]
-=======
-    # The loop always returns or raises: the final attempt either returns a
-    # response or re-raises. That is not provable from the loop's shape, so
-    # without this a user type-checking the generated client sees
-    # "Missing return statement".
-    unreachable = ast.Raise(
-        exc=_call(
-            _name('RuntimeError'),
-            args=[ast.Constant(value='retry loop exited without returning a response')],
-        ),
-        cause=None,
-    )
-
-    return [for_loop, unreachable]
->>>>>>> origin/main
+    return [for_loop, _unreachable_retry_raise()]
 
 
 def _build_async_request_body(
@@ -1875,23 +1859,7 @@ def _build_async_request_body(
         orelse=[],
     )
 
-<<<<<<< HEAD
-    return [filtered_params_stmt, for_loop, _unreachable_retry_raise()]
-=======
-    # The loop always returns or raises: the final attempt either returns a
-    # response or re-raises. That is not provable from the loop's shape, so
-    # without this a user type-checking the generated client sees
-    # "Missing return statement".
-    unreachable = ast.Raise(
-        exc=_call(
-            _name('RuntimeError'),
-            args=[ast.Constant(value='retry loop exited without returning a response')],
-        ),
-        cause=None,
-    )
-
-    return [for_loop, unreachable]
->>>>>>> origin/main
+    return [for_loop, _unreachable_retry_raise()]
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:

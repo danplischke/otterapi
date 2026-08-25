@@ -156,12 +156,13 @@ class TestOptionalBodyGuarded:
     def test_optional_body_is_none_guarded(self, tmp_path):
         out = _generate(tmp_path, self._spec(required=False))
         src = (out / 'endpoints.py').read_text()
-        assert 'json=body.model_dump() if body is not None else None' in src
+        assert 'body.model_dump(' in src
+        assert 'if body is not None else None' in src
 
     def test_required_body_is_not_guarded(self, tmp_path):
         out = _generate(tmp_path, self._spec(required=True))
         src = (out / 'endpoints.py').read_text()
-        assert 'json=body.model_dump()' in src
+        assert 'body.model_dump(' in src
         assert 'if body is not None else None' not in src
 
 
@@ -506,4 +507,5 @@ class TestRealWorldPatternFixes:
             },
         }
         src = (_generate(tmp_path, spec) / 'endpoints.py').read_text()
-        assert 'body.model_dump() if body is not None else None' in src
+        assert 'body.model_dump(' in src
+        assert 'if body is not None else None' in src

@@ -672,6 +672,7 @@ class ExportFeature(EndpointFeature):
 
         ep = ctx.endpoint
         default_format = formats[0] if formats else 'csv'
+        pag_dict = build_pagination_config_dict(ctx.pag_config)
         for is_async, base_name in ctx.name_pairs:
             fn_name = f'{base_name}_export'
             fn, imports = build_standalone_paginated_export_fn(
@@ -685,7 +686,8 @@ class ExportFeature(EndpointFeature):
                 is_async=is_async,
                 default_format=default_format,
                 default_batch_size=cfg.export.batch_size,
-                pagination_limit_param=ctx.pag_config.limit_param,
+                pagination_style=ctx.pag_config.style,
+                pagination_config=pag_dict,
             )
             sink.add(fn, fn_name, imports)
         return True
@@ -822,6 +824,12 @@ def finalize_file_imports(
     block) to splice into the module body.
     """
     sink.imports.add_imports({'.client': {'Client'}})
+    # Registered optimistically: pruned away for modules that use
+    # neither path parameters nor a flattened request body (see
+    # write_mod's import pruning).
+    sink.imports.add_imports(
+        {'._serialization': {'format_path_param', 'build_request_body'}}
+    )
     for name in resolver.used_model_names(endpoints):
         sink.imports.add_imports({MODELS_MODULE: {name}})
 
@@ -837,15 +845,27 @@ def assemble_module_body(
     *,
     reexport_models: bool,
     reexport_model_exclude_patterns: list[str] | None,
+    package_depth: int = 1,
 ) -> list[ast.stmt]:
-    """Assemble the final module body: future import, imports, __all__, body."""
+    """Assemble the final module body: future import, imports, __all__, body.
+
+    ``package_depth`` is how deep the module sits below the package root (1 for a
+    root-level module). Sibling imports (``.client``, ``.models``, ...) are
+    registered as if the module were at the root, so they are re-pointed here for
+    a module that actually lives in a subpackage.
+    """
+    sink.imports.rebase_relative(package_depth)
+
     final_body: list[ast.stmt] = []
     final_body.extend(sink.imports.to_ast())
     final_body.extend(extra_stmts)
 
     all_names = set(sink.names)
     if reexport_models:
-        model_names = sink.imports._imports.get(MODELS_MODULE, set())
+        models_module = MODELS_MODULE
+        if package_depth > 1:
+            models_module = '.' * package_depth + MODELS_MODULE.lstrip('.')
+        model_names = sink.imports._imports.get(models_module, set())
         if reexport_model_exclude_patterns:
             model_names = {
                 n
@@ -926,12 +946,16 @@ def build_endpoints_module_body(
     reexport_models: bool,
     reexport_model_exclude_patterns: list[str] | None = None,
     description: str | None = None,
+    package_depth: int = 1,
 ) -> tuple[list[ast.stmt], list[str]]:
     """Build a complete endpoint-module body and the emitted function names.
 
     This is the single entry point shared by both the non-split writer
     (:meth:`Codegen._generate_endpoint_file`) and the split writer
     (:meth:`SplitModuleEmitter._emit_module_file`).
+
+    ``package_depth`` re-points sibling imports for a module emitted into a
+    subpackage (see :func:`assemble_module_body`).
     """
     sink = build_endpoint_sink(endpoints, config, resolver, description)
 
@@ -941,5 +965,6 @@ def build_endpoints_module_body(
         extra_stmts,
         reexport_models=reexport_models,
         reexport_model_exclude_patterns=reexport_model_exclude_patterns,
+        package_depth=package_depth,
     )
     return body, sink.names
