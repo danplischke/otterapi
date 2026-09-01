@@ -1098,15 +1098,19 @@ class Codegen(OpenAPIProcessor):
     def _resolve_base_url(self) -> str:
         """Resolve the base URL from config or OpenAPI spec.
 
-        If the server URL in the spec is relative, attempts to resolve it
-        against the source URL (if the spec was loaded from a URL).
+        If the server URL in the spec is relative, it is resolved against the
+        source URL when the spec was loaded from one. A spec loaded from a file
+        has nothing to resolve against, so the relative URL is kept as the
+        client default and the caller is told to pass an absolute base URL --
+        a relative server (``/``) is valid OpenAPI and common in specs served
+        from a doc endpoint, so it must not fail generation.
 
         Returns:
             The base URL to use for API requests.
 
         Raises:
-            ValueError: If no base URL can be determined, multiple servers are defined,
-                       or a relative server URL cannot be resolved.
+            ValueError: If no base URL can be determined or multiple servers
+                       are defined.
         """
         # Config base_url takes precedence
         if self.config.base_url:
@@ -1116,13 +1120,16 @@ class Codegen(OpenAPIProcessor):
         servers = self._adapter.servers()
         if not servers:
             raise ValueError(
-                'No base url provided. Make sure you specify the base_url in the otterapi config or the OpenAPI document contains a valid servers section'
+                'No base url provided. Pass an absolute base URL with -b/--base-url, '
+                'set base_url in the otterapi config, or make sure the OpenAPI '
+                'document contains a valid servers section'
             )
 
         # Only support single server
         if len(servers) > 1:
             raise ValueError(
-                'Multiple servers are not supported. Set the base_url in the config.'
+                'Multiple servers are not supported. Pick one by passing '
+                '-b/--base-url or by setting base_url in the otterapi config.'
             )
 
         server = servers[0]
@@ -1133,7 +1140,9 @@ class Codegen(OpenAPIProcessor):
 
         if not baseurl:
             raise ValueError(
-                'No base url provided. Make sure you specify the base_url in the otterapi config or the OpenAPI document contains a valid servers section'
+                'No base url provided. Pass an absolute base URL with -b/--base-url, '
+                'set base_url in the otterapi config, or make sure the OpenAPI '
+                'document contains a valid servers section'
             )
 
         # Check if the server URL is relative
@@ -1148,13 +1157,18 @@ class Codegen(OpenAPIProcessor):
                     f"using source URL '{source}'"
                 )
                 return resolved_url
-            else:
-                # Source is a file path, can't resolve relative URL
-                raise ValueError(
-                    f"Server URL '{baseurl}' is relative and cannot be resolved. "
-                    f'The OpenAPI spec was loaded from a file, not a URL. '
-                    f'Please specify an absolute base_url in the otterapi config.'
-                )
+
+            # Source is a file path: there is no origin to resolve against.
+            # Keep the relative URL as the generated default -- the client is
+            # usable as soon as the caller supplies an absolute base URL.
+            logger.warning(
+                f"Server URL '{baseurl}' is relative and the OpenAPI spec was "
+                f'loaded from a file, so it cannot be resolved to an absolute '
+                f'URL. The generated client defaults to it as-is; pass an '
+                f'absolute base URL with -b/--base-url (or set base_url in the '
+                f'otterapi config) to bake one in, or pass base_url= when '
+                f'constructing the client.'
+            )
 
         return baseurl
 
