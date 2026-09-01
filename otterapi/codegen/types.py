@@ -23,7 +23,11 @@ from otterapi.codegen.utils import (
     sanitize_identifier,
     sanitize_parameter_field_name,
 )
-from otterapi.openapi.constants import MediaType
+from otterapi.openapi.constants import (
+    MediaType,
+    base_media_type,
+    is_json_media_type,
+)
 from otterapi.openapi.v3_2 import Reference, Schema, Type as DataType
 
 logger = logging.getLogger(__name__)
@@ -260,12 +264,14 @@ class ResponseInfo:
         return 400 <= self.status_code < 600
 
     @property
+    def base_content_type(self) -> str:
+        """The content type without its parameters, lowercased."""
+        return base_media_type(self.content_type)
+
+    @property
     def is_json(self) -> bool:
         """Check if this is a JSON response."""
-        return self.content_type in (
-            MediaType.JSON,
-            MediaType.TEXT_JSON,
-        ) or self.content_type.endswith('+json')
+        return is_json_media_type(self.content_type)
 
     @property
     def is_binary(self) -> bool:
@@ -279,14 +285,13 @@ class ResponseInfo:
             'application/x-rar-compressed',
         )
         binary_prefixes = ('image/', 'audio/', 'video/', 'application/vnd.')
-        return self.content_type in binary_types or any(
-            self.content_type.startswith(p) for p in binary_prefixes
-        )
+        base = self.base_content_type
+        return base in binary_types or any(base.startswith(p) for p in binary_prefixes)
 
     @property
     def is_text(self) -> bool:
         """Check if this is a plain text response."""
-        return self.content_type.startswith('text/') and not self.is_json
+        return self.base_content_type.startswith('text/') and not self.is_json
 
 
 @dataclasses.dataclass
@@ -332,27 +337,29 @@ class RequestBodyInfo:
     flattened_fields: list['BodyField'] | None = None
 
     @property
+    def base_content_type(self) -> str:
+        """The content type without its parameters, lowercased."""
+        return base_media_type(self.content_type)
+
+    @property
     def is_json(self) -> bool:
         """Check if this is a JSON request body."""
-        return self.content_type in (
-            MediaType.JSON,
-            MediaType.TEXT_JSON,
-        ) or self.content_type.endswith('+json')
+        return is_json_media_type(self.content_type)
 
     @property
     def is_form(self) -> bool:
         """Check if this is a form-encoded request body."""
-        return self.content_type == MediaType.FORM_URLENCODED
+        return self.base_content_type == MediaType.FORM_URLENCODED
 
     @property
     def is_multipart(self) -> bool:
         """Check if this is a multipart form data request body."""
-        return self.content_type == MediaType.MULTIPART
+        return self.base_content_type == MediaType.MULTIPART
 
     @property
     def is_binary(self) -> bool:
         """Check if this is a binary request body."""
-        return self.content_type in (MediaType.OCTET_STREAM,)
+        return self.base_content_type == MediaType.OCTET_STREAM
 
     @property
     def httpx_param_name(self) -> str:

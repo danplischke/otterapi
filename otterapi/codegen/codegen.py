@@ -60,7 +60,7 @@ from otterapi.codegen.utils import (
     write_mod,
 )
 from otterapi.config import DocumentConfig
-from otterapi.openapi.constants import HTTP_METHODS, MediaType
+from otterapi.openapi.constants import HTTP_METHODS, is_json_media_type
 from otterapi.openapi.v3_2.v3_2 import (
     OpenAPI as OpenAPIv3_2,
     Operation,
@@ -270,10 +270,6 @@ def _topo_sort_by_base_classes(
     return result
 
 
-# Content types that should be treated as JSON
-JSON_CONTENT_TYPES = {MediaType.JSON, MediaType.TEXT_JSON}
-
-
 class Codegen(OpenAPIProcessor):
     """Main code generator for creating Python clients from OpenAPI specifications.
 
@@ -417,12 +413,11 @@ class Codegen(OpenAPIProcessor):
             # Only generate typed response for JSON content types
             # For other content types (XML, binary, etc.), return raw httpx.Response
             response_type = None
-            is_json_content = (
-                selected_content_type in JSON_CONTENT_TYPES
-                or selected_content_type.endswith('+json')
-            )
 
-            if is_json_content and selected_media_type.schema_:
+            if (
+                is_json_media_type(selected_content_type)
+                and selected_media_type.schema_
+            ):
                 assert self.typegen is not None
                 response_type = self.typegen.schema_to_type(
                     selected_media_type.schema_,
@@ -449,7 +444,7 @@ class Codegen(OpenAPIProcessor):
             Tuple of (selected_content_type, selected_media_type).
         """
         for content_type, media_type in content.items():
-            if content_type in JSON_CONTENT_TYPES or content_type.endswith('+json'):
+            if is_json_media_type(content_type):
                 return content_type, media_type
 
         return next(iter(content.items()))
