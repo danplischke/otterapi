@@ -524,6 +524,13 @@ class Codegen(OpenAPIProcessor):
         Args:
             operation: The OpenAPI operation to extract response models from.
 
+        Only non-error responses shape the return type. The client raises on
+        ``response.is_error`` before parsing, so a 4xx/5xx schema is never
+        parsed -- and folding it in actively breaks the success path: pydantic's
+        smart union prefers the arm needing the least coercion, so an error
+        response typed ``{'type': 'object'}`` contributes a ``dict[str, Any]``
+        arm that wins over the success model for every JSON object.
+
         Returns:
             A tuple of (response_infos, response_type) where:
             - response_infos: List of ResponseInfo objects for all status codes
@@ -535,9 +542,10 @@ class Codegen(OpenAPIProcessor):
             return [], None
 
         response_list = list(responses.values())
+        parsed_list = [r for r in response_list if not r.is_error]
 
-        json_types = [r.type for r in response_list if r.is_json and r.type]
-        non_json_types = self._collect_non_json_types(response_list)
+        json_types = [r.type for r in parsed_list if r.is_json and r.type]
+        non_json_types = self._collect_non_json_types(parsed_list)
 
         all_types = self._dedupe_types(json_types + non_json_types)
 

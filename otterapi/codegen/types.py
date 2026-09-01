@@ -250,6 +250,16 @@ class ResponseInfo:
     type: Type | None = None
 
     @property
+    def is_error(self) -> bool:
+        """Check if this response is one the client raises on.
+
+        The generated client raises on ``response.is_error`` -- httpx's name
+        for 4xx and 5xx -- before any parsing happens, so an error response's
+        schema never reaches the parser and must not widen the return type.
+        """
+        return 400 <= self.status_code < 600
+
+    @property
     def is_json(self) -> bool:
         """Check if this is a JSON response."""
         return self.content_type in (
