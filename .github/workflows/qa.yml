@@ -15,6 +15,11 @@ permissions:
 
 env:
   PYTHON_VERSION_DEFAULT: "3.14"
+  # uv resolves the interpreter from the repo's .python-version (3.12) before
+  # PATH, so without this every job silently built its venv on the runner's
+  # system 3.12 whatever setup-python installed. The matrix job overrides it
+  # per cell.
+  UV_PYTHON: "3.14"
 
 jobs:
   lint:
@@ -93,6 +98,8 @@ jobs:
   test:
     name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
