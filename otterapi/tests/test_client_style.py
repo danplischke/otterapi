@@ -235,8 +235,10 @@ def _generate_tagged(target: Path, **overrides) -> None:
 
 
 class TestSplitClientStyle:
-    """client_style combined with module_split: functions live in split modules,
-    the client methods route to them."""
+    """client_style combined with module_split.
+
+    Functions live in split modules; the client methods route to them.
+    """
 
     def test_split_resource_calls_across_modules(self, tmp_path):
         _generate_tagged(

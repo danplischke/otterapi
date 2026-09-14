@@ -254,8 +254,11 @@ class TestScalarResponseExtraction:
 
 
 class TestExportGuardsOptionalRows:
-    """Making optional envelope data honest (``list[X] | None``) means an export
-    wrapper over it must coerce None to ``[]`` before iterating."""
+    """Export wrappers must tolerate optional envelope data.
+
+    Making optional envelope data honest (``list[X] | None``) means an export
+    wrapper over it must coerce None to ``[]`` before iterating.
+    """
 
     def _spec(self, *, data_required: bool) -> dict:
         envelope = {
@@ -327,8 +330,11 @@ class TestExportGuardsOptionalRows:
 
 
 class TestRealWorldPatternFixes:
-    """Regressions for bugs distilled from Stripe / GitHub. Each shape crashed
-    generation, produced un-importable code, or type-errored before the fix."""
+    """Regressions for bugs distilled from Stripe / GitHub.
+
+    Each shape crashed generation, produced un-importable code, or type-errored
+    before the fix.
+    """
 
     def test_enum_string_default_is_wrapped(self, tmp_path):
         spec = {

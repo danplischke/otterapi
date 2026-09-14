@@ -22,6 +22,7 @@ functions remain the implementation the methods call, in ``endpoints.py``.
 from __future__ import annotations
 
 import ast
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
@@ -83,7 +84,8 @@ _CLIENT_RESERVED_MEMBERS: frozenset[str] = frozenset(
 
 
 def _avoid_member_collisions(
-    members: list[ast.FunctionDef | ast.AsyncFunctionDef], reserved: frozenset[str]
+    members: Sequence[ast.FunctionDef | ast.AsyncFunctionDef],
+    reserved: frozenset[str],
 ) -> None:
     """Rename members (in place) that collide with reserved names or each other.
 
@@ -142,6 +144,9 @@ def _method_from_function(
     owning client instance) as ``client``.
 
     Args:
+        fn: The generated free function to wrap.
+        endpoints_module_alias: Import alias of the module holding ``fn``, so
+            the delegated call reads ``<alias>.<fn>(...)``.
         client_value: Expression bound to ``client`` in the delegated call
             (default ``self``; resource sub-clients pass ``self._client``).
         method_name: Override for the method name (default: the function name
@@ -179,7 +184,7 @@ def _method_from_function(
 
     # Forward positionals positionally, remaining kwonly by keyword, plus
     # client=<client_value>, plus any **kwargs.
-    call_args = [_name(a.arg) for a in (*src.posonlyargs, *src.args)]
+    call_args: list[ast.expr] = [_name(a.arg) for a in (*src.posonlyargs, *src.args)]
     call_keywords = [ast.keyword(arg=a.arg, value=_name(a.arg)) for a in kwonlyargs]
     call_keywords.append(ast.keyword(arg='client', value=client_value))
     if src.kwarg is not None:
@@ -362,7 +367,11 @@ def build_client_module_body(
         endpoints_module: Module holding the free functions (non-split default).
         module_of: Optional map of function name -> dotted module (split mode);
             when omitted every function is imported from ``endpoints_module``.
-        sync_class_name / async_class_name: Generated class names.
+        use_query: Collapse each endpoint family (core request plus its
+            pagination / DataFrame / export variants) into one method returning
+            a deferred ``Query`` instead of one method per variant.
+        sync_class_name: Name of the generated sync client class.
+        async_class_name: Name of the generated async client class.
 
     Returns:
         ``(module_body, [sync_class_name, async_class_name])``.
@@ -420,18 +429,20 @@ def build_client_module_body(
     _avoid_member_collisions(sync_methods, _CLIENT_RESERVED_MEMBERS)
     _avoid_member_collisions(async_methods, _CLIENT_RESERVED_MEMBERS)
 
+    sync_body: list[ast.stmt] = [*sync_methods] or [ast.Pass()]
+    async_body: list[ast.stmt] = [*async_methods] or [ast.Pass()]
     sync_class = ast.ClassDef(
         name=sync_class_name,
         bases=[_name('_BaseClient')],
         keywords=[],
-        body=sync_methods or [ast.Pass()],
+        body=sync_body,
         decorator_list=[],
     )
     async_class = ast.ClassDef(
         name=async_class_name,
         bases=[_name('_BaseClient')],
         keywords=[],
-        body=async_methods or [ast.Pass()],
+        body=async_body,
         decorator_list=[],
     )
 
@@ -512,7 +523,7 @@ def _base_name(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     return fn.name
 
 
-def _resource_class(class_name: str, methods: list[ast.stmt]) -> ast.ClassDef:
+def _resource_class(class_name: str, methods: Sequence[ast.stmt]) -> ast.ClassDef:
     """A resource sub-client holding ``self._client`` plus delegating methods."""
     init = ast.FunctionDef(
         name='__init__',
@@ -537,8 +548,11 @@ def _resource_class(class_name: str, methods: list[ast.stmt]) -> ast.ClassDef:
 
 
 def _resource_class_name(path: tuple[str, ...], is_async: bool) -> str:
-    """Class name for a resource node, e.g. ``('identity','users')`` ->
-    ``_IdentityUsersResource`` (``_AsyncIdentityUsersResource``)."""
+    """Class name for a resource node.
+
+    ``('identity', 'users')`` -> ``_IdentityUsersResource``
+    (``_AsyncIdentityUsersResource`` on the async side).
+    """
     pascal = _pascal('_'.join(path))
     return f'_Async{pascal}Resource' if is_async else f'_{pascal}Resource'
 
@@ -685,6 +699,73 @@ def _query_method(
     )
 
 
+def _resource_methods(
+    fns: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    path: tuple[str, ...],
+    is_async: bool,
+    alias_of: dict[str, str],
+    *,
+    use_query: bool,
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Delegating methods for the functions living at one resource ``path``.
+
+    The path's tokens are stripped from the method names. Methods on the client
+    itself (empty path) delegate with ``client=self``; on a sub-resource with
+    ``client=self._client``.
+    """
+    tokens: set[str] = set()
+    for segment in path:
+        tokens |= _resource_tokens(segment)
+    client_value: ast.expr = _name('self') if not path else _attr('self', '_client')
+
+    if use_query:
+        # One method per endpoint family; a family with variants collapses
+        # into a single method returning a deferred Query.
+        families = _group_families(fns)
+        name_map = _build_resource_name_map(list(families), tokens)
+        side = 'async' if is_async else 'sync'
+        built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+        for base, family in families.items():
+            variants = family[side]
+            core = variants.get('fetch')
+            if core is None:  # e.g. generate_sync=False leaves no sync core
+                continue
+            if len(variants) > 1:
+                built.append(
+                    _query_method(
+                        core,
+                        variants,
+                        alias_of[core.name],
+                        client_value,
+                        name_map[base],
+                        is_async,
+                    )
+                )
+            else:
+                built.append(
+                    _method_from_function(
+                        core,
+                        alias_of[core.name],
+                        client_value=client_value,
+                        method_name=name_map[base],
+                    )
+                )
+        return sorted(built, key=lambda m: m.name)
+
+    name_map = _build_resource_name_map(list({_base_name(fn) for fn in fns}), tokens)
+    built = [
+        _method_from_function(
+            fn,
+            alias_of[fn.name],
+            client_value=client_value,
+            method_name=name_map[_base_name(fn)],
+        )
+        for fn in fns
+        if isinstance(fn, ast.AsyncFunctionDef) is is_async
+    ]
+    return sorted(built, key=lambda m: m.name)
+
+
 def build_resource_client_module_body(
     function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
     resolver: TypeResolver,
@@ -731,66 +812,17 @@ def build_resource_client_module_body(
     def methods_for(
         path: tuple[str, ...], is_async: bool
     ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-        fns = functions_at.get(path, [])
-        tokens: set[str] = set()
-        for segment in path:
-            tokens |= _resource_tokens(segment)
-        # Methods on the client itself delegate with client=self; on a
-        # sub-resource with client=self._client.
-        client_value: ast.expr = _name('self') if not path else _attr('self', '_client')
-
-        if use_query:
-            # One method per endpoint family; a family with variants collapses
-            # into a single method returning a deferred Query.
-            families = _group_families(fns)
-            name_map = _build_resource_name_map(list(families), tokens)
-            side = 'async' if is_async else 'sync'
-            built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-            for base, family in families.items():
-                variants = family[side]
-                core = variants.get('fetch')
-                if core is None:  # e.g. generate_sync=False leaves no sync core
-                    continue
-                if len(variants) > 1:
-                    built.append(
-                        _query_method(
-                            core,
-                            variants,
-                            alias_of[core.name],
-                            client_value,
-                            name_map[base],
-                            is_async,
-                        )
-                    )
-                else:
-                    built.append(
-                        _method_from_function(
-                            core,
-                            alias_of[core.name],
-                            client_value=client_value,
-                            method_name=name_map[base],
-                        )
-                    )
-            return sorted(built, key=lambda m: m.name)
-
-        name_map = _build_resource_name_map(
-            list({_base_name(fn) for fn in fns}), tokens
+        return _resource_methods(
+            functions_at.get(path, []),
+            path,
+            is_async,
+            alias_of,
+            use_query=use_query,
         )
-        built = [
-            _method_from_function(
-                fn,
-                alias_of[fn.name],
-                client_value=client_value,
-                method_name=name_map[_base_name(fn)],
-            )
-            for fn in fns
-            if isinstance(fn, ast.AsyncFunctionDef) is is_async
-        ]
-        return sorted(built, key=lambda m: m.name)
 
     def child_props(
         path: tuple[str, ...], is_async: bool, *, on_client: bool
-    ) -> list[ast.stmt]:
+    ) -> list[ast.FunctionDef]:
         return [
             _child_property(
                 child,
@@ -809,11 +841,14 @@ def build_resource_client_module_body(
         for is_async in (False, True):
             methods = methods_for(path, is_async)
             all_methods.extend(methods)
-            body = child_props(path, is_async, on_client=False) + methods
-            _avoid_member_collisions(body, frozenset({'_client'}))
+            members: list[ast.FunctionDef | ast.AsyncFunctionDef] = [
+                *child_props(path, is_async, on_client=False),
+                *methods,
+            ]
+            _avoid_member_collisions(members, frozenset({'_client'}))
             resource_classes.append(
                 _resource_class(
-                    _resource_class_name(path, is_async), body or [ast.Pass()]
+                    _resource_class_name(path, is_async), members or [ast.Pass()]
                 )
             )
 
@@ -822,13 +857,17 @@ def build_resource_client_module_body(
     def client_class(name: str, is_async: bool) -> ast.ClassDef:
         methods = methods_for((), is_async)
         all_methods.extend(methods)
-        body = child_props((), is_async, on_client=True) + methods
-        _avoid_member_collisions(body, _CLIENT_RESERVED_MEMBERS)
+        members: list[ast.FunctionDef | ast.AsyncFunctionDef] = [
+            *child_props((), is_async, on_client=True),
+            *methods,
+        ]
+        _avoid_member_collisions(members, _CLIENT_RESERVED_MEMBERS)
+        class_body: list[ast.stmt] = [*members] or [ast.Pass()]
         return ast.ClassDef(
             name=name,
             bases=[_name('_BaseClient')],
             keywords=[],
-            body=body or [ast.Pass()],
+            body=class_body,
             decorator_list=[],
         )
 

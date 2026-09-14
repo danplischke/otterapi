@@ -117,10 +117,6 @@ class EmitConfig:
         )
 
     @property
-    def pagination_enabled(self) -> bool:
-        return bool(self.pagination and self.pagination.enabled)
-
-    @property
     def dataframe_enabled(self) -> bool:
         return bool(self.dataframe and self.dataframe.enabled)
 
@@ -296,9 +292,10 @@ class EndpointContext:
         cls, endpoint: Endpoint, config: EmitConfig, resolver: TypeResolver
     ) -> EndpointContext:
         pag_config = None
-        if config.pagination_enabled:
+        pagination = config.pagination
+        if pagination is not None and pagination.enabled:
             pag_config = get_pagination_config_for_endpoint(
-                endpoint.sync_fn_name, config.pagination, endpoint.parameters
+                endpoint.sync_fn_name, pagination, endpoint.parameters
             )
 
         should_unwrap, unwrap_path = False, None

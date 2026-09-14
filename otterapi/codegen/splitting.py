@@ -630,6 +630,8 @@ class SplitModuleEmitter:
                 ``__init__`` exports ``Client`` / ``AsyncClient`` (from
                 ``_clients.py``, written by the caller) instead of re-exporting the
                 per-module free functions.
+            result_objects: Whether list endpoints return result objects; the
+                root ``__init__`` then also exports the result-object runtime.
             reexport_models: Whether to include model names in __all__.
             reexport_model_exclude_patterns: Glob patterns of model names to exclude.
             format_output: Whether to format generated code with ruff/black.
