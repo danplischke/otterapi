@@ -1,4 +1,4 @@
-"""Deferred query objects for list endpoints (client_style='resource').
+"""Deferred query objects for list endpoints (client_style='client' / 'resource').
 
 A list endpoint's method returns a :class:`Query` (or :class:`AsyncQuery`)
 instead of a bare list. The endpoint arguments are captured up front; a terminal
@@ -40,8 +40,8 @@ class Query(Generic[T]):
     """A deferred synchronous list-endpoint result.
 
     Construction captures the client and the call arguments; each terminal
-    method reuses them. Do not instantiate directly -- endpoint methods return
-    these.
+    method reuses them. Endpoint methods return these; a hand-written facade
+    over the free functions may build one the same way.
     """
 
     def __init__(

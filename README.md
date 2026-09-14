@@ -890,6 +890,64 @@ async with AsyncClient() as api:
 Terminals whose feature wasn't enabled at generation time raise a clear error;
 scalar (non-list) endpoints keep returning the model directly.
 
+#### Composing your own SDK
+
+To ship a user-facing SDK of your own, **compose** over a generated `Client`
+rather than subclassing it: hold the generated client privately and expose
+only the methods you choose. You own the public names, so a renamed
+`operationId` in the spec stays an internal change instead of a breaking one,
+and nothing the generator emits leaks into your API by accident.
+
+The `client` style is the layout to compose over. Its flat `Client` /
+`AsyncClient` reach every operation the `resource` style does, on both the sync
+and the async side (the test suite asserts this), and with `result_objects: true`
+each list endpoint hands you a `Query` whose terminals cover every enabled
+feature -- so the facade loses nothing.
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./mysdk/_generated        # private to your package
+    client_style: client
+    result_objects: true
+    pagination: { enabled: true }
+    dataframe: { enabled: true }
+    export: { enabled: true }
+```
+
+```python
+from ._generated import AsyncClient, BaseAPIError, Client, Query, User
+
+
+class DirectoryError(Exception): ...
+
+
+class UserDirectory:
+    """Your public API. Only what is defined here is visible to users."""
+
+    def __init__(self, base_url: str, token: str):
+        self._api = Client(base_url=base_url, headers={"Authorization": f"Bearer {token}"})
+
+    def active(self) -> Query[User]:            # .all() / .iter() / .to_pandas() / .export()
+        return self._api.list_users(status="active")
+
+    def by_id(self, user_id: int) -> User:
+        try:
+            return self._api.get_user(user_id)
+        except BaseAPIError as e:               # translate, don't leak
+            raise DirectoryError(e.status_code) from e
+```
+
+The async facade is the same shape around `AsyncClient`, returning
+`AsyncQuery[User]`. Inject an `httpx` client (`Client(http_client=...)`) to test
+the facade against a mock transport.
+
+Two things to know when composing: `resource` is not a good base for a facade
+(its sub-client classes are private and rebuilt on every access, so they cannot
+be extended or injected), and a generated method whose name collides with a
+base-client member such as `close` is renamed with a trailing underscore --
+check the generated names before delegating to them.
+
 The free functions remain as the implementation the methods call. `client` and
 `resource` compose with [module splitting](#-module-splitting): the functions are
 split across module files and each method routes to its function's module, while

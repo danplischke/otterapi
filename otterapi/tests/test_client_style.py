@@ -7,6 +7,7 @@ flows through the free function to the shared request infrastructure.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import sys
 from pathlib import Path
@@ -505,3 +506,176 @@ class TestConfigGuards:
         mod = _import_fresh(tmp_path, 'fn_pkg')
         assert 'list_users' in mod.__all__
         assert 'Client' in mod.__all__
+
+
+def _delegated_endpoints(package_dir: Path) -> dict[str, set[str]]:
+    """Endpoint functions the generated class surface delegates to, per side.
+
+    Walks every class in ``_clients.py`` (``Client`` / ``AsyncClient`` and any
+    resource sub-clients) and collects the ``<endpoints alias>.<fn>`` references
+    inside it. That is exactly the set of operations a facade composed over the
+    surface can reach, so two layouts with equal sets offer the same reach.
+    """
+    tree = ast.parse((package_dir / '_clients.py').read_text())
+    # Non-split: ``from . import endpoints as _endpoints``; split: one
+    # ``from . import <module> as _ep_<module>`` per endpoints module.
+    aliases: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.level != 1:
+            continue
+        if node.module is not None and not node.module.startswith('endpoints'):
+            continue
+        aliases.update(a.asname for a in node.names if a.asname)
+    reach: dict[str, set[str]] = {'sync': set(), 'async': set()}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        side = 'async' if node.name.lstrip('_').startswith('Async') else 'sync'
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Attribute)
+                and isinstance(sub.value, ast.Name)
+                and sub.value.id in aliases
+            ):
+                reach[side].add(sub.attr)
+    return reach
+
+
+def _own_public_methods(cls: type) -> set[str]:
+    return {n for n, v in vars(cls).items() if not n.startswith('_') and callable(v)}
+
+
+class TestComposedFacade:
+    """The ``client`` layout as the base for a hand-written, user-facing SDK.
+
+    The recommended way to ship your own API on top of a generated one is to
+    *compose* -- hold a generated ``Client`` privately and expose your own
+    methods -- rather than subclass. That only works if the flat surface has
+    feature parity with the other layouts, which these tests pin down.
+    """
+
+    _FEATURES = {
+        'pagination': {'enabled': True, 'auto_detect': True, 'default_page_size': 2},
+        'dataframe': {'enabled': True, 'pandas': True},
+        'export': {'enabled': True, 'formats': ['csv']},
+    }
+
+    @pytest.mark.parametrize('split', [False, True], ids=['flat', 'split'])
+    @pytest.mark.parametrize('result_objects', [False, True], ids=['methods', 'query'])
+    def test_flat_surface_reaches_every_resource_operation(
+        self, tmp_path, split, result_objects
+    ):
+        # Whatever a ``resource``-style user can call, a facade composed over
+        # the ``client`` style can call too -- on both the sync and async side.
+        overrides = dict(self._FEATURES, result_objects=result_objects)
+        if split:
+            overrides['module_split'] = {'enabled': True, 'strategy': 'path'}
+        reach = {}
+        for style in ('client', 'resource'):
+            target = tmp_path / f'{style}_{int(split)}_{int(result_objects)}'
+            _generate_tagged(target, client_style=style, **overrides)
+            reach[style] = _delegated_endpoints(target)
+        assert reach['client']['sync'], 'no delegations found'
+        assert reach['client']['sync'] == reach['resource']['sync']
+        assert reach['client']['async'] == reach['resource']['async']
+
+    def test_sync_and_async_surfaces_match(self, tmp_path):
+        _gen(
+            tmp_path / 'sa',
+            PAGINATED_SPEC,
+            client_style='client',
+            result_objects=True,
+            **self._FEATURES,
+        )
+        mod = _import_fresh(tmp_path, 'sa')
+        assert _own_public_methods(mod.Client) == _own_public_methods(mod.AsyncClient)
+        reach = _delegated_endpoints(tmp_path / 'sa')
+        assert {n.removeprefix('async_') for n in reach['async']} == reach['sync']
+
+    def test_composed_facade_reaches_every_terminal(self, tmp_path):
+        _gen(
+            tmp_path / 'cf',
+            PAGINATED_SPEC,
+            client_style='client',
+            result_objects=True,
+            **self._FEATURES,
+        )
+        mod = _import_fresh(tmp_path, 'cf')
+
+        class Catalog:
+            """A hand-written facade; only what it defines is public."""
+
+            def __init__(self, api):
+                self._api = api
+
+            def items(self):
+                return self._api.list_items()
+
+            def item_names(self) -> list[str]:
+                return [i.name for i in self.items().all()]
+
+        out = tmp_path / 'items.csv'
+        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+            catalog = Catalog(mod.Client(http_client=http))
+            assert isinstance(catalog.items(), mod.Query)
+            assert catalog.item_names() == ['a', 'b', 'c']
+            assert [r.id for r in catalog.items().iter()] == [1, 2, 3]
+            assert catalog.items().to_pandas().shape == (3, 2)
+            assert catalog.items().export(str(out)) == 3
+        assert out.exists()
+
+    @pytest.mark.asyncio
+    async def test_composed_facade_async(self, tmp_path):
+        _gen(
+            tmp_path / 'cfa',
+            PAGINATED_SPEC,
+            client_style='client',
+            result_objects=True,
+            **self._FEATURES,
+        )
+        mod = _import_fresh(tmp_path, 'cfa')
+
+        class Catalog:
+            def __init__(self, api):
+                self._api = api
+
+            def items(self):
+                return self._api.list_items()
+
+        out = tmp_path / 'items_async.csv'
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_paginated_handler)
+        ) as http:
+            catalog = Catalog(mod.AsyncClient(async_http_client=http))
+            assert isinstance(catalog.items(), mod.AsyncQuery)
+            assert [r.id for r in await catalog.items().all()] == [1, 2, 3]
+            assert [r.id async for r in catalog.items().iter()] == [1, 2, 3]
+            assert (await catalog.items().to_pandas()).shape == (3, 2)
+            assert await catalog.items().export(str(out)) == 3
+        assert out.exists()
+
+    def test_composed_facade_can_translate_errors(self, client_style_module):
+        # A user-facing SDK maps the generated error type onto its own.
+        mod = client_style_module
+
+        class DirectoryError(Exception):
+            pass
+
+        class Directory:
+            def __init__(self, api):
+                self._api = api
+
+            def users(self):
+                try:
+                    return self._api.list_users()
+                except mod.BaseAPIError as e:
+                    raise DirectoryError(e.status_code) from e
+
+        def fail(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, json={'detail': 'down'})
+
+        with httpx.Client(transport=httpx.MockTransport(fail)) as http:
+            with pytest.raises(DirectoryError) as info:
+                Directory(mod.Client(http_client=http)).users()
+        assert info.value.args == (503,)
+        assert isinstance(info.value.__cause__, mod.BaseAPIError)
