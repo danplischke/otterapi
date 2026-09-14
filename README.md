@@ -143,6 +143,9 @@ Each entry under `documents:` supports these fields:
 | `generate_async` | bool | `true` | Generate async endpoint functions |
 | `generate_sync` | bool | `true` | Generate sync endpoint functions |
 | `client_class_name` | string | from API title | Override the generated client class name |
+| `client_style` | `functions` \| `client` \| `resource` | `functions` | Shape of the public API. `functions` exposes a standalone function per endpoint/variant; `client` adds `Client` / `AsyncClient` classes with a flat method per endpoint; `resource` groups those methods into resource sub-clients (see [Client Style](#-client-style)) |
+| `resource_naming` | `tag` \| `path` \| `operation_id` | `tag` | How resource sub-clients are derived for `client_style: resource`. `tag` uses the module-split strategy (one level); `path` nests by URL segments; `operation_id` nests by the dotted operationId hierarchy |
+| `result_objects` | bool | `false` | With `client_style: client` or `resource`, a list endpoint returns a deferred `Query` object instead of separate `_df`/`_pl`/`_iter`/`_export` methods (see [Client Style](#-client-style)) |
 | `function_naming` | `operation_id` \| `path` | `operation_id` | How to name endpoint functions. `path` derives names from the HTTP method and URL path — use it for specs that reuse one `operationId` across many paths |
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
@@ -675,13 +678,29 @@ export:
 
 ### Usage
 
-```python
-from client import export_list_users_csv, export_list_users_parquet
+Every list-returning endpoint gets an `<endpoint>_export` function (and an
+`async_<endpoint>_export` twin) that mirrors the endpoint's own parameters and
+adds `output_path` first, plus keyword-only `format` and `batch_size`. Extra
+keyword arguments are passed through to the file writer.
 
-# Export directly to a file
-export_list_users_csv("output/users.csv")
-export_list_users_parquet("s3://my-bucket/users.parquet")  # UPath remote targets work too
+```python
+from client import list_users_export, async_list_users_export
+
+rows = list_users_export("output/users.csv", status="active")          # returns the row count
+list_users_export("s3://my-bucket/users.parquet", format="parquet")   # UPath remote targets work too
+list_users_export("out.csv", format="csv", delimiter=";")             # writer options pass through
 ```
+
+For a [paginated](#-pagination) endpoint the export wrapper streams through the
+endpoint's `_iter` variant and declares exactly its knobs -- the starting
+position (`offset` / `cursor` / `page`), `page_size` and `max_items` -- so
+`list_users_export("out.csv", offset=100)` starts where
+`list_users_iter(offset=100)` does.
+
+If an endpoint has its own parameter named `format`, `output_path` or
+`batch_size`, the wrapper exposes it as `format_` (etc.) and forwards it to the
+API under its real name; with `result_objects`, `Query.export()` applies the
+same aliasing for you.
 
 ---
 
@@ -761,8 +780,11 @@ from client.orders import list_orders, get_order
 
 ### Using the Client Class
 
+In the default `functions` style the `Client` carries configuration and the
+connection pool; you pass it to each endpoint function via `client=`:
+
 ```python
-from client import Client
+from client import Client, get_user, async_get_user
 
 client = Client(
     base_url='https://api.example.com',
@@ -770,11 +792,190 @@ client = Client(
     headers={'Authorization': 'Bearer your-token'},
 )
 
-user = client.get_user(user_id=123)
+user = get_user(user_id=123, client=client)
 
 async def main():
-    user = await client.async_get_user(user_id=123)
+    user = await async_get_user(user_id=123, client=client)
 ```
+
+Prefer a method-based API (`client.get_user(...)`)? Set
+[`client_style`](#-client-style).
+
+### 🎛 Client Style
+
+`client_style` controls the shape of the generated public API.
+
+**`functions` (default)** — a standalone function per endpoint and variant, plus
+an infrastructure `Client` you pass in:
+
+```python
+from client import get_user, async_get_user, list_users_df
+
+user = get_user(user_id=123)
+df = list_users_df()
+```
+
+**`client`** — additionally generates `Client` and `AsyncClient` classes whose
+methods delegate to those functions, giving a class-namespaced surface with clean
+names (no `async_` prefix):
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    client_style: client
+```
+
+```python
+from client import Client, AsyncClient
+
+user = Client(base_url='https://api.example.com').get_user(user_id=123)
+
+async def main():
+    async with AsyncClient() as api:
+        user = await api.get_user(user_id=123)          # no async_ prefix
+        df = await api.list_users_df()
+        async for u in api.list_users_iter():
+            ...
+```
+
+**`resource`** — groups the methods into resource sub-clients, derived from the
+same strategy as [module splitting](#-module-splitting) (tags/path/custom). The
+resource token is stripped from each method name:
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./client
+    client_style: resource
+```
+
+```python
+from client import Client, AsyncClient
+
+client = Client(base_url='https://api.example.com')
+user = client.users.get(user_id=123)        # -> get_user(...)
+users = client.users.list()                 # -> list_users(...)
+order = client.orders.get(order_id=7)
+
+async with AsyncClient() as api:
+    user = await api.users.get(user_id=123)
+```
+
+`resource_naming` controls how the sub-clients are derived and can **nest**:
+
+```yaml
+    client_style: resource
+    resource_naming: path          # or: operation_id
+```
+
+- `tag` (default) — one level, from the module-split strategy.
+- `path` — nests by URL segments: `/identity/users/{id}` → `client.identity.users.get(id)`.
+  A leaf that is an action rather than a collection (multi-word or singular
+  segment) with a single operation folds into its parent:
+  `/pet/findByStatus` → `client.pet.find_by_status(...)`, `/user/login` →
+  `client.user.login(...)`. Plural collection leaves such as `/billing/invoices`
+  keep their own sub-client (`client.billing.invoices.list()`).
+- `operation_id` — nests by the dotted operationId: `identity.users.get` → `client.identity.users.get()`.
+
+```python
+user = client.identity.users.get(user_id=123)
+invoices = client.billing.invoices.list()
+```
+
+#### Result objects
+
+With `result_objects: true` (with `client_style: client` or `resource`), a
+**list** endpoint returns a deferred `Query` instead of exposing separate
+`_df` / `_pl` / `_iter` / `_export` methods. The endpoint's arguments are captured
+once; a terminal method materializes it. `Query` / `AsyncQuery` are exported from
+the package for type hints:
+
+```yaml
+    client_style: resource
+    result_objects: true
+```
+
+```python
+q = client.users.list(status="active")   # nothing sent yet
+rows = q.all()                            # list[User]
+df   = q.to_pandas()                      # pandas DataFrame
+for u in q.iter(): ...                    # streamed, page by page
+q.export("users.csv")                     # write to a file
+
+async with AsyncClient() as api:
+    rows = await api.users.list().all()
+    async for u in api.users.list().iter(): ...
+```
+
+Terminals whose feature wasn't enabled at generation time raise a clear error;
+scalar (non-list) endpoints keep returning the model directly. Iterating a
+result object directly (`for row in q` / `async for row in q`) streams pages
+when pagination is enabled and otherwise walks the fetched list.
+
+#### Composing your own SDK
+
+To ship a user-facing SDK of your own, **compose** over a generated `Client`
+rather than subclassing it: hold the generated client privately and expose
+only the methods you choose. You own the public names, so a renamed
+`operationId` in the spec stays an internal change instead of a breaking one,
+and nothing the generator emits leaks into your API by accident.
+
+The `client` style is the layout to compose over. Its flat `Client` /
+`AsyncClient` reach every operation the `resource` style does, on both the sync
+and the async side (the test suite asserts this), and with `result_objects: true`
+each list endpoint hands you a `Query` whose terminals cover every enabled
+feature -- so the facade loses nothing.
+
+```yaml
+documents:
+  - source: https://api.example.com/openapi.json
+    output: ./mysdk/_generated        # private to your package
+    client_style: client
+    result_objects: true
+    pagination: { enabled: true }
+    dataframe: { enabled: true }
+    export: { enabled: true }
+```
+
+```python
+from ._generated import AsyncClient, BaseAPIError, Client, Query, User
+
+
+class DirectoryError(Exception): ...
+
+
+class UserDirectory:
+    """Your public API. Only what is defined here is visible to users."""
+
+    def __init__(self, base_url: str, token: str):
+        self._api = Client(base_url=base_url, headers={"Authorization": f"Bearer {token}"})
+
+    def active(self) -> Query[User]:            # .all() / .iter() / .to_pandas() / .export()
+        return self._api.list_users(status="active")
+
+    def by_id(self, user_id: int) -> User:
+        try:
+            return self._api.get_user(user_id)
+        except BaseAPIError as e:               # translate, don't leak
+            raise DirectoryError(e.status_code) from e
+```
+
+The async facade is the same shape around `AsyncClient`, returning
+`AsyncQuery[User]`. Inject an `httpx` client (`Client(http_client=...)`) to test
+the facade against a mock transport.
+
+Two things to know when composing: `resource` is not a good base for a facade
+(its sub-client classes are private and rebuilt on every access, so they cannot
+be extended or injected), and a generated method whose name collides with a
+base-client member such as `close` is renamed with a trailing underscore --
+check the generated names before delegating to them.
+
+The free functions remain as the implementation the methods call. `client` and
+`resource` compose with [module splitting](#-module-splitting): the functions are
+split across module files and each method routes to its function's module, while
+`Client` / `AsyncClient` stay the single public entry point. With `resource` the
+resources mirror the split modules.
 
 ### Working with Models
 

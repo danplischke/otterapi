@@ -1699,6 +1699,22 @@ def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandl
     )
 
 
+def _unreachable_retry_raise() -> ast.stmt:
+    """A ``raise`` after the retry loop that the loop never actually reaches.
+
+    The final attempt always returns or raises, but a type checker cannot prove
+    that, so it flags the ``-> Response`` method as possibly falling off the end.
+    This makes the exhausted-loop path explicit (and impossible).
+    """
+    return ast.Raise(
+        exc=_call(
+            _name('RuntimeError'),
+            args=[ast.Constant(value='retry loop exhausted without returning')],
+        ),
+        cause=None,
+    )
+
+
 def _build_sync_request_body(
     url_expr: ast.expr,
     merged_headers: ast.expr,
@@ -1752,19 +1768,7 @@ def _build_sync_request_body(
         orelse=[],
     )
 
-    # The loop always returns or raises: the final attempt either returns a
-    # response or re-raises. That is not provable from the loop's shape, so
-    # without this a user type-checking the generated client sees
-    # "Missing return statement".
-    unreachable = ast.Raise(
-        exc=_call(
-            _name('RuntimeError'),
-            args=[ast.Constant(value='retry loop exited without returning a response')],
-        ),
-        cause=None,
-    )
-
-    return [for_loop, unreachable]
+    return [for_loop, _unreachable_retry_raise()]
 
 
 def _build_async_request_body(
@@ -1855,19 +1859,7 @@ def _build_async_request_body(
         orelse=[],
     )
 
-    # The loop always returns or raises: the final attempt either returns a
-    # response or re-raises. That is not provable from the loop's shape, so
-    # without this a user type-checking the generated client sees
-    # "Missing return statement".
-    unreachable = ast.Raise(
-        exc=_call(
-            _name('RuntimeError'),
-            args=[ast.Constant(value='retry loop exited without returning a response')],
-        ),
-        cause=None,
-    )
-
-    return [for_loop, unreachable]
+    return [for_loop, _unreachable_retry_raise()]
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:

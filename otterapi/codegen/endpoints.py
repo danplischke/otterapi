@@ -39,6 +39,7 @@ from otterapi.codegen.ast_utils import (
     _name,
     _subscript,
     _union_expr,
+    annotation_includes_none,
 )
 from otterapi.openapi.constants import MediaType
 
@@ -134,6 +135,45 @@ _PAGINATION_PARAM_KEYS: dict[PaginationStyle, tuple[tuple[str, str], ...]] = {
     PaginationStyle.CURSOR: (('cursor_param', 'cursor'), ('limit_param', 'limit')),
     PaginationStyle.PAGE: (('page_param', 'page'), ('per_page_param', 'per_page')),
 }
+
+
+def pagination_start_knob(
+    pagination_style: PaginationStyle | str | None,
+) -> tuple[str, str] | None:
+    """``(name, type)`` of a paginated function's starting-position knob.
+
+    ``offset: int | None`` for offset style, ``cursor: str | None`` for cursor,
+    ``page: int | None`` for page; ``None`` when the style has no such knob.
+    Every wrapper that forwards to ``_iter`` mirrors it through this helper.
+    """
+    if pagination_style is None:
+        return None
+    if isinstance(pagination_style, str):
+        pagination_style = PaginationStyle(pagination_style)
+    return {
+        PaginationStyle.OFFSET: ('offset', 'int'),
+        PaginationStyle.CURSOR: ('cursor', 'str'),
+        PaginationStyle.PAGE: ('page', 'int'),
+    }.get(pagination_style)
+
+
+def pagination_omits_page_size(
+    pagination_style: PaginationStyle | str | None,
+    pagination_config: dict | None,
+) -> bool:
+    """Whether a paginated function drops its ``page_size`` knob.
+
+    Only cursor style honours ``send_page_size: false`` (forward-token feeds
+    with no page-size parameter). Every wrapper that forwards to ``_iter`` must
+    ask this, or it passes a ``page_size`` the target does not accept.
+    """
+    if pagination_style is None:
+        return False
+    if isinstance(pagination_style, str):
+        pagination_style = PaginationStyle(pagination_style)
+    if pagination_style != PaginationStyle.CURSOR:
+        return False
+    return not (pagination_config or {}).get('send_page_size', True)
 
 
 def pagination_owned_param_names(
@@ -671,9 +711,15 @@ class ParameterASTBuilder:
             """The ``json=``/``data=`` value for a model-backed body."""
             if body.flattened_fields is not None:
                 return _flattened_call()
-            if body.required:
+            may_be_none = not body.required or (
+                body.type is not None
+                and body.type.annotation_ast is not None
+                and annotation_includes_none(body.type.annotation_ast)
+            )
+            if not may_be_none:
                 return _dump(_name(body_name))
-            # An optional body defaults to None, and None has no model_dump.
+            # An optional or nullable body may be None, and None has no
+            # model_dump; guard the call and pass None straight through.
             return ast.IfExp(
                 test=ast.Compare(
                     left=_name(body_name),
@@ -910,25 +956,13 @@ class EndpointFunctionFactory:
         pag_config = self.config.pagination_config or {}
         default_page_size = pag_config.get('default_page_size', 100)
 
-        if self.config.pagination_style == PaginationStyle.OFFSET:
-            # offset: int | None = None
+        # offset: int | None = None  /  cursor: str | None  /  page: int | None
+        start_knob = pagination_start_knob(self.config.pagination_style)
+        if start_knob is not None:
+            knob_name, knob_type = start_knob
             builder.add_custom_kwarg(
-                name='offset',
-                annotation=_union_expr([_name('int'), ast.Constant(value=None)]),
-                default=ast.Constant(value=None),
-            )
-        elif self.config.pagination_style == PaginationStyle.CURSOR:
-            # cursor: str | None = None
-            builder.add_custom_kwarg(
-                name='cursor',
-                annotation=_union_expr([_name('str'), ast.Constant(value=None)]),
-                default=ast.Constant(value=None),
-            )
-        elif self.config.pagination_style == PaginationStyle.PAGE:
-            # page: int | None = None
-            builder.add_custom_kwarg(
-                name='page',
-                annotation=_union_expr([_name('int'), ast.Constant(value=None)]),
+                name=knob_name,
+                annotation=_union_expr([_name(knob_type), ast.Constant(value=None)]),
                 default=ast.Constant(value=None),
             )
 
@@ -962,10 +996,21 @@ class EndpointFunctionFactory:
         return _name('Response')
 
     def _dataframe_return_type(self) -> ast.expr:
-        """Build the return type annotation for DataFrame-returning methods."""
-        if self.config.dataframe_library == DataFrameLibrary.PANDAS:
-            return ast.Constant(value=_PANDAS_DATAFRAME_ANNOTATION)
-        return ast.Constant(value=_POLARS_DATAFRAME_ANNOTATION)
+        """Build the return type annotation for DataFrame-returning methods.
+
+        Emitted unquoted (``pd.DataFrame`` / ``pl.DataFrame``): every generated
+        module carries ``from __future__ import annotations``, so the annotation
+        is a deferred string at runtime and ``pandas`` / ``polars`` only need to
+        resolve under ``TYPE_CHECKING``. A quoted string constant would be
+        redundant there (ruff ``UP037``).
+        """
+        annotation = (
+            _PANDAS_DATAFRAME_ANNOTATION
+            if self.config.dataframe_library == DataFrameLibrary.PANDAS
+            else _POLARS_DATAFRAME_ANNOTATION
+        )
+        module, _, attr = annotation.partition('.')
+        return _attr(module, attr)
 
     def _iterator_return_type(self, item_type_ast: ast.expr) -> ast.expr:
         """Build an ``Iterator[X]`` / ``AsyncIterator[X]`` return type annotation."""
@@ -1474,10 +1519,9 @@ class EndpointFunctionFactory:
         Only honored for cursor style: some cursor APIs (e.g. forward-token
         feeds) have no page-size parameter, so sending ``limit`` is noise.
         """
-        if self.config.pagination_style != PaginationStyle.CURSOR:
-            return False
-        pag_config = self.config.pagination_config or {}
-        return not pag_config.get('send_page_size', True)
+        return pagination_omits_page_size(
+            self.config.pagination_style, self.config.pagination_config
+        )
 
     def _pagination_param_names(self) -> tuple[str, str, str, str]:
         """Resolve fetch_page's (param1_name, param2_name, param1_api_name, param2_api_name)."""

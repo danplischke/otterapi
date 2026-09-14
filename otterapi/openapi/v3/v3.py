@@ -834,7 +834,7 @@ class OpenAPI(BaseModel):
         return openapi_v3_1.Encoding(
             contentType=encoding.contentType,
             headers=headers,
-            style=encoding.style,
+            style=_style_value(encoding.style),
             explode=encoding.explode,
             allowReserved=encoding.allowReserved,
         )

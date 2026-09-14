@@ -1384,22 +1384,34 @@ class TestPaginatedExportGeneration:
             )
 
     @pytest.mark.parametrize(
-        ('style', 'owned'),
-        [('offset', {'offset', 'limit'}), ('page', {'page', 'per_page'})],
+        ('style', 'driven'),
+        [('offset', {'limit'}), ('page', {'per_page'})],
     )
-    def test_export_drops_the_specs_own_paging_parameters(self, style, owned, tmp_path):
-        """The paginator drives these itself via page_size / max_items."""
+    def test_export_mirrors_iter_not_the_specs_paging_parameters(
+        self, style, driven, tmp_path
+    ):
+        """The wrapper declares exactly ``_iter``'s knobs plus its writer args.
+
+        The spec's page-size parameter is driven by the paginator and gone. The
+        starting-position knob (``offset`` / ``page``) is ``_iter``'s own and
+        stays, so ``export(offset=10)`` starts where ``_iter(offset=10)`` does
+        instead of being silently ignored.
+        """
         source = _generate_paginated_export(tmp_path, style)
-        export_fn = next(
-            node
+        functions = {
+            node.name: node
             for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.FunctionDef) and node.name == 'list_items_export'
-        )
-        accepted = _accepted_arg_names(export_fn)
-        assert not (accepted & owned)
+            if isinstance(node, ast.FunctionDef)
+        }
+        accepted = _accepted_arg_names(functions['list_items_export'])
+        assert not (accepted & driven)
         # Non-paging query parameters are still exposed and forwarded.
         assert 'q' in accepted
-        assert {'page_size', 'max_items'} <= accepted
+        assert accepted == _accepted_arg_names(functions['list_items_iter']) | {
+            'output_path',
+            'format',
+            'batch_size',
+        }
 
     def test_split_modules_get_the_same_treatment(self, tmp_path):
         from otterapi.config import ModuleSplitConfig
@@ -1409,12 +1421,18 @@ class TestPaginatedExportGeneration:
             'page',
             module_split=ModuleSplitConfig(enabled=True, strategy='path'),
         )
-        export_fn = next(
-            node
+        functions = {
+            node.name: node
             for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.FunctionDef) and node.name == 'list_items_export'
-        )
-        assert not (_accepted_arg_names(export_fn) & {'page', 'per_page'})
+            if isinstance(node, ast.FunctionDef)
+        }
+        accepted = _accepted_arg_names(functions['list_items_export'])
+        assert 'per_page' not in accepted
+        assert accepted == _accepted_arg_names(functions['list_items_iter']) | {
+            'output_path',
+            'format',
+            'batch_size',
+        }
 
 
 class TestPaginationOwnedParamNames:
