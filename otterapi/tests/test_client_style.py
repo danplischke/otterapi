@@ -922,11 +922,19 @@ class TestReviewRegressions:
                 '/billing/invoices': {'get': _list_op('listInvoices')},
             },
         )
-        _gen(tmp_path / 'fold', spec, client_style='resource', resource_naming='path')
+        _gen(
+            tmp_path / 'fold',
+            spec,
+            client_style='resource',
+            resource_naming='path',
+            dataframe={'enabled': True, 'pandas': True},
+        )
         mod = _import_fresh(tmp_path, 'fold')
         client = mod.Client(base_url='https://example.test')
-        # Action leaves become methods on the parent, named after the segment.
-        assert {'find_by_status', 'get_by_id'} <= _own_public_methods(type(client.pet))
+        # Action leaves become methods on the parent, named after the segment;
+        # a variant keeps its suffix.
+        pet_methods = _own_public_methods(type(client.pet))
+        assert {'find_by_status', 'find_by_status_df', 'get_by_id'} <= pet_methods
         assert 'login' in _own_public_methods(type(client.user))
         # A plural collection leaf keeps its own sub-client.
         assert 'list' in _own_public_methods(type(client.billing.invoices))
@@ -1032,15 +1040,26 @@ class TestReviewRegressions:
             export={'enabled': True, 'formats': ['csv']},
         )
         src = (tmp_path / 'xc' / 'endpoints.py').read_text()
-        for name in ('list_items_iter', 'list_items_export'):
+
+        def accepted(name: str) -> set[str]:
             fn = _function(src, name)
-            assert 'page_size' not in {a.arg for a in fn.args.kwonlyargs}, name
+            return {a.arg for a in (*fn.args.args, *fn.args.kwonlyargs)}
+
+        assert 'page_size' not in accepted('list_items_iter')
+        assert 'cursor' in accepted('list_items_iter')
+        # The wrapper declares exactly _iter's knobs plus its own writer args.
+        assert accepted('list_items_export') == accepted('list_items_iter') | {
+            'output_path',
+            'format',
+            'batch_size',
+        }
         assert 'page_size' not in ast.unparse(_function(src, 'list_items_export'))
 
     def test_class_styles_emit_each_endpoint_once(self, tmp_path, monkeypatch):
         # The layout writer wraps the sink the endpoints file already produced
         # instead of running every feature builder a second time.
         import otterapi.codegen.codegen as codegen_module
+        import otterapi.codegen.splitting as splitting_module
 
         calls: list[int] = []
         real = codegen_module.build_endpoint_sink
@@ -1049,10 +1068,126 @@ class TestReviewRegressions:
             calls.append(len(endpoints))
             return real(endpoints, *args, **kwargs)
 
+        # Both writers build sinks; neither the flat nor the split path may
+        # build a second one for the layout file.
         monkeypatch.setattr(codegen_module, 'build_endpoint_sink', counting)
+        monkeypatch.setattr(splitting_module, 'build_endpoint_sink', counting)
         _generate_tagged(
             tmp_path / 'once',
             client_style='client',
             dataframe={'enabled': True, 'pandas': True},
         )
         assert calls == [4]  # the four tagged-spec operations, emitted once
+
+        calls.clear()
+        _generate_tagged(
+            tmp_path / 'once_split',
+            client_style='client',
+            module_split={'enabled': True, 'strategy': 'path'},
+        )
+        assert sorted(calls) == [2, 2]  # one sink per split module, no re-emit
+
+    def test_nested_split_class_style_resolves_imports(self, tmp_path):
+        # A nested split module has its sibling imports re-pointed (``..models``);
+        # _clients.py lives at the package root and must normalize them back.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/identity/users': {
+                    'get': _list_op(
+                        'listUsers',
+                        [
+                            {
+                                'in': 'query',
+                                'name': 'since',
+                                'schema': {'type': 'string', 'format': 'date-time'},
+                            }
+                        ],
+                    )
+                },
+                '/billing/invoices': {'get': _list_op('listInvoices')},
+            },
+        )
+        _gen(
+            tmp_path / 'nsi',
+            spec,
+            client_style='client',
+            module_split={
+                'enabled': True,
+                'strategy': 'path',
+                'path_depth': 2,
+                'min_endpoints': 1,
+            },
+        )
+        src = (tmp_path / 'nsi' / '_clients.py').read_text()
+        assert 'from ..' not in src
+        mod = _import_fresh(tmp_path, 'nsi')
+        params = inspect.signature(mod.Client.list_users).parameters
+        assert 'datetime' in str(params['since'].annotation)
+
+    def test_export_wrapper_aliases_colliding_body_field(self, tmp_path):
+        # The same aliasing covers a flattened request-body field named like
+        # one of the wrapper's own arguments.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/reports': {
+                    'post': {
+                        'operationId': 'searchReports',
+                        'requestBody': {
+                            'required': True,
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/Filter'}
+                                }
+                            },
+                        },
+                        'responses': _ITEM_LIST_RESPONSE,
+                    }
+                }
+            },
+            {
+                'Filter': {
+                    'type': 'object',
+                    'required': ['format', 'name'],
+                    'properties': {
+                        'format': {'type': 'string'},
+                        'name': {'type': 'string'},
+                    },
+                }
+            },
+        )
+        _gen(
+            tmp_path / 'xb',
+            spec,
+            request_body={'flatten': True},
+            export={'enabled': True, 'formats': ['csv']},
+        )
+        mod = _import_fresh(tmp_path, 'xb')
+        endpoints = importlib.import_module('xb.endpoints')
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json=[{'id': 1, 'name': 'a'}])
+
+        out = tmp_path / 'reports.csv'
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = mod.Client(http_client=http)
+            assert (
+                endpoints.search_reports_export(
+                    str(out), format_='wide', name='q', client=client
+                )
+                == 1
+            )
+        assert seen == [{'format': 'wide', 'name': 'q'}]
+
+    def test_family_grouping_falls_back_to_suffix_without_owner(self):
+        from otterapi.codegen.client_layout import _family_of
+
+        fn = ast.parse('def list_users_df(): ...').body[0]
+        assert isinstance(fn, ast.FunctionDef)
+        assert _family_of(fn, {}) == ('list_users', 'to_pandas')
+        core = ast.parse('def list_users(): ...').body[0]
+        assert isinstance(core, ast.FunctionDef)
+        assert _family_of(core, {}) == ('list_users', 'fetch')

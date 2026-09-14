@@ -678,13 +678,29 @@ export:
 
 ### Usage
 
-```python
-from client import export_list_users_csv, export_list_users_parquet
+Every list-returning endpoint gets an `<endpoint>_export` function (and an
+`async_<endpoint>_export` twin) that mirrors the endpoint's own parameters and
+adds `output_path` first, plus keyword-only `format` and `batch_size`. Extra
+keyword arguments are passed through to the file writer.
 
-# Export directly to a file
-export_list_users_csv("output/users.csv")
-export_list_users_parquet("s3://my-bucket/users.parquet")  # UPath remote targets work too
+```python
+from client import list_users_export, async_list_users_export
+
+rows = list_users_export("output/users.csv", status="active")          # returns the row count
+list_users_export("s3://my-bucket/users.parquet", format="parquet")   # UPath remote targets work too
+list_users_export("out.csv", format="csv", delimiter=";")             # writer options pass through
 ```
+
+For a [paginated](#-pagination) endpoint the export wrapper streams through the
+endpoint's `_iter` variant and declares exactly its knobs -- the starting
+position (`offset` / `cursor` / `page`), `page_size` and `max_items` -- so
+`list_users_export("out.csv", offset=100)` starts where
+`list_users_iter(offset=100)` does.
+
+If an endpoint has its own parameter named `format`, `output_path` or
+`batch_size`, the wrapper exposes it as `format_` (etc.) and forwards it to the
+API under its real name; with `result_objects`, `Query.export()` applies the
+same aliasing for you.
 
 ---
 
@@ -893,7 +909,9 @@ async with AsyncClient() as api:
 ```
 
 Terminals whose feature wasn't enabled at generation time raise a clear error;
-scalar (non-list) endpoints keep returning the model directly.
+scalar (non-list) endpoints keep returning the model directly. Iterating a
+result object directly (`for row in q` / `async for row in q`) streams pages
+when pagination is enabled and otherwise walks the fetched list.
 
 #### Composing your own SDK
 

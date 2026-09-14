@@ -696,19 +696,23 @@ def _fold_action_leaves(
     """Fold single-operation action leaves into their parent resource (in place).
 
     Returns ``{core function name: method name}``: the folded operation is named
-    after its segment on the parent. Deepest paths first, so a leaf folded into
-    a parent that then becomes a single-operation action leaf folds again.
+    after its segment on the parent. Only the tree's original leaves are
+    candidates, so folding never cascades: a parent that absorbs a leaf keeps
+    its own shape.
     """
-    overrides: dict[str, str] = {}
-    for path in sorted(functions_at, key=len, reverse=True):
-        if not path or path not in functions_at:
-            continue
-        has_children = any(
+    leaves = [
+        path
+        for path in functions_at
+        if path
+        and not any(
             other != path and other[: len(path)] == path for other in functions_at
         )
+    ]
+    overrides: dict[str, str] = {}
+    for path in leaves:
         fns = functions_at[path]
         owners = {id(owner_of[fn.name]) for fn in fns if fn.name in owner_of}
-        if has_children or len(owners) != 1 or not _is_action_segment(path[-1]):
+        if len(owners) != 1 or not _is_action_segment(path[-1]):
             continue
         core = next(owner_of[fn.name] for fn in fns if fn.name in owner_of).sync_fn_name
         functions_at.setdefault(path[:-1], []).extend(functions_at.pop(path))
