@@ -60,7 +60,7 @@ from otterapi.codegen.utils import (
     write_mod,
 )
 from otterapi.config import DocumentConfig
-from otterapi.openapi.constants import HTTP_METHODS, MediaType
+from otterapi.openapi.constants import HTTP_METHODS, is_json_media_type
 from otterapi.openapi.v3_2.v3_2 import (
     OpenAPI as OpenAPIv3_2,
     Operation,
@@ -270,10 +270,6 @@ def _topo_sort_by_base_classes(
     return result
 
 
-# Content types that should be treated as JSON
-JSON_CONTENT_TYPES = {MediaType.JSON, MediaType.TEXT_JSON}
-
-
 class Codegen(OpenAPIProcessor):
     """Main code generator for creating Python clients from OpenAPI specifications.
 
@@ -417,12 +413,11 @@ class Codegen(OpenAPIProcessor):
             # Only generate typed response for JSON content types
             # For other content types (XML, binary, etc.), return raw httpx.Response
             response_type = None
-            is_json_content = (
-                selected_content_type in JSON_CONTENT_TYPES
-                or selected_content_type.endswith('+json')
-            )
 
-            if is_json_content and selected_media_type.schema_:
+            if (
+                is_json_media_type(selected_content_type)
+                and selected_media_type.schema_
+            ):
                 assert self.typegen is not None
                 response_type = self.typegen.schema_to_type(
                     selected_media_type.schema_,
@@ -449,7 +444,7 @@ class Codegen(OpenAPIProcessor):
             Tuple of (selected_content_type, selected_media_type).
         """
         for content_type, media_type in content.items():
-            if content_type in JSON_CONTENT_TYPES or content_type.endswith('+json'):
+            if is_json_media_type(content_type):
                 return content_type, media_type
 
         return next(iter(content.items()))
@@ -524,6 +519,13 @@ class Codegen(OpenAPIProcessor):
         Args:
             operation: The OpenAPI operation to extract response models from.
 
+        Only non-error responses shape the return type. The client raises on
+        ``response.is_error`` before parsing, so a 4xx/5xx schema is never
+        parsed -- and folding it in actively breaks the success path: pydantic's
+        smart union prefers the arm needing the least coercion, so an error
+        response typed ``{'type': 'object'}`` contributes a ``dict[str, Any]``
+        arm that wins over the success model for every JSON object.
+
         Returns:
             A tuple of (response_infos, response_type) where:
             - response_infos: List of ResponseInfo objects for all status codes
@@ -535,9 +537,10 @@ class Codegen(OpenAPIProcessor):
             return [], None
 
         response_list = list(responses.values())
+        parsed_list = [r for r in response_list if not r.is_error]
 
-        json_types = [r.type for r in response_list if r.is_json and r.type]
-        non_json_types = self._collect_non_json_types(response_list)
+        json_types = [r.type for r in parsed_list if r.is_json and r.type]
+        non_json_types = self._collect_non_json_types(parsed_list)
 
         all_types = self._dedupe_types(json_types + non_json_types)
 
@@ -1099,15 +1102,19 @@ class Codegen(OpenAPIProcessor):
     def _resolve_base_url(self) -> str:
         """Resolve the base URL from config or OpenAPI spec.
 
-        If the server URL in the spec is relative, attempts to resolve it
-        against the source URL (if the spec was loaded from a URL).
+        If the server URL in the spec is relative, it is resolved against the
+        source URL when the spec was loaded from one. A spec loaded from a file
+        has nothing to resolve against, so the relative URL is kept as the
+        client default and the caller is told to pass an absolute base URL --
+        a relative server (``/``) is valid OpenAPI and common in specs served
+        from a doc endpoint, so it must not fail generation.
 
         Returns:
             The base URL to use for API requests.
 
         Raises:
-            ValueError: If no base URL can be determined, multiple servers are defined,
-                       or a relative server URL cannot be resolved.
+            ValueError: If no base URL can be determined or multiple servers
+                       are defined.
         """
         # Config base_url takes precedence
         if self.config.base_url:
@@ -1117,13 +1124,16 @@ class Codegen(OpenAPIProcessor):
         servers = self._adapter.servers()
         if not servers:
             raise ValueError(
-                'No base url provided. Make sure you specify the base_url in the otterapi config or the OpenAPI document contains a valid servers section'
+                'No base url provided. Pass an absolute base URL with -b/--base-url, '
+                'set base_url in the otterapi config, or make sure the OpenAPI '
+                'document contains a valid servers section'
             )
 
         # Only support single server
         if len(servers) > 1:
             raise ValueError(
-                'Multiple servers are not supported. Set the base_url in the config.'
+                'Multiple servers are not supported. Pick one by passing '
+                '-b/--base-url or by setting base_url in the otterapi config.'
             )
 
         server = servers[0]
@@ -1134,7 +1144,9 @@ class Codegen(OpenAPIProcessor):
 
         if not baseurl:
             raise ValueError(
-                'No base url provided. Make sure you specify the base_url in the otterapi config or the OpenAPI document contains a valid servers section'
+                'No base url provided. Pass an absolute base URL with -b/--base-url, '
+                'set base_url in the otterapi config, or make sure the OpenAPI '
+                'document contains a valid servers section'
             )
 
         # Check if the server URL is relative
@@ -1149,13 +1161,18 @@ class Codegen(OpenAPIProcessor):
                     f"using source URL '{source}'"
                 )
                 return resolved_url
-            else:
-                # Source is a file path, can't resolve relative URL
-                raise ValueError(
-                    f"Server URL '{baseurl}' is relative and cannot be resolved. "
-                    f'The OpenAPI spec was loaded from a file, not a URL. '
-                    f'Please specify an absolute base_url in the otterapi config.'
-                )
+
+            # Source is a file path: there is no origin to resolve against.
+            # Keep the relative URL as the generated default -- the client is
+            # usable as soon as the caller supplies an absolute base URL.
+            logger.warning(
+                f"Server URL '{baseurl}' is relative and the OpenAPI spec was "
+                f'loaded from a file, so it cannot be resolved to an absolute '
+                f'URL. The generated client defaults to it as-is; pass an '
+                f'absolute base URL with -b/--base-url (or set base_url in the '
+                f'otterapi config) to bake one in, or pass base_url= when '
+                f'constructing the client.'
+            )
 
         return baseurl
 

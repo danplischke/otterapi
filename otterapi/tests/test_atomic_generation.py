@@ -1,9 +1,9 @@
 """Tests that a failed generation leaves the output directory untouched.
 
-Generation writes many files and can fail partway through -- an unresolvable
-relative server URL, a schema the type generator rejects, a validation error
-on an emitted module. A half-written package is worse than no package: it may
-still import, just wrong.
+Generation writes many files and can fail partway through -- a spec whose
+servers cannot be narrowed to one base URL, a schema the type generator
+rejects, a validation error on an emitted module. A half-written package is
+worse than no package: it may still import, just wrong.
 
 The rollback is a snapshot-and-restore rather than a generate-then-swap
 because ``client.py`` is deliberately preserved across runs, as is anything
@@ -22,8 +22,9 @@ import yaml
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
 
-# A file-loaded spec whose only server URL is relative: generation gets far
-# enough to write models.py, then fails resolving the base URL.
+# A file-loaded spec whose only server URL is relative. Generation succeeds:
+# the relative URL is kept as the client default and the caller supplies an
+# absolute one, either at generation time (--base-url) or per client.
 RELATIVE_SERVER_SPEC = {
     'openapi': '3.1.0',
     'info': {'title': 'Rel', 'version': '1.0'},
@@ -55,6 +56,16 @@ RELATIVE_SERVER_SPEC = {
 VALID_SPEC = {
     **RELATIVE_SERVER_SPEC,
     'servers': [{'url': 'https://example.test'}],
+}
+
+# Generation gets far enough to write models.py, then fails resolving the base
+# URL: two servers give no single base to bake into the client.
+MULTI_SERVER_SPEC = {
+    **RELATIVE_SERVER_SPEC,
+    'servers': [
+        {'url': 'https://one.example.test'},
+        {'url': 'https://two.example.test'},
+    ],
 }
 
 
@@ -96,7 +107,7 @@ def _base_url_default(output: Path) -> str:
 class TestFailedGenerationRollsBack:
     def test_new_directory_is_removed(self, tmp_path: Path):
         """The failure used to leave a lone models.py behind."""
-        spec_file = _write_spec(tmp_path, RELATIVE_SERVER_SPEC)
+        spec_file = _write_spec(tmp_path, MULTI_SERVER_SPEC)
         output = tmp_path / 'client'
 
         with pytest.raises(Exception):
@@ -105,7 +116,7 @@ class TestFailedGenerationRollsBack:
         assert not output.exists()
 
     def test_existing_files_survive(self, tmp_path: Path):
-        spec_file = _write_spec(tmp_path, RELATIVE_SERVER_SPEC)
+        spec_file = _write_spec(tmp_path, MULTI_SERVER_SPEC)
         output = tmp_path / 'client'
         output.mkdir()
         (output / 'client.py').write_text('# hand-written', encoding='utf-8')
@@ -124,7 +135,7 @@ class TestFailedGenerationRollsBack:
         before = {p.name: p.read_bytes() for p in output.rglob('*') if p.is_file()}
 
         bad_spec = tmp_path / 'bad.json'
-        bad_spec.write_text(json.dumps(RELATIVE_SERVER_SPEC), encoding='utf-8')
+        bad_spec.write_text(json.dumps(MULTI_SERVER_SPEC), encoding='utf-8')
         with pytest.raises(Exception):
             _generate(bad_spec, output)
 
@@ -166,7 +177,7 @@ class TestSuccessfulGenerationIsUnaffected:
 
 
 class TestBaseUrlOption:
-    """``--base-url`` is what makes a relative-server spec usable at all."""
+    """``--base-url`` bakes an absolute base into a relative-server client."""
 
     def test_supplying_a_base_url_makes_generation_succeed(self, tmp_path: Path):
         spec_file = _write_spec(tmp_path, RELATIVE_SERVER_SPEC)
@@ -208,3 +219,88 @@ class TestBaseUrlOption:
             None, 'spec.json', './out', 'https://example.test'
         )
         assert resolved.documents[0].base_url == 'https://example.test'
+
+
+class TestRelativeServerUrl:
+    """A relative server (``/``) is valid OpenAPI, so it must not hard-fail.
+
+    Springdoc's ``/v3/api-docs`` emits exactly ``{"url": "/"}``; downloading
+    that document to a file and generating from it has to work.
+    """
+
+    def test_generation_succeeds_without_a_base_url(self, tmp_path: Path):
+        spec_file = _write_spec(tmp_path, RELATIVE_SERVER_SPEC)
+        output = tmp_path / 'client'
+
+        _generate(spec_file, output)
+
+        for name in ('models.py', 'endpoints.py', '_client.py', 'client.py'):
+            assert (output / name).exists()
+
+    def test_the_relative_url_becomes_the_client_default(self, tmp_path: Path):
+        """Kept as-is: the caller passes ``base_url=`` to make it absolute."""
+        spec_file = _write_spec(tmp_path, RELATIVE_SERVER_SPEC)
+        output = tmp_path / 'client'
+
+        _generate(spec_file, output)
+
+        assert _base_url_default(output) == '/api/v3'
+
+    def test_a_bare_slash_server_generates_a_base_less_client(self, tmp_path: Path):
+        spec = {**RELATIVE_SERVER_SPEC, 'servers': [{'url': '/'}]}
+        output = tmp_path / 'client'
+
+        _generate(_write_spec(tmp_path, spec), output)
+
+        # The generated __init__ does base_url.rstrip('/'), so '/' is no base.
+        assert _base_url_default(output) == '/'
+
+    def test_the_warning_names_the_cli_flag(self, tmp_path: Path, caplog):
+        """The old error pointed only at "the otterapi config"."""
+        spec_file = _write_spec(tmp_path, RELATIVE_SERVER_SPEC)
+
+        with caplog.at_level('WARNING', logger='otterapi.codegen.codegen'):
+            _generate(spec_file, tmp_path / 'client')
+
+        assert any(
+            '-b/--base-url' in record.message and 'relative' in record.message
+            for record in caplog.records
+        )
+
+    def test_no_warning_when_a_base_url_is_supplied(self, tmp_path: Path, caplog):
+        spec_file = _write_spec(tmp_path, RELATIVE_SERVER_SPEC)
+
+        with caplog.at_level('WARNING', logger='otterapi.codegen.codegen'):
+            _generate(spec_file, tmp_path / 'client', base_url='https://example.test')
+
+        assert not any('relative' in record.message for record in caplog.records)
+
+    def test_a_url_source_still_resolves_the_relative_server(self, tmp_path: Path):
+        """Loaded over HTTP, ``/api/v3`` resolves against the source origin."""
+        codegen = Codegen(
+            DocumentConfig(
+                source=str(_write_spec(tmp_path, RELATIVE_SERVER_SPEC)),
+                output=str(tmp_path / 'client'),
+            )
+        )
+        codegen._load_schema()
+        codegen.config.source = 'https://api.example.test/v3/api-docs'
+
+        assert codegen._resolve_base_url() == 'https://api.example.test/api/v3'
+
+
+class TestUnresolvableServers:
+    """Failures that remain, and what their messages point the user at."""
+
+    def test_multiple_servers_names_the_cli_flag(self, tmp_path: Path):
+        spec_file = _write_spec(tmp_path, MULTI_SERVER_SPEC)
+
+        with pytest.raises(Exception, match=r'-b/--base-url'):
+            _generate(spec_file, tmp_path / 'client')
+
+    def test_no_servers_names_the_cli_flag(self, tmp_path: Path):
+        spec = {k: v for k, v in RELATIVE_SERVER_SPEC.items() if k != 'servers'}
+        spec_file = _write_spec(tmp_path, spec)
+
+        with pytest.raises(Exception, match=r'-b/--base-url'):
+            _generate(spec_file, tmp_path / 'client')

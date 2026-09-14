@@ -1139,8 +1139,10 @@ otter generate -c my-config.yml
 # Generate without a config file
 otter generate -s ./api.yaml -o ./client
 
-# Override the base URL — required when a file-loaded spec's servers are
-# relative (e.g. `url: /api/v3`), and applies to every document in a config
+# Override the base URL — bakes an absolute base into a file-loaded spec whose
+# servers are relative (e.g. `url: /api/v3`); applies to every document in a
+# config. Without it the relative URL stays the client default, so callers pass
+# `base_url=` when constructing the client.
 otter generate -s ./api.yaml -o ./client -b https://api.example.com
 
 # Tolerate malformed specs (drop unknown/invalid fields with a warning)

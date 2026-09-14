@@ -150,8 +150,8 @@ def _resolve_codegen_config(
     """Build a CodegenConfig from --source/--output or a config file.
 
     ``--base-url`` applies either way: with a config file it overrides the
-    base URL of every document, which is what makes a spec whose servers are
-    relative usable without editing the file.
+    base URL of every document, which is what bakes an absolute base into a
+    spec whose servers are relative without editing the file.
     """
     if source and output:
         return CodegenConfig(
@@ -245,7 +245,7 @@ def generate(
             '--base-url',
             '-b',
             help=(
-                'Override the base URL from the spec. Required when a '
+                'Override the base URL from the spec. Use it when a '
                 'file-loaded spec only declares relative server URLs'
             ),
         ),
