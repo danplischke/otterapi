@@ -32,6 +32,8 @@ from otterapi.codegen.ast_utils import (
     _assign,
     _attr,
     _call,
+    _class_def,
+    _function_def,
     _name,
 )
 
@@ -215,13 +217,8 @@ def _method_from_function(
         body.append(docstring)
     body.append(return_stmt)
 
-    node_cls = ast.AsyncFunctionDef if emit_async else ast.FunctionDef
-    return node_cls(
-        name=method_name,
-        args=new_args,
-        body=body,
-        decorator_list=[],
-        returns=fn.returns,
+    return _function_def(
+        method_name, new_args, body, returns=fn.returns, is_async=emit_async
     )
 
 
@@ -431,20 +428,8 @@ def build_client_module_body(
 
     sync_body: list[ast.stmt] = [*sync_methods] or [ast.Pass()]
     async_body: list[ast.stmt] = [*async_methods] or [ast.Pass()]
-    sync_class = ast.ClassDef(
-        name=sync_class_name,
-        bases=[_name('_BaseClient')],
-        keywords=[],
-        body=sync_body,
-        decorator_list=[],
-    )
-    async_class = ast.ClassDef(
-        name=async_class_name,
-        bases=[_name('_BaseClient')],
-        keywords=[],
-        body=async_body,
-        decorator_list=[],
-    )
+    sync_class = _class_def(sync_class_name, [_name('_BaseClient')], sync_body)
+    async_class = _class_def(async_class_name, [_name('_BaseClient')], async_body)
 
     body: list[ast.stmt] = [
         ast.ImportFrom(
@@ -525,26 +510,18 @@ def _base_name(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 
 def _resource_class(class_name: str, methods: Sequence[ast.stmt]) -> ast.ClassDef:
     """A resource sub-client holding ``self._client`` plus delegating methods."""
-    init = ast.FunctionDef(
-        name='__init__',
-        args=ast.arguments(
+    init = _function_def(
+        '__init__',
+        ast.arguments(
             posonlyargs=[],
             args=[ast.arg(arg='self'), ast.arg(arg='client')],
             kwonlyargs=[],
             kw_defaults=[],
             defaults=[],
         ),
-        body=[_assign(_attr('self', '_client'), _name('client'))],
-        decorator_list=[],
-        returns=None,
+        [_assign(_attr('self', '_client'), _name('client'))],
     )
-    return ast.ClassDef(
-        name=class_name,
-        bases=[],
-        keywords=[],
-        body=[init, *methods],
-        decorator_list=[],
-    )
+    return _class_def(class_name, [], [init, *methods])
 
 
 def _resource_class_name(path: tuple[str, ...], is_async: bool) -> str:
@@ -566,16 +543,16 @@ def _child_property(
     ``self._client`` is passed down.
     """
     client_expr: ast.expr = _name('self') if on_client else _attr('self', '_client')
-    return ast.FunctionDef(
-        name=child_segment,
-        args=ast.arguments(
+    return _function_def(
+        child_segment,
+        ast.arguments(
             posonlyargs=[],
             args=[ast.arg(arg='self')],
             kwonlyargs=[],
             kw_defaults=[],
             defaults=[],
         ),
-        body=[ast.Return(value=_call(_name(child_class_name), args=[client_expr]))],
+        [ast.Return(value=_call(_name(child_class_name), args=[client_expr]))],
         decorator_list=[_name('property')],
         returns=_name(child_class_name),
     )
@@ -690,13 +667,7 @@ def _query_method(
         body.append(docstring)
     body.append(ast.Return(value=query_call))
 
-    return ast.FunctionDef(
-        name=method_name,
-        args=new_args,
-        body=body,
-        decorator_list=[],
-        returns=returns,
-    )
+    return _function_def(method_name, new_args, body, returns=returns)
 
 
 def _resource_methods(
@@ -863,13 +834,7 @@ def build_resource_client_module_body(
         ]
         _avoid_member_collisions(members, _CLIENT_RESERVED_MEMBERS)
         class_body: list[ast.stmt] = [*members] or [ast.Pass()]
-        return ast.ClassDef(
-            name=name,
-            bases=[_name('_BaseClient')],
-            keywords=[],
-            body=class_body,
-            decorator_list=[],
-        )
+        return _class_def(name, [_name('_BaseClient')], class_body)
 
     sync_client = client_class(sync_class_name, is_async=False)
     async_client = client_class(async_class_name, is_async=True)
