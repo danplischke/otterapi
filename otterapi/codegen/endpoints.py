@@ -137,6 +137,45 @@ _PAGINATION_PARAM_KEYS: dict[PaginationStyle, tuple[tuple[str, str], ...]] = {
 }
 
 
+def pagination_start_knob(
+    pagination_style: PaginationStyle | str | None,
+) -> tuple[str, str] | None:
+    """``(name, type)`` of a paginated function's starting-position knob.
+
+    ``offset: int | None`` for offset style, ``cursor: str | None`` for cursor,
+    ``page: int | None`` for page; ``None`` when the style has no such knob.
+    Every wrapper that forwards to ``_iter`` mirrors it through this helper.
+    """
+    if pagination_style is None:
+        return None
+    if isinstance(pagination_style, str):
+        pagination_style = PaginationStyle(pagination_style)
+    return {
+        PaginationStyle.OFFSET: ('offset', 'int'),
+        PaginationStyle.CURSOR: ('cursor', 'str'),
+        PaginationStyle.PAGE: ('page', 'int'),
+    }.get(pagination_style)
+
+
+def pagination_omits_page_size(
+    pagination_style: PaginationStyle | str | None,
+    pagination_config: dict | None,
+) -> bool:
+    """Whether a paginated function drops its ``page_size`` knob.
+
+    Only cursor style honours ``send_page_size: false`` (forward-token feeds
+    with no page-size parameter). Every wrapper that forwards to ``_iter`` must
+    ask this, or it passes a ``page_size`` the target does not accept.
+    """
+    if pagination_style is None:
+        return False
+    if isinstance(pagination_style, str):
+        pagination_style = PaginationStyle(pagination_style)
+    if pagination_style != PaginationStyle.CURSOR:
+        return False
+    return not (pagination_config or {}).get('send_page_size', True)
+
+
 def pagination_owned_param_names(
     pagination_style: PaginationStyle | str | None,
     pagination_config: dict | None,
@@ -917,25 +956,13 @@ class EndpointFunctionFactory:
         pag_config = self.config.pagination_config or {}
         default_page_size = pag_config.get('default_page_size', 100)
 
-        if self.config.pagination_style == PaginationStyle.OFFSET:
-            # offset: int | None = None
+        # offset: int | None = None  /  cursor: str | None  /  page: int | None
+        start_knob = pagination_start_knob(self.config.pagination_style)
+        if start_knob is not None:
+            knob_name, knob_type = start_knob
             builder.add_custom_kwarg(
-                name='offset',
-                annotation=_union_expr([_name('int'), ast.Constant(value=None)]),
-                default=ast.Constant(value=None),
-            )
-        elif self.config.pagination_style == PaginationStyle.CURSOR:
-            # cursor: str | None = None
-            builder.add_custom_kwarg(
-                name='cursor',
-                annotation=_union_expr([_name('str'), ast.Constant(value=None)]),
-                default=ast.Constant(value=None),
-            )
-        elif self.config.pagination_style == PaginationStyle.PAGE:
-            # page: int | None = None
-            builder.add_custom_kwarg(
-                name='page',
-                annotation=_union_expr([_name('int'), ast.Constant(value=None)]),
+                name=knob_name,
+                annotation=_union_expr([_name(knob_type), ast.Constant(value=None)]),
                 default=ast.Constant(value=None),
             )
 
@@ -1492,10 +1519,9 @@ class EndpointFunctionFactory:
         Only honored for cursor style: some cursor APIs (e.g. forward-token
         feeds) have no page-size parameter, so sending ``limit`` is noise.
         """
-        if self.config.pagination_style != PaginationStyle.CURSOR:
-            return False
-        pag_config = self.config.pagination_config or {}
-        return not pag_config.get('send_page_size', True)
+        return pagination_omits_page_size(
+            self.config.pagination_style, self.config.pagination_config
+        )
 
     def _pagination_param_names(self) -> tuple[str, str, str, str]:
         """Resolve fetch_page's (param1_name, param2_name, param1_api_name, param2_api_name)."""

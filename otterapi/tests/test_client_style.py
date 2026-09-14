@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 import importlib
+import inspect
+import json
 import sys
 from pathlib import Path
 
@@ -679,3 +681,378 @@ class TestComposedFacade:
                 Directory(mod.Client(http_client=http)).users()
         assert info.value.args == (503,)
         assert isinstance(info.value.__cause__, mod.BaseAPIError)
+
+
+# ---------------------------------------------------------------------------
+# Regressions for the review of the class-style layouts (see PR discussion).
+# ---------------------------------------------------------------------------
+
+_ITEM_SCHEMA = {
+    'type': 'object',
+    'required': ['id', 'name'],
+    'properties': {'id': {'type': 'integer'}, 'name': {'type': 'string'}},
+}
+_ITEM_LIST_RESPONSE = {
+    '200': {
+        'description': 'ok',
+        'content': {
+            'application/json': {
+                'schema': {
+                    'type': 'array',
+                    'items': {'$ref': '#/components/schemas/Item'},
+                }
+            }
+        },
+    }
+}
+_ITEM_RESPONSE = {
+    '200': {
+        'description': 'ok',
+        'content': {
+            'application/json': {'schema': {'$ref': '#/components/schemas/Item'}}
+        },
+    }
+}
+
+
+def _write_spec(target: Path, paths: dict, schemas: dict | None = None) -> Path:
+    spec = {
+        'openapi': '3.0.0',
+        'info': {'title': 'T', 'version': '1'},
+        'paths': paths,
+        'components': {'schemas': {'Item': _ITEM_SCHEMA, **(schemas or {})}},
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(spec))
+    return target
+
+
+def _list_op(operation_id: str, params: list | None = None) -> dict:
+    op: dict = {'operationId': operation_id, 'responses': _ITEM_LIST_RESPONSE}
+    if params:
+        op['parameters'] = params
+    return op
+
+
+def _function(module_src: str, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in ast.parse(module_src).body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
+            return node
+    raise AssertionError(f'{name} not generated')
+
+
+class TestReviewRegressions:
+    def test_class_styles_import_signature_types(self, tmp_path):
+        # Imports come from the endpoint sink, so a date-time / uuid parameter
+        # no longer leaves ``datetime`` / ``UUID`` undefined in _clients.py.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/items': {
+                    'get': _list_op(
+                        'listItems',
+                        [
+                            {
+                                'in': 'query',
+                                'name': 'since',
+                                'schema': {'type': 'string', 'format': 'date-time'},
+                            },
+                            {
+                                'in': 'query',
+                                'name': 'owner',
+                                'schema': {'type': 'string', 'format': 'uuid'},
+                            },
+                        ],
+                    )
+                }
+            },
+        )
+        for style in ('client', 'resource'):
+            _gen(tmp_path / f'imp_{style}', spec, client_style=style)
+        mod = _import_fresh(tmp_path, 'imp_client')
+        params = inspect.signature(mod.Client.list_items).parameters
+        assert 'datetime' in str(params['since'].annotation)
+        assert 'UUID' in str(params['owner'].annotation)
+
+    def test_variant_suffix_operation_ids_survive_result_objects(self, tmp_path):
+        # Families are grouped by owning endpoint, so an operation whose own
+        # name ends in a variant suffix is a core method, not a dropped stray.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/items': {'get': _list_op('listItems')},
+                '/export': {
+                    'post': {'operationId': 'createExport', 'responses': _ITEM_RESPONSE}
+                },
+                '/iter': {
+                    'get': {'operationId': 'getIter', 'responses': _ITEM_RESPONSE}
+                },
+            },
+        )
+        _gen(
+            tmp_path / 'vs',
+            spec,
+            client_style='client',
+            result_objects=True,
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        mod = _import_fresh(tmp_path, 'vs')
+        expected = {'create_export', 'get_iter', 'list_items'}
+        assert expected <= _own_public_methods(mod.Client)
+        assert expected <= _own_public_methods(mod.AsyncClient)
+
+    def test_every_list_endpoint_gets_its_variants(self, tmp_path):
+        # The file-level feature flags must not short-circuit emission: the
+        # second and third list endpoints get DataFrame / export variants too.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {f'/{n}': {'get': _list_op(f'list{n.upper()}')} for n in ('a', 'b', 'c')},
+        )
+        features = {
+            'dataframe': {'enabled': True, 'pandas': True},
+            'export': {'enabled': True, 'formats': ['csv']},
+        }
+        _gen(tmp_path / 'ev', spec, **features)
+        src = (tmp_path / 'ev' / 'endpoints.py').read_text()
+        for name in ('list_a', 'list_b', 'list_c'):
+            assert f'def {name}_df(' in src, name
+            assert f'def {name}_export(' in src, name
+
+        _gen(
+            tmp_path / 'evq',
+            spec,
+            client_style='client',
+            result_objects=True,
+            **features,
+        )
+        mod = _import_fresh(tmp_path, 'evq')
+        client = mod.Client(base_url='https://example.test')
+        for name in ('list_a', 'list_b', 'list_c'):
+            assert isinstance(getattr(client, name)(), mod.Query), name
+
+    def test_optional_unwrapped_list_keeps_query_item_type(self, tmp_path):
+        envelope = {
+            'type': 'object',
+            'properties': {
+                'data': {
+                    'type': 'array',
+                    'items': {'$ref': '#/components/schemas/Item'},
+                },
+                'status': {'type': 'string'},
+            },
+        }
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/items': {
+                    'get': {
+                        'operationId': 'listItems',
+                        'responses': {
+                            '200': {
+                                'description': 'ok',
+                                'content': {
+                                    'application/json': {
+                                        'schema': {
+                                            '$ref': '#/components/schemas/Envelope'
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+            {'Envelope': envelope},
+        )
+        _gen(
+            tmp_path / 'oq',
+            spec,
+            client_style='client',
+            result_objects=True,
+            response_unwrap={'enabled': True, 'data_path': 'data'},
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        src = (tmp_path / 'oq' / '_clients.py').read_text()
+        assert 'Query[Item]' in src
+        assert 'Query[Any]' not in src
+
+    @pytest.mark.asyncio
+    async def test_async_query_iterates_without_pagination(self, tmp_path):
+        # ``async for`` over a result object falls back to the materialized
+        # list, exactly like ``for`` over the sync one.
+        _gen(
+            tmp_path / 'aq',
+            TAGGED_SPEC,
+            client_style='resource',
+            result_objects=True,
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        mod = _import_fresh(tmp_path, 'aq')
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_tagged_handler)
+        ) as http:
+            client = mod.AsyncClient(async_http_client=http)
+            assert [u.name async for u in client.users.list()] == ['alice']
+
+    def test_action_leaves_fold_into_parent_resource(self, tmp_path):
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/pet/findByStatus': {'get': _list_op('findPetsByStatus')},
+                '/pet/{petId}': {
+                    'get': {
+                        'operationId': 'getPetById',
+                        'parameters': [
+                            {
+                                'in': 'path',
+                                'name': 'petId',
+                                'required': True,
+                                'schema': {'type': 'integer'},
+                            }
+                        ],
+                        'responses': _ITEM_RESPONSE,
+                    }
+                },
+                '/user/login': {
+                    'get': {'operationId': 'loginUser', 'responses': _ITEM_RESPONSE}
+                },
+                '/billing/invoices': {'get': _list_op('listInvoices')},
+            },
+        )
+        _gen(tmp_path / 'fold', spec, client_style='resource', resource_naming='path')
+        mod = _import_fresh(tmp_path, 'fold')
+        client = mod.Client(base_url='https://example.test')
+        # Action leaves become methods on the parent, named after the segment.
+        assert {'find_by_status', 'get_by_id'} <= _own_public_methods(type(client.pet))
+        assert 'login' in _own_public_methods(type(client.user))
+        # A plural collection leaf keeps its own sub-client.
+        assert 'list' in _own_public_methods(type(client.billing.invoices))
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == '/pet/findByStatus':
+                return httpx.Response(200, json=[{'id': 1, 'name': 'rex'}])
+            return httpx.Response(404, json={'detail': 'unknown route'})
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            pets = mod.Client(http_client=http).pet.find_by_status()
+        assert [p.name for p in pets] == ['rex']
+
+    def test_export_wrapper_survives_colliding_parameter(self, tmp_path):
+        # An endpoint parameter named ``format`` no longer produces a duplicate
+        # argument: it is aliased ``format_`` in the wrapper and forwarded under
+        # its real name, and Query.export applies the same aliasing.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/items': {
+                    'get': _list_op(
+                        'listItems',
+                        [
+                            {
+                                'in': 'query',
+                                'name': 'format',
+                                'schema': {'type': 'string'},
+                            }
+                        ],
+                    )
+                }
+            },
+        )
+        _gen(
+            tmp_path / 'xf',
+            spec,
+            client_style='client',
+            result_objects=True,
+            export={'enabled': True, 'formats': ['csv']},
+        )
+        mod = _import_fresh(tmp_path, 'xf')
+        endpoints = importlib.import_module('xf.endpoints')
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.params.get('format'))
+            return httpx.Response(200, json=[{'id': 1, 'name': 'a'}])
+
+        out = tmp_path / 'items.csv'
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = mod.Client(http_client=http)
+            assert (
+                endpoints.list_items_export(str(out), format_='wide', client=client)
+                == 1
+            )
+            assert client.list_items(format='wide').export(str(out)) == 1
+        assert seen == ['wide', 'wide']
+        assert out.exists()
+
+    def test_export_wrapper_forwards_writer_options(self, tmp_path):
+        spec = _write_spec(
+            tmp_path / 'spec.json', {'/items': {'get': _list_op('listItems')}}
+        )
+        _gen(tmp_path / 'xw', spec, export={'enabled': True, 'formats': ['csv']})
+        src = (tmp_path / 'xw' / 'endpoints.py').read_text()
+        wrapper = ast.unparse(_function(src, 'list_items_export'))
+        assert '**format_kwargs' in wrapper
+
+    def test_export_wrapper_matches_iter_without_page_size(self, tmp_path):
+        # Cursor pagination with send_page_size=false has no page_size knob on
+        # ``_iter``; the export wrapper must neither declare nor forward one.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/items': {
+                    'get': _list_op(
+                        'listItems',
+                        [
+                            {
+                                'in': 'query',
+                                'name': 'cursor',
+                                'schema': {'type': 'string'},
+                            }
+                        ],
+                    )
+                }
+            },
+        )
+        _gen(
+            tmp_path / 'xc',
+            spec,
+            pagination={
+                'enabled': True,
+                'endpoints': {
+                    'list_items': {
+                        'style': 'cursor',
+                        'cursor_param': 'cursor',
+                        'send_page_size': False,
+                    }
+                },
+            },
+            export={'enabled': True, 'formats': ['csv']},
+        )
+        src = (tmp_path / 'xc' / 'endpoints.py').read_text()
+        for name in ('list_items_iter', 'list_items_export'):
+            fn = _function(src, name)
+            assert 'page_size' not in {a.arg for a in fn.args.kwonlyargs}, name
+        assert 'page_size' not in ast.unparse(_function(src, 'list_items_export'))
+
+    def test_class_styles_emit_each_endpoint_once(self, tmp_path, monkeypatch):
+        # The layout writer wraps the sink the endpoints file already produced
+        # instead of running every feature builder a second time.
+        import otterapi.codegen.codegen as codegen_module
+
+        calls: list[int] = []
+        real = codegen_module.build_endpoint_sink
+
+        def counting(endpoints, *args, **kwargs):
+            calls.append(len(endpoints))
+            return real(endpoints, *args, **kwargs)
+
+        monkeypatch.setattr(codegen_module, 'build_endpoint_sink', counting)
+        _generate_tagged(
+            tmp_path / 'once',
+            client_style='client',
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        assert calls == [4]  # the four tagged-spec operations, emitted once

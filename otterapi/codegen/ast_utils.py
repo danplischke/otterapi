@@ -401,6 +401,10 @@ class ImportCollector:
                 self._imports[module] = set()
             self._imports[module].update(names)
 
+    def as_dict(self) -> dict[str, set[str]]:
+        """Return a copy of the collected ``{module: {names}}`` mapping."""
+        return {module: set(names) for module, names in self._imports.items()}
+
     def rebase_relative(self, depth: int) -> None:
         """Re-point single-dot relative imports at a module *depth* levels deep.
 

@@ -377,6 +377,51 @@ class TestRealWorldPatternFixes:
         assert "Field(default=WidgetMode('AUTO'))" in src
         assert "default='AUTO'" not in src
 
+    def test_enum_reuse_is_type_aware(self, tmp_path):
+        # A string enum must not reuse an integer enum with the "same" values:
+        # the shared class would reject the string side's default at import.
+        def response(name: str) -> dict:
+            return {
+                '200': {
+                    'description': 'ok',
+                    'content': {
+                        'application/json': {
+                            'schema': {'$ref': f'#/components/schemas/{name}'}
+                        }
+                    },
+                }
+            }
+
+        spec = {
+            'openapi': '3.0.0',
+            'info': {'title': 'T', 'version': '1'},
+            'paths': {
+                '/a': {'get': {'operationId': 'getA', 'responses': response('Alpha')}},
+                '/b': {'get': {'operationId': 'getB', 'responses': response('Beta')}},
+            },
+            'components': {
+                'schemas': {
+                    'Alpha': {
+                        'type': 'object',
+                        'properties': {'level': {'type': 'integer', 'enum': [1, 2, 3]}},
+                    },
+                    'Beta': {
+                        'type': 'object',
+                        'properties': {
+                            'mode': {
+                                'type': 'string',
+                                'enum': ['1', '2', '3'],
+                                'default': '2',
+                            }
+                        },
+                    },
+                }
+            },
+        }
+        src = (_generate(tmp_path, spec) / 'models.py').read_text()
+        assert "default=BetaMode('2')" in src
+        assert "AlphaLevel('" not in src
+
     def test_basemodel_reserved_and_underscore_fields_renamed(self, tmp_path):
         spec = {
             'openapi': '3.0.0',

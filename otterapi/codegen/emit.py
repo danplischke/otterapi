@@ -792,20 +792,24 @@ def emit_endpoint(ctx: EndpointContext, sink: EmitSink) -> None:
     """
     sink._current_endpoint = ctx.endpoint
     generated_paginated_df = False
+    # The file-level flags are OR-ed *after* each feature call and never used
+    # to short-circuit it: ``flag = flag or emit(...)`` would skip the emit for
+    # every endpoint after the first one that set the flag, silently dropping
+    # the DataFrame / export variants of all but the first list endpoint.
     if ctx.pag_config is not None:
         sink.has_pagination = True
         _CORE.emit(ctx, sink)
         generated_paginated_df = _DATAFRAME.emit_paginated(ctx, sink)
-        sink.has_dataframe = sink.has_dataframe or generated_paginated_df
-        sink.has_export = sink.has_export or _EXPORT.emit_paginated(ctx, sink)
+        sink.has_dataframe |= generated_paginated_df
+        sink.has_export |= _EXPORT.emit_paginated(ctx, sink)
     else:
         _CORE.emit(ctx, sink)
 
     if not generated_paginated_df:
-        sink.has_dataframe = sink.has_dataframe or _DATAFRAME.emit_standalone(ctx, sink)
+        sink.has_dataframe |= _DATAFRAME.emit_standalone(ctx, sink)
 
     if ctx.pag_config is None:
-        sink.has_export = sink.has_export or _EXPORT.emit_standalone(ctx, sink)
+        sink.has_export |= _EXPORT.emit_standalone(ctx, sink)
 
     # Orthogonal families run generically after the coupled triad.
     for feature in ADDITIONAL_FEATURES:
@@ -944,6 +948,7 @@ def build_endpoints_module_body(
     reexport_model_exclude_patterns: list[str] | None = None,
     description: str | None = None,
     package_depth: int = 1,
+    sink: EmitSink | None = None,
 ) -> tuple[list[ast.stmt], list[str]]:
     """Build a complete endpoint-module body and the emitted function names.
 
@@ -952,9 +957,13 @@ def build_endpoints_module_body(
     (:meth:`SplitModuleEmitter._emit_module_file`).
 
     ``package_depth`` re-points sibling imports for a module emitted into a
-    subpackage (see :func:`assemble_module_body`).
+    subpackage (see :func:`assemble_module_body`). A caller that needs the
+    sink afterwards (the class-style layout writer wraps the very same
+    function defs) builds it with :func:`build_endpoint_sink` and passes it
+    in, so the endpoints are emitted exactly once.
     """
-    sink = build_endpoint_sink(endpoints, config, resolver, description)
+    if sink is None:
+        sink = build_endpoint_sink(endpoints, config, resolver, description)
 
     extra_stmts = finalize_file_imports(sink, resolver, endpoints)
     body = assemble_module_body(

@@ -21,7 +21,9 @@ from upath import UPath
 from otterapi.codegen.ast_utils import _all
 from otterapi.codegen.emit import (
     EmitConfig,
+    EmitSink,
     TypeResolver,
+    build_endpoint_sink,
     build_endpoints_module_body,
 )
 from otterapi.codegen.utils import write_mod
@@ -650,6 +652,9 @@ class SplitModuleEmitter:
         self.generate_async = generate_async
         self.client_style = client_style
         self.result_objects = result_objects
+        #: One sink per emitted module, in emission order. The class-style
+        #: layout writer wraps these function defs instead of re-emitting them.
+        self.emitted_sinks: list[EmitSink] = []
         self.reexport_models = reexport_models
         self.reexport_model_exclude_patterns: list[str] = (
             reexport_model_exclude_patterns or []
@@ -674,6 +679,7 @@ class SplitModuleEmitter:
             List of EmittedModule objects describing what was written.
         """
         self._emitted_modules = []
+        self.emitted_sinks = []
         self._typegen_types = typegen_types or {}
 
         if self.config.flat_structure:
@@ -780,14 +786,18 @@ class SplitModuleEmitter:
             generate_sync=self.generate_sync,
             generate_async=self.generate_async,
         )
+        resolver = TypeResolver(self._typegen_types)
+        sink = build_endpoint_sink(endpoints, emit_config, resolver, description)
+        self.emitted_sinks.append(sink)
         body, endpoint_names = build_endpoints_module_body(
             endpoints,
             emit_config,
-            TypeResolver(self._typegen_types),
+            resolver,
             reexport_models=self.reexport_models,
             reexport_model_exclude_patterns=self.reexport_model_exclude_patterns,
             description=description,
             package_depth=package_depth,
+            sink=sink,
         )
 
         file_path = UPath(file_path)

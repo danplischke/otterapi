@@ -855,6 +855,11 @@ async with AsyncClient() as api:
 
 - `tag` (default) — one level, from the module-split strategy.
 - `path` — nests by URL segments: `/identity/users/{id}` → `client.identity.users.get(id)`.
+  A leaf that is an action rather than a collection (multi-word or singular
+  segment) with a single operation folds into its parent:
+  `/pet/findByStatus` → `client.pet.find_by_status(...)`, `/user/login` →
+  `client.user.login(...)`. Plural collection leaves such as `/billing/invoices`
+  keep their own sub-client (`client.billing.invoices.list()`).
 - `operation_id` — nests by the dotted operationId: `identity.users.get` → `client.identity.users.get()`.
 
 ```python

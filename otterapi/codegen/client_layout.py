@@ -22,7 +22,7 @@ functions remain the implementation the methods call, in ``endpoints.py``.
 from __future__ import annotations
 
 import ast
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
@@ -35,17 +35,19 @@ from otterapi.codegen.ast_utils import (
     _class_def,
     _function_def,
     _name,
+    strip_optional,
 )
 
 if TYPE_CHECKING:
     from otterapi.codegen.emit import TypeResolver
+    from otterapi.codegen.types import Endpoint
 
 ASYNC_PREFIX = 'async_'
 
-# Non-model annotation vocabulary the wrapped signatures can reference, mapped to
-# the import that provides it. ``from __future__ import annotations`` makes these
-# lazy, so a miss never breaks import at runtime -- the map keeps generated code
-# clean and type-checkable.
+# Names this module's own wrappers can add to a signature (``Query``), plus a
+# fallback vocabulary for the common annotation names. The wrapped signatures'
+# real imports come from the endpoint sink (see ``_build_imports``); this map
+# is consulted only for names the sink does not provide.
 _NAME_IMPORTS: dict[str, tuple[str, str]] = {
     'Response': ('httpx', 'Response'),
     'Iterator': ('collections.abc', 'Iterator'),
@@ -67,6 +69,7 @@ _VARIANT_BINDINGS: tuple[tuple[str, str], ...] = (
     ('_iter', 'iterate'),
     ('_export', 'export'),
 )
+_SUFFIX_BINDINGS: dict[str, str] = dict(_VARIANT_BINDINGS)
 
 # Public members of the generated base client. Resource accessors / methods on
 # ``Client`` / ``AsyncClient`` must not shadow these (e.g. a resource named
@@ -259,23 +262,48 @@ def _method_annotation_names(
     return names
 
 
+def _import_index(sink_imports: Mapping[str, set[str]]) -> dict[str, tuple[str, str]]:
+    """Invert ``{module: {name}}`` into ``{name: (module, name)}``.
+
+    Sibling imports are normalized back to a single leading dot: a sink
+    assembled for a nested split module has been re-pointed (``..models``),
+    but ``_clients.py`` always lives at the package root.
+    """
+    index: dict[str, tuple[str, str]] = {}
+    for module, imported in sink_imports.items():
+        if module.startswith('.'):
+            module = '.' + module.lstrip('.')
+        for name in sorted(imported):
+            index.setdefault(name, (module, name))
+    return index
+
+
 def _build_imports(
     methods: list[ast.FunctionDef | ast.AsyncFunctionDef],
     resolver: TypeResolver,
+    sink_imports: Mapping[str, set[str]] | None = None,
 ) -> tuple[list[ast.ImportFrom], ast.If | None]:
     """Build the import statements the wrapped signatures reference.
+
+    Every name a wrapped signature mentions is resolved against the imports the
+    endpoint sink collected while emitting those very functions
+    (``sink_imports``): that is the source of truth for ``datetime``, ``UUID``,
+    ``Decimal`` and whatever else a spec's parameters need. :data:`_NAME_IMPORTS`
+    covers what this module adds on top (``Query`` / ``AsyncQuery``) and is the
+    fallback for a sink that was not supplied.
 
     Returns ``(imports, type_checking_block)``. pandas/polars go behind a
     ``TYPE_CHECKING`` guard (they are optional runtime deps used only in
     annotations).
     """
     names = _method_annotation_names(methods)
+    provided_by = _import_index(sink_imports or {})
 
     collector = ImportCollector()
     for model_name in names & resolver.model_names():
         collector.add_imports({MODELS_MODULE: {model_name}})
     for name in names:
-        mapping = _NAME_IMPORTS.get(name)
+        mapping = provided_by.get(name) or _NAME_IMPORTS.get(name)
         if mapping is not None:
             module, imported = mapping
             collector.add_imports({module: {imported}})
@@ -346,6 +374,8 @@ def build_client_module_body(
     function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
     resolver: TypeResolver,
     *,
+    owner_of: Mapping[str, Endpoint] | None = None,
+    sink_imports: Mapping[str, set[str]] | None = None,
     base_client_name: str,
     endpoints_module: str = 'endpoints',
     module_of: dict[str, str] | None = None,
@@ -358,6 +388,10 @@ def build_client_module_body(
     Args:
         function_defs: The generated free functions to wrap.
         resolver: Type resolver, for model-name imports.
+        owner_of: Function name -> the endpoint it was generated for (the
+            sink's ``owners``); groups variant functions by endpoint.
+        sink_imports: The endpoint sink's collected imports, resolving every
+            name the wrapped signatures reference.
         base_client_name: Name of the client class (in ``client.py``) both client
             classes subclass, e.g. ``Client`` -- imported aliased so it does not
             clash with the generated sync class.
@@ -382,7 +416,7 @@ def build_client_module_body(
     ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
         if use_query:
             # Collapse each endpoint's variants into one Query-returning method.
-            families = _group_families(function_defs)
+            families = _group_families(function_defs, owner_of or {})
             side = 'async' if is_async else 'sync'
             built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
             for base in sorted(families):
@@ -418,7 +452,7 @@ def build_client_module_body(
     async_methods = flat_methods(is_async=True)
 
     imports, type_checking_block = _build_imports(
-        sync_methods + async_methods, resolver
+        sync_methods + async_methods, resolver, sink_imports
     )
 
     # Methods live on Client / AsyncClient, so a method named like a base-client
@@ -570,8 +604,35 @@ def _variant_of(base_name: str) -> tuple[str, str]:
     return base_name, 'fetch'
 
 
+def _family_of(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, owner_of: Mapping[str, Endpoint]
+) -> tuple[str, str]:
+    """``(family, binding)`` for a generated function.
+
+    The family is the owning endpoint's core function name and the binding is
+    which variant of it this function is, read off the suffix *relative to that
+    core name* -- so an endpoint whose own name ends in ``_export`` or ``_iter``
+    is still a core function, not a stray variant of a family that does not
+    exist. A function without a recorded owner falls back to the plain suffix
+    heuristic.
+    """
+    base = _base_name(fn)
+    owner = owner_of.get(fn.name)
+    if owner is None:
+        return _variant_of(base)
+    core = owner.sync_fn_name
+    if base == core:
+        return core, 'fetch'
+    if base.startswith(core):
+        binding = _SUFFIX_BINDINGS.get(base[len(core) :])
+        if binding is not None:
+            return core, binding
+    return base, 'fetch'
+
+
 def _group_families(
     fns: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    owner_of: Mapping[str, Endpoint],
 ) -> dict[str, dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]]:
     """Group an endpoint's variant functions into families.
 
@@ -581,14 +642,89 @@ def _group_families(
         str, dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]
     ] = {}
     for fn in fns:
-        base, binding = _variant_of(_base_name(fn))
+        base, binding = _family_of(fn, owner_of)
         side = 'async' if isinstance(fn, ast.AsyncFunctionDef) else 'sync'
         families.setdefault(base, {'sync': {}, 'async': {}})[side][binding] = fn
     return families
 
 
+def _apply_name_overrides(
+    name_map: dict[str, str],
+    core_of: Mapping[str, str],
+    overrides: Mapping[str, str],
+) -> dict[str, str]:
+    """Rename folded-leaf methods after their segment (see ``_fold_action_leaves``).
+
+    A variant keeps its suffix: the ``_df`` sibling of a folded ``find_by_status``
+    becomes ``find_by_status_df``. Names stay unique within the resource.
+    """
+    if not overrides:
+        return name_map
+    taken = set(name_map.values())
+    for base, current in list(name_map.items()):
+        core = core_of.get(base, base)
+        override = overrides.get(core)
+        if override is None:
+            continue
+        candidate = override + base[len(core) :]
+        taken.discard(current)
+        while candidate in taken:
+            candidate += '_'
+        name_map[base] = candidate
+        taken.add(candidate)
+    return name_map
+
+
+def _is_action_segment(segment: str) -> bool:
+    """Whether a path segment reads as an RPC-style action, not a collection.
+
+    Collections are plural nouns (``users``, ``invoices``) and keep their own
+    sub-client even with a single operation: ``list`` today is ``get`` tomorrow,
+    and the shape should not flip when the spec grows. A multi-word segment
+    (``find_by_status``, ``upload_image``) or a singular one (``login``,
+    ``inventory``) with a single operation is an action, and
+    ``client.pet.find_by_status(...)`` reads far better than a one-method
+    ``client.pet.find_by_status.find_pets_by_status(...)``.
+    """
+    return '_' in segment or not segment.endswith('s')
+
+
+def _fold_action_leaves(
+    functions_at: dict[tuple[str, ...], list[ast.FunctionDef | ast.AsyncFunctionDef]],
+    owner_of: Mapping[str, Endpoint],
+) -> dict[str, str]:
+    """Fold single-operation action leaves into their parent resource (in place).
+
+    Returns ``{core function name: method name}``: the folded operation is named
+    after its segment on the parent. Deepest paths first, so a leaf folded into
+    a parent that then becomes a single-operation action leaf folds again.
+    """
+    overrides: dict[str, str] = {}
+    for path in sorted(functions_at, key=len, reverse=True):
+        if not path or path not in functions_at:
+            continue
+        has_children = any(
+            other != path and other[: len(path)] == path for other in functions_at
+        )
+        fns = functions_at[path]
+        owners = {id(owner_of[fn.name]) for fn in fns if fn.name in owner_of}
+        if has_children or len(owners) != 1 or not _is_action_segment(path[-1]):
+            continue
+        core = next(owner_of[fn.name] for fn in fns if fn.name in owner_of).sync_fn_name
+        functions_at.setdefault(path[:-1], []).extend(functions_at.pop(path))
+        overrides[core] = path[-1]
+    return overrides
+
+
 def _list_item_type(returns: ast.expr | None) -> ast.expr | None:
-    """Return ``X`` from a ``list[X]`` return annotation, else None."""
+    """Return ``X`` from a ``list[X]`` (or ``list[X] | None``) return annotation.
+
+    Sees through the optional wrapper an unwrapped, not-required envelope field
+    produces, so its ``Query`` keeps the item type instead of degrading to
+    ``Query[Any]``.
+    """
+    if returns is not None:
+        returns = strip_optional(returns)
     if (
         isinstance(returns, ast.Subscript)
         and isinstance(returns.value, ast.Name)
@@ -675,15 +811,19 @@ def _resource_methods(
     path: tuple[str, ...],
     is_async: bool,
     alias_of: dict[str, str],
+    owner_of: Mapping[str, Endpoint],
     *,
     use_query: bool,
+    name_overrides: Mapping[str, str] | None = None,
 ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
     """Delegating methods for the functions living at one resource ``path``.
 
-    The path's tokens are stripped from the method names. Methods on the client
-    itself (empty path) delegate with ``client=self``; on a sub-resource with
-    ``client=self._client``.
+    The path's tokens are stripped from the method names (``name_overrides``
+    pins the names of operations folded up from an action leaf). Methods on the
+    client itself (empty path) delegate with ``client=self``; on a sub-resource
+    with ``client=self._client``.
     """
+    name_overrides = name_overrides or {}
     tokens: set[str] = set()
     for segment in path:
         tokens |= _resource_tokens(segment)
@@ -692,8 +832,12 @@ def _resource_methods(
     if use_query:
         # One method per endpoint family; a family with variants collapses
         # into a single method returning a deferred Query.
-        families = _group_families(fns)
-        name_map = _build_resource_name_map(list(families), tokens)
+        families = _group_families(fns, owner_of)
+        name_map = _apply_name_overrides(
+            _build_resource_name_map(list(families), tokens),
+            {core: core for core in families},
+            name_overrides,
+        )
         side = 'async' if is_async else 'sync'
         built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         for base, family in families.items():
@@ -723,7 +867,10 @@ def _resource_methods(
                 )
         return sorted(built, key=lambda m: m.name)
 
-    name_map = _build_resource_name_map(list({_base_name(fn) for fn in fns}), tokens)
+    core_of = {_base_name(fn): _family_of(fn, owner_of)[0] for fn in fns}
+    name_map = _apply_name_overrides(
+        _build_resource_name_map(list(core_of), tokens), core_of, name_overrides
+    )
     built = [
         _method_from_function(
             fn,
@@ -742,6 +889,8 @@ def build_resource_client_module_body(
     resolver: TypeResolver,
     resource_path_of: dict[str, tuple[str, ...]],
     *,
+    owner_of: Mapping[str, Endpoint] | None = None,
+    sink_imports: Mapping[str, set[str]] | None = None,
     base_client_name: str,
     endpoints_module: str = 'endpoints',
     module_of: dict[str, str] | None = None,
@@ -755,8 +904,15 @@ def build_resource_client_module_body(
     single-segment path gives ``client.users.get(...)``, a two-segment path gives
     ``client.identity.users.get(...)``, and an empty path puts the method directly
     on the client. Method names have the path's tokens stripped. ``module_of``
-    (split mode) routes each method to its function's real module.
+    (split mode) routes each method to its function's real module. ``owner_of``
+    and ``sink_imports`` are the endpoint sink's ``owners`` and collected
+    imports (see :func:`build_client_module_body`).
+
+    A leaf whose segment is an action rather than a collection and that holds
+    a single operation is folded into its parent as a method named after the
+    segment (``client.pet.find_by_status(...)``; see ``_is_action_segment``).
     """
+    owner_of = owner_of or {}
     module_imports, alias_of = _module_imports_and_aliases(
         function_defs, module_of, endpoints_module
     )
@@ -767,6 +923,7 @@ def build_resource_client_module_body(
     ] = {}
     for fn in function_defs:
         functions_at.setdefault(resource_path_of.get(fn.name, ()), []).append(fn)
+    name_overrides = _fold_action_leaves(functions_at, owner_of)
 
     # Every node incl. ancestors, and each node's child segment names.
     all_paths: set[tuple[str, ...]] = set()
@@ -788,7 +945,9 @@ def build_resource_client_module_body(
             path,
             is_async,
             alias_of,
+            owner_of,
             use_query=use_query,
+            name_overrides=name_overrides,
         )
 
     def child_props(
@@ -839,7 +998,7 @@ def build_resource_client_module_body(
     sync_client = client_class(sync_class_name, is_async=False)
     async_client = client_class(async_class_name, is_async=True)
 
-    imports, type_checking_block = _build_imports(all_methods, resolver)
+    imports, type_checking_block = _build_imports(all_methods, resolver, sink_imports)
 
     module_body: list[ast.stmt] = [
         ast.ImportFrom(

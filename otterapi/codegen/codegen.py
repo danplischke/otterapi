@@ -36,6 +36,7 @@ from otterapi.codegen.client_layout import (
 )
 from otterapi.codegen.emit import (
     EmitConfig,
+    EmitSink,
     TypeResolver,
     build_endpoint_sink,
     build_endpoints_module_body,
@@ -334,6 +335,9 @@ class Codegen(OpenAPIProcessor):
         self.config = config
         self.openapi: OpenAPIv3_2 | None = None
         self.typegen: TypeGenerator | None = None
+        #: Sinks of the endpoint module(s) written by the last ``generate()``;
+        #: the class-style layout writer wraps their function defs.
+        self._endpoint_sinks: list[EmitSink] = []
         self._schema_loader = schema_loader or SchemaLoader(lenient=lenient)
         self.format_output = format_output
         self.validate_output = validate_output
@@ -1189,12 +1193,17 @@ class Codegen(OpenAPIProcessor):
         too.
         """
         assert self.typegen is not None
+        emit_config = EmitConfig.from_document(self.config)
+        resolver = TypeResolver(self.typegen.types)
+        sink = build_endpoint_sink(endpoints, emit_config, resolver)
+        self._endpoint_sinks = [sink]
         body, names = build_endpoints_module_body(
             endpoints,
-            EmitConfig.from_document(self.config),
-            TypeResolver(self.typegen.types),
+            emit_config,
+            resolver,
             reexport_models=self.config.reexport_models,
             reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
+            sink=sink,
         )
         write_mod(
             body,
@@ -1224,18 +1233,31 @@ class Codegen(OpenAPIProcessor):
         """
         assert self.typegen is not None
         resolver = TypeResolver(self.typegen.types)
-        sink = build_endpoint_sink(
-            endpoints, EmitConfig.from_document(self.config), resolver
-        )
-        function_defs = endpoint_function_defs(sink)
+        # The endpoint module(s) were just written; wrap the function defs
+        # their sinks already hold rather than running every feature builder
+        # over every endpoint a second time.
+        sinks = self._endpoint_sinks or [
+            build_endpoint_sink(
+                endpoints, EmitConfig.from_document(self.config), resolver
+            )
+        ]
+        function_defs = [fn for sink in sinks for fn in endpoint_function_defs(sink)]
+        owner_of: dict[str, Endpoint] = {}
+        sink_imports: dict[str, set[str]] = {}
+        for sink in sinks:
+            owner_of.update(sink.owners)
+            for module, names in sink.imports.as_dict().items():
+                sink_imports.setdefault(module, set()).update(names)
         endpoints_module = self.config.endpoints_file.replace('.py', '')
 
         if self.config.client_style == 'resource':
-            resource_path_of = self._resource_path_of(sink)
+            resource_path_of = self._resource_path_of(owner_of)
             body, _class_names = build_resource_client_module_body(
                 function_defs,
                 resolver,
                 resource_path_of,
+                owner_of=owner_of,
+                sink_imports=sink_imports,
                 base_client_name='Client',
                 endpoints_module=endpoints_module,
                 module_of=module_of,
@@ -1245,6 +1267,8 @@ class Codegen(OpenAPIProcessor):
             body, _class_names = build_client_module_body(
                 function_defs,
                 resolver,
+                owner_of=owner_of,
+                sink_imports=sink_imports,
                 base_client_name='Client',
                 endpoints_module=endpoints_module,
                 module_of=module_of,
@@ -1257,7 +1281,9 @@ class Codegen(OpenAPIProcessor):
             validate_code=self.validate_output,
         )
 
-    def _resource_path_of(self, sink) -> dict[str, tuple[str, ...]]:
+    def _resource_path_of(
+        self, owner_of: dict[str, Endpoint]
+    ) -> dict[str, tuple[str, ...]]:
         """Map each generated function name to its nested resource path.
 
         The path is a tuple of segments (``('identity', 'users')`` ->
@@ -1267,7 +1293,7 @@ class Codegen(OpenAPIProcessor):
         mode = self.config.resource_naming
         per_endpoint: dict[int, tuple[str, ...]] = {}
         result: dict[str, tuple[str, ...]] = {}
-        for fn_name, endpoint in sink.owners.items():
+        for fn_name, endpoint in owner_of.items():
             key = id(endpoint)
             if key not in per_endpoint:
                 per_endpoint[key] = self._resource_segments(endpoint, mode)
@@ -1795,6 +1821,7 @@ class Codegen(OpenAPIProcessor):
             tree=tree,
             typegen_types=self.typegen.types,
         )
+        self._endpoint_sinks = list(emitter.emitted_sinks)
 
         # Collect generated file paths
         output_name = self.config.output

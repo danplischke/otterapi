@@ -603,12 +603,16 @@ class TypeGenerator(OpenAPIProcessor):
         return 'AutoEnum'
 
     def _find_existing_identical_enum(
-        self, enum_values_key: tuple[str, ...]
+        self, enum_values_key: tuple[tuple[str, str], ...]
     ) -> Type | None:
         """Find a previously-registered Enum class with the same value set.
 
         Reusing an identical enum avoids generating near-duplicates like
         ``Status``/``Status1`` for schemas that share the same value set.
+
+        Values are compared together with their Python type: a string enum
+        ``['1', '2']`` must not reuse an integer enum ``[1, 2]``, or the shared
+        class rejects the string side's default (``Level('2')``) at import.
         """
         for existing_type in self.types.values():
             if existing_type.type != 'model' or not isinstance(
@@ -622,7 +626,7 @@ class TypeGenerator(OpenAPIProcessor):
             ):
                 continue
             existing_values = [
-                str(node.value.value)
+                (type(node.value.value).__name__, str(node.value.value))
                 for node in existing_class.body
                 if isinstance(node, ast.Assign)
                 and node.value
@@ -695,7 +699,9 @@ class TypeGenerator(OpenAPIProcessor):
         enum_name = self._resolve_enum_name(schema, name, base_name, field_name)
 
         enum_values_key = tuple(
-            sorted(str(v) for v in (schema.enum or []) if v is not None)
+            sorted(
+                (type(v).__name__, str(v)) for v in (schema.enum or []) if v is not None
+            )
         )
         existing = self._find_existing_identical_enum(enum_values_key)
         if existing is not None:

@@ -25,6 +25,17 @@ if TYPE_CHECKING:
 
 T = TypeVar('T')
 
+# The export wrapper adds these keyword-only arguments to an endpoint's
+# signature and aliases a same-named endpoint input as ``<name>_``; replayed
+# arguments must be renamed the same way (see codegen/export.py). The
+# paginator's own knobs (``offset`` / ``page_size`` / ``max_items``) are not
+# aliased: the wrapper mirrors them from ``_iter`` under their real names.
+_EXPORT_RESERVED = frozenset({'output_path', 'format', 'batch_size'})
+
+
+def _export_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {(k + '_' if k in _EXPORT_RESERVED else k): v for k, v in params.items()}
+
 
 def _require(name: str, fn: Callable | None) -> Callable:
     if fn is None:
@@ -94,7 +105,7 @@ class Query(Generic[T]):
             output_path,
             client=self._client,
             format=format,
-            **self._params,
+            **_export_params(self._params),
             **format_kwargs,
         )
 
@@ -126,7 +137,15 @@ class AsyncQuery(Generic[T]):
         return await self._fetch(client=self._client, **self._params)
 
     def __aiter__(self) -> AsyncIterator[T]:
+        # Mirrors ``Query.__iter__``: without a pagination terminal, plain
+        # ``async for`` iterates the materialized list.
+        if self._iterate is None:
+            return self._iter_all()
         return self.iter()
+
+    async def _iter_all(self) -> AsyncIterator[T]:
+        for item in await self.all():
+            yield item
 
     async def to_pandas(self) -> pd.DataFrame:
         """Fetch and return a pandas ``DataFrame``."""
@@ -152,6 +171,6 @@ class AsyncQuery(Generic[T]):
             output_path,
             client=self._client,
             format=format,
-            **self._params,
+            **_export_params(self._params),
             **format_kwargs,
         )

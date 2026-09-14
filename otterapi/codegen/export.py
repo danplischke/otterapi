@@ -18,6 +18,7 @@ an optional extra (``pip install otterapi[parquet]``) that imports
 
 import ast
 import copy
+import dataclasses
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -220,26 +221,78 @@ def _add_export_kwonly_args(
     kw_defaults.append(ast.Constant(value=default_batch_size))
 
 
+# Keyword-only arguments every export wrapper adds to the endpoint's signature.
+# ``Query.export`` mirrors this set (plus the paging knobs) when it replays
+# captured arguments, so keep the two in step.
+_EXPORT_WRAPPER_RESERVED: frozenset[str] = frozenset(
+    {'output_path', 'format', 'batch_size'}
+)
+
+
+def _rename_colliding_inputs(
+    parameters: 'list[Parameter] | None',
+    request_body_info: 'RequestBodyInfo | None',
+    reserved: set[str],
+) -> tuple['list[Parameter] | None', 'RequestBodyInfo | None', dict[str, str]]:
+    """Alias endpoint inputs that collide with the wrapper's own arguments.
+
+    The wrapper adds ``output_path`` / ``format`` / ``batch_size`` (and, when
+    paginated, the paging knobs) to the endpoint's signature. An endpoint input
+    of the same name -- ``?format=`` is common -- would be a duplicate argument
+    and abort generation. Such an input is renamed ``<name>_`` in the wrapper
+    only and forwarded to the underlying function under its real name.
+
+    Returns the rewritten inputs plus ``{wrapper local name: real name}``.
+    """
+    forward_as: dict[str, str] = {}
+    if parameters:
+        renamed: list[Parameter] = []
+        for param in parameters:
+            if param.name_sanitized in reserved:
+                local = param.name_sanitized + '_'
+                forward_as[local] = param.name_sanitized
+                param = dataclasses.replace(param, name_sanitized=local)
+            renamed.append(param)
+        parameters = renamed
+    if request_body_info is not None and request_body_info.flattened_fields:
+        fields = []
+        for body_field in request_body_info.flattened_fields:
+            if body_field.name in reserved:
+                local = body_field.name + '_'
+                forward_as[local] = body_field.name
+                body_field = dataclasses.replace(body_field, name=local)
+            fields.append(body_field)
+        request_body_info = dataclasses.replace(
+            request_body_info, flattened_fields=fields
+        )
+    return parameters, request_body_info, forward_as
+
+
 def _forward_call_keywords(
     parameters: 'list[Parameter] | None',
     request_body_info: 'RequestBodyInfo | None',
     extra_kw_names: list[str],
+    forward_as: dict[str, str] | None = None,
 ) -> list[ast.keyword]:
     """Build keyword arguments for forwarding to the underlying function.
 
     Forwards every cloned parameter and any extra kwargs (``client``, the
     pagination knobs, etc.) by name, leaving the values bound to the
-    same-named locals in the wrapper's scope.
+    same-named locals in the wrapper's scope. ``forward_as`` maps a wrapper
+    local that was aliased (see ``_rename_colliding_inputs``) back to the
+    keyword the underlying function expects.
     """
+    forward_as = forward_as or {}
     keywords: list[ast.keyword] = []
     for param in parameters or []:
         name = param.name_sanitized
-        keywords.append(ast.keyword(arg=name, value=_name(name)))
+        keywords.append(ast.keyword(arg=forward_as.get(name, name), value=_name(name)))
     if request_body_info is not None:
         if request_body_info.flattened_fields is not None:
             for body_field in request_body_info.flattened_fields:
+                local = body_field.name
                 keywords.append(
-                    ast.keyword(arg=body_field.name, value=_name(body_field.name))
+                    ast.keyword(arg=forward_as.get(local, local), value=_name(local))
                 )
         else:
             keywords.append(ast.keyword(arg='body', value=_name('body')))
@@ -298,6 +351,8 @@ def _build_export_dispatch(
             ast.keyword(arg='model', value=copy.deepcopy(item_type_ast)),
             ast.keyword(arg='format', value=_name('format')),
             ast.keyword(arg='batch_size', value=_name('batch_size')),
+            # Writer options (``delimiter=`` ...) the caller passed through.
+            ast.keyword(arg=None, value=_name('format_kwargs')),
         ],
     )
     if consumes_async_iter:
@@ -320,10 +375,26 @@ def _build_export_function(
     default_format: str,
     default_batch_size: int,
     target_returns_optional: bool = False,
+    omit_page_size: bool = False,
+    start_knob: tuple[str, str] | None = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
-    """Shared builder body for both standalone + paginated export wrappers."""
+    """Shared builder body for both standalone + paginated export wrappers.
+
+    A paginated wrapper mirrors its ``_iter`` target's knobs exactly:
+    ``start_knob`` is the starting-position argument (``offset`` / ``cursor``
+    / ``page``) and ``omit_page_size`` drops ``page_size`` for a cursor
+    paginator with ``send_page_size: false``. Anything else would either be
+    silently ignored or be forwarded to the file writer by ``**format_kwargs``.
+    """
     # Local import avoids a circular dependency at module load.
     from otterapi.codegen.endpoints import FunctionSignatureBuilder
+
+    # Only the writer-added names are aliased. The paginator's knobs are the
+    # same ones the core function and ``_iter`` already declare, so a spec
+    # input colliding with them is a pagination problem, not an export one.
+    parameters, request_body_info, forward_as = _rename_colliding_inputs(
+        parameters, request_body_info, set(_EXPORT_WRAPPER_RESERVED)
+    )
 
     builder = FunctionSignatureBuilder()
     # output_path is the first positional argument so it can be passed
@@ -341,18 +412,26 @@ def _build_export_function(
     # they're locally bound names; the actual pagination logic stays in
     # ``_iter`` itself.
     if is_paginated:
-        for kw_name, annotation, default in (
-            (
-                'page_size',
-                _name('int'),
-                ast.Constant(value=100),
-            ),
+        paging_knobs: list[tuple[str, ast.expr, ast.expr]] = []
+        if start_knob is not None:
+            knob_name, knob_type = start_knob
+            paging_knobs.append(
+                (
+                    knob_name,
+                    _union_expr([_name(knob_type), ast.Constant(value=None)]),
+                    ast.Constant(value=None),
+                )
+            )
+        if not omit_page_size:
+            paging_knobs.append(('page_size', _name('int'), ast.Constant(value=100)))
+        paging_knobs.append(
             (
                 'max_items',
                 _union_expr([_name('int'), ast.Constant(value=None)]),
                 ast.Constant(value=None),
-            ),
-        ):
+            )
+        )
+        for kw_name, annotation, default in paging_knobs:
             signature.kwonlyargs.append(_argument(kw_name, annotation))
             signature.kw_defaults.append(default)
             extra_kw_forwards.append(kw_name)
@@ -368,6 +447,7 @@ def _build_export_function(
         parameters=parameters,
         request_body_info=request_body_info,
         extra_kw_names=extra_kw_forwards,
+        forward_as=forward_as,
     )
 
     body = _build_export_dispatch(
@@ -468,8 +548,9 @@ def build_standalone_paginated_export_fn(
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an export wrapper around a paginated endpoint's ``_iter`` variant.
 
-    The wrapper mirrors the paginated endpoint's signature plus
-    ``page_size``/``max_items`` (forwarded to the iter function), drives the
+    The wrapper mirrors the paginated endpoint's signature plus the paginator's
+    own knobs -- ``offset``/``cursor``/``page``, ``page_size``, ``max_items`` --
+    exactly as ``_iter`` declares them (forwarded to it), drives the
     iterator, and pipes items into ``export(...)`` (sync) or
     ``export_async(...)`` (async). Memory stays bounded by ``batch_size``.
 
@@ -499,7 +580,11 @@ def build_standalone_paginated_export_fn(
         A tuple of (function AST, required imports).
     """
     # Local import avoids a circular dependency at module load.
-    from otterapi.codegen.endpoints import pagination_owned_param_names
+    from otterapi.codegen.endpoints import (
+        pagination_omits_page_size,
+        pagination_owned_param_names,
+        pagination_start_knob,
+    )
 
     owned = pagination_owned_param_names(pagination_style, pagination_config)
     filtered_parameters = (
@@ -517,4 +602,6 @@ def build_standalone_paginated_export_fn(
         is_paginated=True,
         default_format=default_format,
         default_batch_size=default_batch_size,
+        omit_page_size=pagination_omits_page_size(pagination_style, pagination_config),
+        start_knob=pagination_start_knob(pagination_style),
     )
