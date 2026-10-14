@@ -10,7 +10,8 @@ values outright.  Neither matches the OpenAPI wire format:
 * an unset optional header raises ``TypeError`` instead of being omitted;
 * an object-valued query parameter becomes a Python ``repr``;
 * a path parameter is interpolated verbatim, so a value containing ``/`` or
-  ``?`` escapes its URL segment.
+  ``?`` escapes its URL segment, and one that is exactly ``..`` (or empty)
+  sends the request to a different endpoint altogether.
 
 This module centralises the conversion so every generated call site -- query,
 header, and path -- puts the same bytes on the wire, including the
@@ -24,13 +25,14 @@ from datetime import date, time
 from decimal import Decimal
 from enum import Enum
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 __all__ = [
     'NOTSET',
     'NotSet',
     'build_request_body',
     'format_path_param',
+    'join_url',
     'serialize_headers',
     'serialize_query_params',
 ]
@@ -66,6 +68,10 @@ NOTSET = NotSet.NOTSET
 DEFAULT_QUERY_STYLE = ('form', True)
 DEFAULT_PATH_STYLE = ('simple', False)
 
+# Path segments that HTTP clients and servers resolve before routing, so a
+# request containing one reaches a different URL than the one that was built.
+_DOT_SEGMENTS = frozenset({'.', '..'})
+
 # Separators for the non-exploded array styles.
 _ARRAY_DELIMITERS = {
     'form': ',',
@@ -98,7 +104,12 @@ def _scalar(value: Any) -> str:
 
 
 def _quote(value: str) -> str:
-    """Percent-encode a path segment so it cannot escape into path or query."""
+    """Percent-encode a path segment so it cannot escape into path or query.
+
+    ``.`` is an unreserved character and survives quoting, so a segment that is
+    exactly ``.`` or ``..`` is not made safe here; :func:`format_path_param`
+    and :func:`join_url` reject those.
+    """
     return quote(value, safe='')
 
 
@@ -272,6 +283,9 @@ def format_path_param(
     Returns:
         The encoded string to interpolate into the request path.
     """
+    if value is None or value is NOTSET:
+        # ``str(None)`` would put the text "None" in the URL.
+        raise ValueError('A path parameter cannot be None.')
     if isinstance(value, (Enum, str, bytes, bytearray)):
         rendered = _quote(_scalar(value))
     else:
@@ -296,4 +310,45 @@ def format_path_param(
         return f'.{rendered}'
     if style == 'matrix':
         return f';{name}={rendered}' if name else f';{rendered}'
+    if not rendered or rendered in _DOT_SEGMENTS:
+        raise ValueError(
+            f'A path parameter cannot be empty, "." or ".." (got {rendered!r}): '
+            'the request would go to a different URL than the one the call names.'
+        )
     return rendered
+
+
+def join_url(base_url: str, path: str) -> str:
+    """Append a request *path* to *base_url*, refusing paths that leave it.
+
+    The generated client builds every URL as ``base_url + path``, so a path
+    that does not start with ``/`` can rewrite the authority of the result
+    (``.attacker.example/x`` turns ``https://api.example.com`` into
+    ``https://api.example.com.attacker.example/x``, and ``@attacker.example/x``
+    moves the request to another host while keeping the caller's credentials).
+    A ``.`` or ``..`` segment, including a percent-encoded one, is resolved by
+    HTTP clients and by servers before routing, so the request would reach an
+    endpoint the call does not name.
+
+    Args:
+        base_url: The client's base URL, without a trailing slash.
+        path: The request path, normally starting with ``/``.  An empty path
+            addresses the base URL itself.
+
+    Returns:
+        The URL to request.
+
+    Raises:
+        ValueError: If *path* does not start with ``/`` or contains a ``.`` or
+            ``..`` segment.
+    """
+    if not path:
+        return base_url
+    if not path.startswith('/'):
+        raise ValueError(f'A request path must start with "/" (got {path!r}).')
+    location = path.split('?', 1)[0].split('#', 1)[0]
+    if any(unquote(segment) in _DOT_SEGMENTS for segment in location.split('/')):
+        raise ValueError(
+            f'A request path cannot contain "." or ".." segments (got {path!r}).'
+        )
+    return f'{base_url}{path}'

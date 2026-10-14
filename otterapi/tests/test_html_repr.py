@@ -116,3 +116,78 @@ class TestHtmlReprMixin:
         assert 'SimpleModel' in html
         assert '1' in html
         assert 'hello' in html
+
+
+class TestHtmlEscaping:
+    """Field values come from API responses; a notebook renders them as markup."""
+
+    MARKUP = '<script>alert(1)</script>'
+    ESCAPED = '&lt;script&gt;alert(1)&lt;/script&gt;'
+
+    def test_string_values_are_escaped(self, mixin_ns):
+        class Plain(mixin_ns._HtmlReprMixin, BaseModel):
+            note: str
+
+        html = Plain(note=self.MARKUP)._repr_html_()
+        assert self.MARKUP not in html
+        assert self.ESCAPED in html
+
+    def test_attribute_breaking_characters_are_escaped(self, mixin_ns):
+        assert mixin_ns._html_val('a&b"c\'d') == 'a&amp;b&quot;c&#x27;d'
+
+    def test_list_previews_are_escaped(self, mixin_ns):
+        rendered = mixin_ns._html_val(['<b>x</b>', 'ok'])
+        assert '<b>' not in rendered
+        assert '&lt;b&gt;x&lt;/b&gt;' in rendered
+
+    def test_models_inside_a_list_are_escaped(self, mixin_ns):
+        class Item(BaseModel):
+            note: str
+
+        rendered = mixin_ns._html_val([Item(note=self.MARKUP)])
+        assert '<script>' not in rendered
+
+    def test_nested_models_escape_their_own_values(self, mixin_ns):
+        class Inner(mixin_ns._HtmlReprMixin, BaseModel):
+            note: str
+
+        class Outer(mixin_ns._HtmlReprMixin, BaseModel):
+            inner: Inner
+
+        html = Outer(inner=Inner(note=self.MARKUP))._repr_html_()
+        assert '<script>' not in html
+        assert self.ESCAPED in html
+
+    def test_dict_values_are_escaped(self, mixin_ns):
+        class Bag(mixin_ns._HtmlReprMixin, BaseModel):
+            data: dict[str, str]
+
+        html = Bag(data={'k': self.MARKUP})._repr_html_()
+        assert '<script>' not in html
+
+    def test_class_and_field_names_are_escaped(self, mixin_ns):
+        cls = type(
+            'Evil<img>',
+            (mixin_ns._HtmlReprMixin, BaseModel),
+            {'__annotations__': {'x': int}},
+        )
+        assert '<img>' not in cls(x=1)._repr_html_()
+        assert mixin_ns._html_escape('a<b') == 'a&lt;b'
+
+    def test_ordinary_values_are_unchanged(self, mixin_ns):
+        assert mixin_ns._html_val('hello world') == 'hello world'
+        assert mixin_ns._html_val(3.5) == '3.5'
+        assert mixin_ns._html_val(True) == 'True'
+
+    def test_generated_models_module_needs_no_html_import(self, tmp_path_factory):
+        parent = tmp_path_factory.mktemp('html_repr_imports')
+        Codegen(
+            DocumentConfig(
+                source=str(_SPEC),
+                output=str(parent / 'pkg'),
+                base_url='https://example.test',
+            )
+        ).generate()
+        source = (parent / 'pkg' / 'models.py').read_text(encoding='utf-8')
+        assert 'import html' not in source
+        assert 'from html' not in source

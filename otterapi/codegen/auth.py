@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Literal
 
 from otterapi.codegen.ast_utils import (
@@ -57,9 +59,13 @@ __all__ = [
     'build_auth_init_args',
     'build_auth_init_body',
     'collect_auth_schemes',
+    'default_env_prefix',
 ]
 
-#: Fallback prefix for the environment variables the client reads.
+#: Prefix used when no better one is known: for callers of
+#: :func:`collect_auth_schemes` that pass none, and for an output path that has
+#: no usable name.  The generator itself derives the prefix from the output
+#: package (see :func:`default_env_prefix`) so that clients do not share it.
 DEFAULT_ENV_PREFIX = 'OTTER'
 
 AuthKind = Literal['header', 'query', 'cookie', 'bearer', 'basic']
@@ -74,7 +80,8 @@ class AuthScheme:
         python_name: The constructor parameter / attribute name.
         kind: How the credential is attached to a request.
         wire_name: Header, query or cookie name for ``apiKey`` schemes.
-        env_var: Environment variable consulted when the argument is omitted.
+        env_var: Environment variable consulted when the argument is omitted;
+            empty when the scheme has no environment fallback.
     """
 
     name: str
@@ -101,16 +108,48 @@ class AuthScheme:
         """Whether an omitted argument falls back to an environment variable.
 
         Basic auth needs two values, so there is no single sensible variable
-        to read; it is constructor-only.
+        to read; it is constructor-only.  So is a scheme the configuration gave
+        no variable for (see ``env_prefix`` in :func:`collect_auth_schemes`).
         """
-        return self.kind != 'basic'
+        return self.kind != 'basic' and bool(self.env_var)
+
+
+def _env_token(name: str) -> str:
+    """Reduce *name* to an upper-case ``A-Z0-9_`` token for a variable name."""
+    upper = re.sub(r'[^0-9a-zA-Z]+', '_', to_snake_case(name)).upper()
+    return re.sub(r'_+', '_', upper).strip('_')
 
 
 def _env_var_name(prefix: str, scheme_name: str) -> str:
     """Build the environment variable name for *scheme_name*."""
-    upper = re.sub(r'[^0-9a-zA-Z]+', '_', to_snake_case(scheme_name)).upper()
-    upper = re.sub(r'_+', '_', upper).strip('_')
+    upper = _env_token(scheme_name)
     return f'{prefix}_{upper}' if prefix else upper
+
+
+def default_env_prefix(output: str | os.PathLike[str]) -> str:
+    """Derive the environment-variable prefix from the output package's name.
+
+    ``./petstore_client`` gives ``PETSTORE_CLIENT``.  Every generated client
+    used to share the prefix ``OTTER``, so one client's credentials were sent
+    by any other whose document declared a scheme with the same name.  The
+    output package is chosen by whoever runs the generator, not by the
+    document, which is what makes it a safe namespace.
+
+    Args:
+        output: The document's output directory.
+
+    Returns:
+        An upper-case prefix, or :data:`DEFAULT_ENV_PREFIX` when the path has
+        no usable name.
+    """
+    name = PurePath(output).name
+    if name in ('', '.', '..'):
+        name = Path(output).resolve().name
+    token = _env_token(name)
+    if not token:
+        return DEFAULT_ENV_PREFIX
+    # A variable name that starts with a digit cannot be set from a shell.
+    return f'_{token}' if token[0].isdigit() else token
 
 
 def collect_auth_schemes(
@@ -122,7 +161,12 @@ def collect_auth_schemes(
 
     Args:
         adapter: The document facade, or None when no document is loaded.
-        env_prefix: Prefix for the generated environment-variable names.
+        env_prefix: Prefix for the generated environment-variable names.  An
+            empty string means "no prefix", and a scheme is then read from the
+            environment only if ``env_vars`` names a variable for it: the scheme
+            name comes from the document, so deriving a bare variable name from
+            it would let the document choose which variable the client reads
+            and sends (``AWS_SECRET_ACCESS_KEY`` is a legal scheme name).
         env_vars: Exact variable name per scheme, overriding the prefix rule.
             Keyed by the scheme's name in the spec; the generated parameter
             name is accepted as an alias, since that is what a reader of the
@@ -192,13 +236,25 @@ def collect_auth_schemes(
         used_names.add(candidate)
 
         configured = env_vars.get(scheme_name, env_vars.get(candidate))
+        if configured:
+            env_var = configured
+        elif env_prefix:
+            env_var = _env_var_name(env_prefix, scheme_name)
+        else:
+            env_var = ''
+            if kind != 'basic':
+                logger.warning(
+                    'auth.env_prefix is empty, so security scheme %r reads no '
+                    'environment variable; name one for it in auth.env_vars.',
+                    scheme_name,
+                )
         schemes.append(
             AuthScheme(
                 name=scheme_name,
                 python_name=candidate,
                 kind=kind,
                 wire_name=wire_name,
-                env_var=configured or _env_var_name(env_prefix, scheme_name),
+                env_var=env_var,
             )
         )
 

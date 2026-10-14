@@ -10,7 +10,7 @@ import logging
 import os
 from importlib.resources import files
 from typing import Any, Literal, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 from upath import UPath
 
@@ -25,7 +25,7 @@ from otterapi.codegen.ast_utils import (
     _union_expr,
     strip_optional,
 )
-from otterapi.codegen.auth import AuthScheme, collect_auth_schemes
+from otterapi.codegen.auth import AuthScheme, collect_auth_schemes, default_env_prefix
 from otterapi.codegen.client import (
     _exported_error_names,
     generate_api_error_hierarchy,
@@ -79,6 +79,39 @@ def _load_models_mixin_source() -> str:
         .joinpath('_models_mixin.py')
         .read_text('utf-8')
     )
+
+
+def _without_secrets(url: str) -> str:
+    """Return *url* without userinfo, query string or fragment.
+
+    A relative server URL is resolved against the URL the document was fetched
+    from, and the result becomes the generated client's default base URL -- a
+    string in a source file that is committed and shared.  A password or an API
+    key in the source URL (``user:pass@host``, ``?api_key=...``) must not be
+    copied into it, or into the log line that reports the resolution.
+    """
+    parts = urlsplit(url)
+    return urlunsplit(
+        (parts.scheme, parts.netloc.rpartition('@')[2], parts.path, '', '')
+    )
+
+
+def _check_server_scheme(url: str) -> None:
+    """Refuse a document-supplied server URL that is not plain http(s).
+
+    The client is built on httpx, which only speaks http and https, so any
+    other scheme (``file:``, ``javascript:``, ``ws:``) cannot work; it is
+    rejected here rather than baked into the generated client as a default.
+    A URL with no scheme is left alone: that is the relative-server case,
+    handled by the caller.
+    """
+    scheme = urlsplit(url).scheme.lower()
+    if scheme and scheme not in ('http', 'https'):
+        raise ValueError(
+            f'Server URL {url!r} uses the unsupported scheme {scheme!r}; only '
+            'http and https are supported. Pass an http(s) base URL with '
+            '-b/--base-url or set base_url in the otterapi config.'
+        )
 
 
 #: Default ``style`` per parameter location, per the OpenAPI specification.
@@ -686,9 +719,12 @@ class Codegen(OpenAPIProcessor):
         """
         if not self.config.auth.enabled or self.openapi is None:
             return []
+        env_prefix = self.config.auth.env_prefix
+        if env_prefix is None:
+            env_prefix = default_env_prefix(self.config.output)
         return collect_auth_schemes(
             self._adapter,
-            self.config.auth.env_prefix,
+            env_prefix,
             self.config.auth.env_vars,
         )
 
@@ -1153,11 +1189,14 @@ class Codegen(OpenAPIProcessor):
             # Try to resolve against the source URL if it's a URL
             source = self.config.source
             if self._is_absolute_url(source):
-                # Resolve relative server URL against the source URL
-                resolved_url = urljoin(source, baseurl)
+                # Resolve the relative server URL against the source URL,
+                # leaving out any credentials or API key carried in it.
+                origin = _without_secrets(source)
+                resolved_url = urljoin(origin, baseurl)
+                _check_server_scheme(resolved_url)
                 logger.info(
                     f"Resolved relative server URL '{baseurl}' to '{resolved_url}' "
-                    f"using source URL '{source}'"
+                    f"using source URL '{origin}'"
                 )
                 return resolved_url
 
@@ -1173,6 +1212,7 @@ class Codegen(OpenAPIProcessor):
                 f'constructing the client.'
             )
 
+        _check_server_scheme(baseurl)
         return baseurl
 
     def _collect_used_model_names(self, endpoints: list[Endpoint]) -> set[str]:

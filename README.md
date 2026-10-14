@@ -544,6 +544,10 @@ async for user in async_list_users_iter():
     print(user.name)
 ```
 
+Cursor pagination stops with a `RuntimeError` if the server returns a cursor it
+already returned (the same one forever, or a cycle), instead of looping until the
+process is killed. Use `max_items` to bound a listing yourself.
+
 ---
 
 ## 📊 DataFrame Conversion
@@ -673,6 +677,15 @@ export:
 | `path` | string | inherits | JSON path to extract data |
 | `formats` | list | inherits | Override formats for this endpoint |
 
+### Spreadsheet formulas in CSV and TSV
+
+Exported values come from API responses. A string cell that starts with `=`,
+`+`, `-` or `@` would be run as a formula by Excel or LibreOffice, so the CSV and
+TSV writers prefix such cells with an apostrophe (plain numbers like `-5` are
+left alone). If the file feeds a program rather than a spreadsheet and values
+must round-trip exactly, pass `escape_formulas=False` to `to_csv`, `to_tsv` (or
+`export(..., format='csv', escape_formulas=False)`).
+
 ### Usage
 
 ```python
@@ -776,6 +789,47 @@ async def main():
     user = await client.async_get_user(user_id=123)
 ```
 
+### Retries
+
+The client retries transient failures (`429`, `500`, `502`, `503`, `504` and
+network errors) up to `max_retries` times with exponential backoff. What it
+retries depends on the method, because a timeout or a `5xx` does not say whether
+the server already acted on the request:
+
+| Failure | `GET` `HEAD` `OPTIONS` `PUT` `DELETE` `TRACE` | `POST` `PATCH` |
+|---------|:---:|:---:|
+| connection failed, never sent (`ConnectError`, `ConnectTimeout`, `PoolTimeout`) | retried | retried |
+| `429`, `503` (the server declined the request) | retried | retried |
+| read timeout, dropped connection, `500`, `502`, `504` | retried | **not retried** |
+
+If the API deduplicates repeated calls (for example with an `Idempotency-Key`
+header), opt the methods in:
+
+```python
+client = Client(retry_methods={'GET', 'PUT', 'DELETE', 'POST'})
+```
+
+| Argument | Default | Meaning |
+|----------|---------|---------|
+| `max_retries` | `3` | Attempts after the first; `0` disables retrying |
+| `retry_statuses` | `{429, 500, 502, 503, 504}` | Statuses that may be retried |
+| `retry_methods` | idempotent methods | Methods retried after the server may have acted |
+| `backoff_factor` | `0.5` | Seconds, doubled on each attempt |
+| `max_retry_delay` | `60.0` | Longest single wait, including one requested by `Retry-After` |
+
+A `Retry-After` header is honoured but capped at `max_retry_delay`, so a server
+cannot ask the client to sleep for hours.
+
+### Path parameters and request paths
+
+Path parameter values are percent-encoded, so a value containing `/`, `?` or `#`
+stays inside its URL segment. A value that is `None`, empty, `.` or `..` raises
+`ValueError` instead of being sent: those survive encoding and are resolved away
+by HTTP stacks, so the request would reach a different endpoint than the one
+named. The generated client also refuses any request path that does not start
+with `/` or contains a `.`/`..` segment, and generation fails for such a path in
+the document, or for a `{placeholder}` that has no matching path parameter.
+
 ### Working with Models
 
 ```python
@@ -828,8 +882,12 @@ failing generation.
 ### Credentials from the environment
 
 Omit a credential and the client reads it from `<env_prefix>_<SCHEME_NAME>`,
-upper-cased — so the `api_key` scheme above falls back to `OTTER_API_KEY`.
-Set `env_prefix` per document when one project generates several clients:
+upper-cased. The prefix defaults to the name of the output package, so the
+`api_key` scheme above in `output: ./petstore_client` falls back to
+`PETSTORE_CLIENT_API_KEY`, and two generated clients never read each other's
+credentials. (The scheme name comes from the OpenAPI document; the prefix comes
+from you, which is what stops a document from choosing an arbitrary variable.)
+Set `env_prefix` to pick a different one:
 
 ```yaml
 documents:
@@ -838,6 +896,10 @@ documents:
     auth:
       env_prefix: MYAPI    # -> MYAPI_API_KEY
 ```
+
+An empty `env_prefix` drops the prefix, and the client then reads the
+environment **only** for schemes you name in `env_vars` — a bare variable name
+derived from the document alone could be any variable in your environment.
 
 When a credential already lives in a variable the prefix rule would never
 derive, name it outright with `env_vars`. Keys are scheme names from
@@ -863,7 +925,7 @@ values, so it has no environment fallback at all.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `true` | Generate credential parameters from `securitySchemes` |
-| `env_prefix` | string | `OTTER` | Prefix for the environment variables consulted when an argument is omitted. Empty string drops the prefix |
+| `env_prefix` | string | output package name, upper-cased | Prefix for the environment variables consulted when an argument is omitted. An empty string drops the prefix, and then only schemes named in `env_vars` read the environment |
 | `env_vars` | map | `{}` | Exact environment variable per scheme, keyed by scheme name. Overrides `env_prefix` for the schemes it names |
 
 ### Customizing

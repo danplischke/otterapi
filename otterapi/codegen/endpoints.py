@@ -26,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import unquote
 
 from otterapi.codegen.ast_utils import (
     ImportDict,
@@ -40,6 +41,7 @@ from otterapi.codegen.ast_utils import (
     _subscript,
     _union_expr,
 )
+from otterapi.exceptions import CodeGenerationError
 from otterapi.openapi.constants import MediaType
 
 if TYPE_CHECKING:
@@ -498,6 +500,51 @@ class ParameterASTBuilder:
         )
 
     @staticmethod
+    def check_path_template(path: str, parameters: list[Parameter]) -> None:
+        """Refuse a path template that is unsafe to append to a base URL.
+
+        The path comes from the spec and is joined onto the client's base URL,
+        so three shapes are errors rather than something to emit:
+
+        * a path that does not start with ``/`` -- ``.attacker.example/x`` or
+          ``@attacker.example/x`` turns into a different host once appended;
+        * a ``.`` or ``..`` segment, which HTTP stacks resolve before routing;
+        * a ``{placeholder}`` with no matching path parameter, which has no
+          Python variable to fill it and would otherwise be emitted as a bare
+          name, i.e. as source code taken from the spec.
+
+        Raises:
+            CodeGenerationError: If the template has any of those problems.
+        """
+        if not path.startswith('/'):
+            raise CodeGenerationError(
+                f'Path {path!r} does not start with "/". Fix the path in the '
+                'document or skip it with exclude_paths.',
+                context=f'path {path!r}',
+            )
+        location = path.split('?', 1)[0].split('#', 1)[0]
+        if any(unquote(segment) in ('.', '..') for segment in location.split('/')):
+            raise CodeGenerationError(
+                f'Path {path!r} contains a "." or ".." segment. Fix the path in '
+                'the document or skip it with exclude_paths.',
+                context=f'path {path!r}',
+            )
+        declared = {p.name for p in parameters if p.location == 'path'}
+        undeclared = [
+            name
+            for name in dict.fromkeys(re.findall(r'\{([^}]+)\}', path))
+            if name not in declared
+        ]
+        if undeclared:
+            names = ', '.join(f'{{{name}}}' for name in undeclared)
+            raise CodeGenerationError(
+                f'Path {path!r} uses {names} but declares no matching path '
+                'parameter. Declare it on the operation or the path item, or '
+                'skip the path with exclude_paths.',
+                context=f'path {path!r}',
+            )
+
+    @staticmethod
     def build_path_expr(path: str, parameters: list[Parameter]) -> ast.expr:
         """Build an f-string or constant for the request path.
 
@@ -513,6 +560,7 @@ class ParameterASTBuilder:
             - ast.Constant for static paths without parameters
             - ast.JoinedStr (f-string) for paths with parameter substitution
         """
+        ParameterASTBuilder.check_path_template(path, parameters)
         path_params = {p.name: p for p in parameters if p.location == 'path'}
 
         if not path_params:
@@ -527,14 +575,13 @@ class ParameterASTBuilder:
                 if part:
                     values.append(ast.Constant(value=part))
             else:
-                param = path_params.get(part)
-                sanitized = param.name_sanitized if param else part
+                param = path_params[part]
                 # Interpolating the raw value lets a path parameter containing
                 # '/' or '?' escape its URL segment, and renders enums and
                 # datetimes with str(). format_path_param percent-encodes and
                 # applies the parameter's OpenAPI style.
                 keywords: list[ast.keyword] = []
-                if param is not None and not param.uses_default_style:
+                if not param.uses_default_style:
                     keywords.append(
                         ast.keyword(arg='style', value=ast.Constant(value=param.style))
                     )
@@ -553,7 +600,7 @@ class ParameterASTBuilder:
                     ast.FormattedValue(
                         value=_call(
                             _name('format_path_param'),
-                            args=[_name(sanitized)],
+                            args=[_name(param.name_sanitized)],
                             keywords=keywords,
                         ),
                         conversion=-1,

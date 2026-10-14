@@ -80,6 +80,31 @@ def extract_path(data: dict | list, path: str | None) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Cursor loop guard
+# ---------------------------------------------------------------------------
+
+
+def _advance_cursor(next_cursor: str | None, seen: set[str]) -> str | None:
+    """Record ``next_cursor`` and return it, refusing one already handed out.
+
+    A server that returns a cursor it returned before -- the same one forever,
+    or a cycle -- never reaches an empty page, so the loop would run until the
+    process is killed while the result list grows without bound.  That is a
+    bug in the server (or a hostile one); stopping with an error beats
+    returning partial data as if it were complete.
+    """
+    if not next_cursor:
+        return next_cursor
+    if next_cursor in seen:
+        raise RuntimeError(
+            f'Pagination is not advancing: the server returned the cursor '
+            f'{next_cursor!r} more than once.'
+        )
+    seen.add(next_cursor)
+    return next_cursor
+
+
+# ---------------------------------------------------------------------------
 # Progress helpers
 # ---------------------------------------------------------------------------
 
@@ -400,6 +425,7 @@ def paginate_cursor(
     """
     all_items: list[T] = []
     current_cursor = start_cursor
+    seen_cursors: set[str] = {start_cursor} if start_cursor else set()
 
     with _progress_context(progress, desc='Fetching') as bar:
         while True:
@@ -419,7 +445,7 @@ def paginate_cursor(
             if max_items is not None and len(all_items) >= max_items:
                 break
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(get_next_cursor(page), seen_cursors)
             if not current_cursor:
                 break
 
@@ -442,6 +468,7 @@ async def paginate_cursor_async(
     """Async version of paginate_cursor."""
     all_items: list[T] = []
     current_cursor = start_cursor
+    seen_cursors: set[str] = {start_cursor} if start_cursor else set()
     bar: Any = None
     if progress:
         try:
@@ -470,7 +497,7 @@ async def paginate_cursor_async(
             if max_items is not None and len(all_items) >= max_items:
                 break
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(get_next_cursor(page), seen_cursors)
             if not current_cursor:
                 break
     finally:
@@ -508,6 +535,7 @@ def iterate_cursor(
         Items one at a time.
     """
     current_cursor = start_cursor
+    seen_cursors: set[str] = {start_cursor} if start_cursor else set()
     items_yielded = 0
 
     with _progress_context(progress, desc='Fetching') as bar:
@@ -530,7 +558,7 @@ def iterate_cursor(
                 if max_items is not None and items_yielded >= max_items:
                     return
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(get_next_cursor(page), seen_cursors)
             if not current_cursor:
                 return
 
@@ -547,6 +575,7 @@ async def iterate_cursor_async(
 ) -> AsyncIterator[T]:
     """Async version of iterate_cursor."""
     current_cursor = start_cursor
+    seen_cursors: set[str] = {start_cursor} if start_cursor else set()
     items_yielded = 0
     bar: Any = None
     if progress:
@@ -578,7 +607,7 @@ async def iterate_cursor_async(
                 if max_items is not None and items_yielded >= max_items:
                     return
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(get_next_cursor(page), seen_cursors)
             if not current_cursor:
                 return
     finally:

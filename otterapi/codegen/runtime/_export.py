@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import types
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Iterator
 from datetime import date, datetime, time
@@ -145,9 +146,33 @@ async def _achunks(iterable: AsyncIterable[Row], size: int) -> AsyncIterable[lis
 # -----------------------------------------------------------------------------
 
 
-def _stringify_cell(value: Any) -> Any:
-    """CSV cells must be scalar; nested containers are JSON-encoded."""
-    if value is None or isinstance(value, (str, int, float, bool)):
+# A spreadsheet runs a cell that starts with one of these as a formula
+# (OWASP "CSV injection").  The values come from API responses, so an attacker
+# who can set a name or a comment upstream can put a formula in the file.
+_FORMULA_TRIGGERS = ('=', '+', '-', '@', '\t', '\r')
+
+# A plain number such as ``-5`` or ``+1.5e3`` is not a formula and is common
+# enough in text columns that quoting it would only damage the data.
+_PLAIN_NUMBER = re.compile(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?')
+
+
+def _defuse_formula(text: str) -> str:
+    """Prefix ``text`` with an apostrophe if a spreadsheet would run it."""
+    if text.startswith(_FORMULA_TRIGGERS) and not _PLAIN_NUMBER.fullmatch(text):
+        return "'" + text
+    return text
+
+
+def _stringify_cell(value: Any, escape_formulas: bool = False) -> Any:
+    """CSV cells must be scalar; nested containers are JSON-encoded.
+
+    With ``escape_formulas``, a string a spreadsheet would execute (``=...``,
+    ``+...``, ``-...``, ``@...``) gets a leading apostrophe, which spreadsheets
+    treat as "this is text" and hide.
+    """
+    if isinstance(value, str):
+        return _defuse_formula(value) if escape_formulas else value
+    if value is None or isinstance(value, (int, float, bool)):
         return value
     if isinstance(value, (list, dict)):
         return json.dumps(value, default=str, separators=(',', ':'))
@@ -162,8 +187,14 @@ def to_csv(
     delimiter: str = ',',
     header: bool = True,
     batch_size: int = 1000,
+    escape_formulas: bool = True,
 ) -> int:
     """Stream ``rows`` to a CSV file using the model's field order.
+
+    String cells that a spreadsheet would run as a formula (they start with
+    ``=``, ``+``, ``-`` or ``@``) get a leading apostrophe unless
+    ``escape_formulas`` is False.  Turn it off when the file feeds a program
+    rather than a spreadsheet and values must round-trip exactly.
 
     Returns the number of rows written.
     """
@@ -184,7 +215,10 @@ def to_csv(
             for row in batch:
                 record = _row_to_dict(row, model)
                 writer.writerow(
-                    {key: _stringify_cell(record.get(key)) for key in fieldnames}
+                    {
+                        key: _stringify_cell(record.get(key), escape_formulas)
+                        for key in fieldnames
+                    }
                 )
                 written += 1
     return written
@@ -197,6 +231,7 @@ def to_tsv(
     model: type[BaseModel],
     header: bool = True,
     batch_size: int = 1000,
+    escape_formulas: bool = True,
 ) -> int:
     """Stream ``rows`` to a TSV file (CSV with a tab delimiter)."""
     return to_csv(
@@ -206,6 +241,7 @@ def to_tsv(
         delimiter='\t',
         header=header,
         batch_size=batch_size,
+        escape_formulas=escape_formulas,
     )
 
 
@@ -217,6 +253,7 @@ async def to_csv_async(
     delimiter: str = ',',
     header: bool = True,
     batch_size: int = 1000,
+    escape_formulas: bool = True,
 ) -> int:
     """Async variant of :func:`to_csv`. Disk I/O remains synchronous."""
     fieldnames = _model_fields(model)
@@ -236,7 +273,10 @@ async def to_csv_async(
             for row in batch:
                 record = _row_to_dict(row, model)
                 writer.writerow(
-                    {key: _stringify_cell(record.get(key)) for key in fieldnames}
+                    {
+                        key: _stringify_cell(record.get(key), escape_formulas)
+                        for key in fieldnames
+                    }
                 )
                 written += 1
     return written
@@ -249,6 +289,7 @@ async def to_tsv_async(
     model: type[BaseModel],
     header: bool = True,
     batch_size: int = 1000,
+    escape_formulas: bool = True,
 ) -> int:
     """Async variant of :func:`to_tsv`."""
     return await to_csv_async(
@@ -258,6 +299,7 @@ async def to_tsv_async(
         delimiter='\t',
         header=header,
         batch_size=batch_size,
+        escape_formulas=escape_formulas,
     )
 
 

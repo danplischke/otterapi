@@ -43,6 +43,9 @@ class __CLASS_NAME__(__BASE_CLASS_NAME__):
 
         >>> client = __CLASS_NAME__(base_url="https://staging.api.example.com")
         >>> client = __CLASS_NAME__(max_retries=0)  # disable retry
+        >>> # POST/PATCH are retried only when the request provably was not
+        >>> # processed; opt in if the API deduplicates repeated calls.
+        >>> client = __CLASS_NAME__(retry_methods={"GET", "PUT", "DELETE", "POST"})
         >>> client = __CLASS_NAME__(timeout=60.0, headers={"X-Request-ID": "abc"})
     """
 

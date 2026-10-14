@@ -828,7 +828,17 @@ class Swagger(LenientModelWithVendorExtensions):
             return [openapi_v3.Server(url='/')]
 
         servers = []
-        schemes = self.schemes or [SchemeType.HTTP]
+        if not self.schemes:
+            # Swagger 2.0 says the default is the scheme the document itself
+            # was fetched with, which is unknown here (and meaningless for a
+            # file).  Plain http would send every credential in cleartext, so
+            # default to https; a plain-http API needs `schemes: [http]` or an
+            # explicit base URL.
+            warnings.add_unique(
+                "No 'schemes' specified, defaulting to https; list 'http' in "
+                'schemes or pass a base URL to use plain http'
+            )
+        schemes = self.schemes or [SchemeType.HTTPS]
         host = self.host or ''
         base_path = self.base_path or ''
 

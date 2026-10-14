@@ -865,10 +865,14 @@ class AuthConfig(BaseModel):
             off to keep the previous behaviour of wiring auth by hand in the
             user-owned ``client.py``.
         env_prefix: Prefix for the environment variables an omitted credential
-            falls back to, e.g. ``OTTER`` gives ``OTTER_API_KEY`` for a scheme
-            named ``apiKey``.  Set it per document when a project generates
-            more than one client, so their variables do not collide.  An empty
-            string drops the prefix entirely.
+            falls back to, e.g. ``MYAPI`` gives ``MYAPI_API_KEY`` for a scheme
+            named ``apiKey``.  Unset, it is derived from the name of the output
+            package (``./petstore_client`` gives ``PETSTORE_CLIENT``), so two
+            generated clients never read each other's credentials.  The scheme
+            name comes from the document and the prefix is what keeps it from
+            choosing an arbitrary variable.  An empty string drops the prefix;
+            the client then reads the environment only for the schemes named in
+            ``env_vars``.
         env_vars: Exact environment variable name per security scheme, keyed by
             the scheme's name in ``components.securitySchemes``.  Use it when a
             credential already lives somewhere the prefix rule would never
@@ -882,11 +886,13 @@ class AuthConfig(BaseModel):
         description='Generate client credential parameters from securitySchemes.',
     )
 
-    env_prefix: str = Field(
-        default='OTTER',
+    env_prefix: str | None = Field(
+        default=None,
         description=(
             'Prefix for the environment variables that supply credentials when '
-            'the constructor argument is omitted.'
+            'the constructor argument is omitted. Defaults to the upper-cased '
+            'name of the output package. An empty string drops the prefix, and '
+            'then only schemes named in env_vars read the environment.'
         ),
     )
 

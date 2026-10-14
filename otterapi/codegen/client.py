@@ -27,6 +27,7 @@ from otterapi.codegen.auth import (
     build_auth_init_args,
     build_auth_init_body,
 )
+from otterapi.codegen.runtime._retry import IDEMPOTENT_METHODS, MAX_RETRY_DELAY
 
 # Prefix used when building `f'HTTP {status_code} ...'` error messages in generated code
 _HTTP_ERROR_PREFIX = 'HTTP '
@@ -645,8 +646,17 @@ def generate_base_client_class(
             'typing': {'Any'},
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter'},
-            '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
-            '._serialization': {'serialize_headers', 'serialize_query_params'},
+            '._retry': {
+                '_backoff_sleep',
+                '_backoff_sleep_async',
+                '_should_retry_error',
+                '_should_retry_response',
+            },
+            '._serialization': {
+                'join_url',
+                'serialize_headers',
+                'serialize_query_params',
+            },
         }
     else:
         imports = {
@@ -654,8 +664,17 @@ def generate_base_client_class(
             'typing': {'Any'},
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter', 'RootModel'},
-            '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
-            '._serialization': {'serialize_headers', 'serialize_query_params'},
+            '._retry': {
+                '_backoff_sleep',
+                '_backoff_sleep_async',
+                '_should_retry_error',
+                '_should_retry_response',
+            },
+            '._serialization': {
+                'join_url',
+                'serialize_headers',
+                'serialize_query_params',
+            },
         }
 
     # Build __init__ method
@@ -726,6 +745,14 @@ Args:
         Set to 0 to disable retries. Default: 3.
     retry_statuses: HTTP status codes that trigger a retry.
     backoff_factor: Multiplier for exponential backoff between retries. Default: 0.5.
+    retry_methods: HTTP methods retried after the server may already have acted on
+        the request (a read timeout, a 5xx). Default: the idempotent methods
+        (GET, HEAD, OPTIONS, PUT, DELETE, TRACE). Other methods, such as POST and
+        PATCH, are still retried when the request provably was not processed: a
+        connection failure, 429 or 503. Add "POST" only if the API deduplicates
+        repeated calls (for example through an Idempotency-Key header).
+    max_retry_delay: Longest single wait between retries in seconds, including a
+        wait requested by a Retry-After header. Default: 60.0.
 """
             )
         ),
@@ -779,6 +806,15 @@ def _build_init_method(
         keywords=[],
     )
 
+    # frozenset({'DELETE', 'GET', ...}) literal, from the runtime's own constant
+    default_retry_methods = ast.Call(
+        func=_name('frozenset'),
+        args=[
+            ast.Set(elts=[ast.Constant(value=m) for m in sorted(IDEMPOTENT_METHODS)])
+        ],
+        keywords=[],
+    )
+
     init_body: list[ast.stmt] = [
         # self.base_url = base_url.rstrip('/')
         _assign(
@@ -800,6 +836,10 @@ def _build_init_method(
         _assign(_attr('self', 'retry_statuses'), _name('retry_statuses')),
         # self.backoff_factor = backoff_factor
         _assign(_attr('self', 'backoff_factor'), _name('backoff_factor')),
+        # self.retry_methods = retry_methods
+        _assign(_attr('self', 'retry_methods'), _name('retry_methods')),
+        # self.max_retry_delay = max_retry_delay
+        _assign(_attr('self', 'max_retry_delay'), _name('max_retry_delay')),
         # self._owns_sync_client = http_client is None
         _assign(
             _attr('self', '_owns_sync_client'),
@@ -857,6 +897,8 @@ def _build_init_method(
                     _subscript('frozenset', _name('int')),
                 ),
                 _argument('backoff_factor', _name('float')),
+                _argument('retry_methods', _subscript('frozenset', _name('str'))),
+                _argument('max_retry_delay', _name('float')),
             ],
             # Credentials are keyword-only: they are optional, and positional
             # order would be dictated by the spec's scheme names.
@@ -872,6 +914,8 @@ def _build_init_method(
                 ast.Constant(value=3),
                 default_retry_statuses,
                 ast.Constant(value=0.5),
+                default_retry_methods,
+                ast.Constant(value=MAX_RETRY_DELAY),
             ],
         ),
         body=init_body,
@@ -1449,13 +1493,10 @@ def _build_request_method(
         defaults=[],
     )
 
-    # Build URL: f"{self.base_url}{path}"
-    url_expr = ast.JoinedStr(
-        values=[
-            ast.FormattedValue(value=_attr('self', 'base_url'), conversion=-1),
-            ast.FormattedValue(value=_name('path'), conversion=-1),
-        ]
-    )
+    # Build URL: join_url(self.base_url, path).  Plain concatenation lets a
+    # path such as ".attacker.example/x" or "@attacker.example/x" rewrite the
+    # host, and a ".." segment retarget the request.
+    url_expr = _call(_name('join_url'), args=[_attr('self', 'base_url'), _name('path')])
 
     # merged_headers = {**self.headers, **(headers or {})}
     merged_headers = ast.Dict(
@@ -1623,6 +1664,7 @@ def _build_retry_check(backoff_fn: str, is_async: bool) -> ast.If:
             _name('attempt'),
             _attr('self', 'backoff_factor'),
             _name('response'),
+            _attr('self', 'max_retry_delay'),
         ],
     )
     if is_async:
@@ -1630,7 +1672,9 @@ def _build_retry_check(backoff_fn: str, is_async: bool) -> ast.If:
     else:
         backoff_stmt = ast.Expr(backoff_call)
 
-    # attempt < self.max_retries and response.status_code in self.retry_statuses
+    # attempt < self.max_retries and _should_retry_response(
+    #     method, response.status_code, self.retry_statuses, self.retry_methods
+    # )
     should_retry = ast.BoolOp(
         op=ast.And(),
         values=[
@@ -1639,10 +1683,14 @@ def _build_retry_check(backoff_fn: str, is_async: bool) -> ast.If:
                 ops=[ast.Lt()],
                 comparators=[_attr('self', 'max_retries')],
             ),
-            ast.Compare(
-                left=_attr('response', 'status_code'),
-                ops=[ast.In()],
-                comparators=[_attr('self', 'retry_statuses')],
+            _call(
+                _name('_should_retry_response'),
+                args=[
+                    _name('method'),
+                    _attr('response', 'status_code'),
+                    _attr('self', 'retry_statuses'),
+                    _attr('self', 'retry_methods'),
+                ],
             ),
         ],
     )
@@ -1668,13 +1716,14 @@ def _build_retry_check(backoff_fn: str, is_async: bool) -> ast.If:
 
 
 def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandler:
-    """Build: except TransportError: retry or re-raise."""
+    """Build: except TransportError as exc: retry or re-raise."""
     backoff_call = _call(
         _name(backoff_fn),
         args=[
             _name('attempt'),
             _attr('self', 'backoff_factor'),
             ast.Constant(value=None),
+            _attr('self', 'max_retry_delay'),
         ],
     )
     if is_async:
@@ -1682,16 +1731,34 @@ def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandl
     else:
         backoff_stmt = ast.Expr(backoff_call)
 
+    # attempt < self.max_retries and _should_retry_error(
+    #     method, exc, self.retry_methods
+    # )
+    should_retry = ast.BoolOp(
+        op=ast.And(),
+        values=[
+            ast.Compare(
+                left=_name('attempt'),
+                ops=[ast.Lt()],
+                comparators=[_attr('self', 'max_retries')],
+            ),
+            _call(
+                _name('_should_retry_error'),
+                args=[
+                    _name('method'),
+                    _name('exc'),
+                    _attr('self', 'retry_methods'),
+                ],
+            ),
+        ],
+    )
+
     return ast.ExceptHandler(
         type=_name('TransportError'),
-        name=None,
+        name='exc',
         body=[
             ast.If(
-                test=ast.Compare(
-                    left=_name('attempt'),
-                    ops=[ast.Lt()],
-                    comparators=[_attr('self', 'max_retries')],
-                ),
+                test=should_retry,
                 body=[backoff_stmt, ast.Continue()],
                 orelse=[ast.Raise()],
             )

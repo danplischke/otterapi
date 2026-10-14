@@ -17,7 +17,11 @@ import httpx
 import pytest
 import yaml
 
-from otterapi.codegen.auth import collect_auth_schemes
+from otterapi.codegen.auth import (
+    DEFAULT_ENV_PREFIX,
+    collect_auth_schemes,
+    default_env_prefix,
+)
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import AuthConfig, DocumentConfig
 
@@ -203,7 +207,8 @@ class TestAuthConfig:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         mod = _generate(tmp_path, self.SPEC, 'auth_env')
-        monkeypatch.setenv('OTTER_API_KEY', 'from-env')
+        # The default prefix is the output package's name.
+        monkeypatch.setenv('AUTH_ENV_API_KEY', 'from-env')
         request = _send(mod, mod.Client())
         assert request.headers['X-Key'] == 'from-env'
 
@@ -211,7 +216,7 @@ class TestAuthConfig:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         mod = _generate(tmp_path, self.SPEC, 'auth_env_override')
-        monkeypatch.setenv('OTTER_API_KEY', 'from-env')
+        monkeypatch.setenv('AUTH_ENV_OVERRIDE_API_KEY', 'from-env')
         request = _send(mod, mod.Client(api_key='explicit'))
         assert request.headers['X-Key'] == 'explicit'
 
@@ -242,6 +247,119 @@ class TestAuthConfig:
         spec['components'] = {}
         mod = _generate(tmp_path, spec, 'auth_none')
         assert not hasattr(mod.Client(), '_apply_auth')
+
+
+class TestEnvPrefixIsPerClient:
+    """The prefix must not be shared, and must not be chosen by the document.
+
+    The scheme name is the document's; the rest of the variable name is what
+    keeps the document from picking a variable it has no business reading.
+    """
+
+    SPEC = _spec({'api_key': {'type': 'apiKey', 'name': 'X-Key', 'in': 'header'}})
+
+    def test_one_clients_variable_is_not_read_by_another(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        (tmp_path / 'a').mkdir()
+        (tmp_path / 'b').mkdir()
+        internal = _generate(tmp_path / 'a', self.SPEC, 'internal_api')
+        external = _generate(tmp_path / 'b', self.SPEC, 'partner_api')
+        monkeypatch.setenv('INTERNAL_API_API_KEY', 'internal-secret')
+
+        assert _send(internal, internal.Client()).headers['X-Key'] == 'internal-secret'
+        assert 'X-Key' not in _send(external, external.Client()).headers
+
+    def test_the_old_shared_prefix_is_no_longer_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mod = _generate(tmp_path, self.SPEC, 'auth_noshare')
+        monkeypatch.setenv('OTTER_API_KEY', 'shared')
+        assert 'X-Key' not in _send(mod, mod.Client()).headers
+
+    def test_the_document_title_does_not_choose_the_prefix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        spec = _spec({'api_key': {'type': 'apiKey', 'name': 'X-Key', 'in': 'header'}})
+        spec['info']['title'] = 'Stripe'
+        mod = _generate(tmp_path, spec, 'auth_title')
+        monkeypatch.setenv('STRIPE_API_KEY', 'sk_live')
+        assert 'X-Key' not in _send(mod, mod.Client()).headers
+
+    def test_empty_prefix_reads_only_the_schemes_named_in_env_vars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        spec = _spec(
+            {
+                'AWS_SECRET_ACCESS_KEY': {
+                    'type': 'apiKey',
+                    'name': 'X-Aws',
+                    'in': 'header',
+                },
+                'GITHUB_TOKEN': {'type': 'http', 'scheme': 'bearer'},
+            }
+        )
+        mod = _generate(
+            tmp_path,
+            spec,
+            'auth_empty_prefix',
+            auth=AuthConfig(env_prefix='', env_vars={'GITHUB_TOKEN': 'MY_GITHUB'}),
+        )
+        monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'aws-secret')
+        monkeypatch.setenv('GITHUB_TOKEN', 'wrong-variable')
+        monkeypatch.setenv('MY_GITHUB', 'named-variable')
+
+        headers = _send(mod, mod.Client()).headers
+        assert headers['Authorization'] == 'Bearer named-variable'
+        assert 'X-Aws' not in headers
+        source = (tmp_path / 'auth_empty_prefix' / '_client.py').read_text(
+            encoding='utf-8'
+        )
+        assert 'environ.get("AWS_SECRET_ACCESS_KEY")' not in source
+
+    def test_empty_prefix_warns_about_schemes_with_no_variable(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        with caplog.at_level('WARNING', logger='otterapi.codegen.auth'):
+            _generate(
+                tmp_path, self.SPEC, 'auth_empty_warn', auth=AuthConfig(env_prefix='')
+            )
+        assert any('auth.env_vars' in record.getMessage() for record in caplog.records)
+
+    def test_an_explicit_prefix_still_applies_to_every_scheme(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mod = _generate(
+            tmp_path, self.SPEC, 'auth_explicit', auth=AuthConfig(env_prefix='SHARED')
+        )
+        monkeypatch.setenv('SHARED_API_KEY', 'ok')
+        assert _send(mod, mod.Client()).headers['X-Key'] == 'ok'
+
+
+class TestDefaultEnvPrefix:
+    @pytest.mark.parametrize(
+        ('output', 'expected'),
+        [
+            ('./petstore_client', 'PETSTORE_CLIENT'),
+            ('out/PetStoreClient', 'PET_STORE_CLIENT'),
+            ('my-api.v2', 'MY_API_V2'),
+            ('some/dir/billing/', 'BILLING'),
+            ('123abc', '_123ABC'),
+        ],
+    )
+    def test_derived_from_the_output_package_name(self, output, expected):
+        assert default_env_prefix(output) == expected
+
+    def test_a_dot_uses_the_current_directory_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        project = tmp_path / 'my_project'
+        project.mkdir()
+        monkeypatch.chdir(project)
+        assert default_env_prefix('.') == 'MY_PROJECT'
+
+    def test_a_nameless_path_falls_back(self):
+        assert default_env_prefix('/') == DEFAULT_ENV_PREFIX
 
 
 def test_before_request_hook_can_override_generated_auth(tmp_path: Path):
@@ -297,7 +415,7 @@ class TestEnvVarNames:
             'auth_envvar_partial',
             auth=AuthConfig(env_vars={'api_key': 'STRIPE_SECRET_KEY'}),
         )
-        monkeypatch.setenv('OTTER_BEARER_AUTH', 'tok')
+        monkeypatch.setenv('AUTH_ENVVAR_PARTIAL_BEARER_AUTH', 'tok')
         assert _send(mod, mod.Client()).headers['Authorization'] == 'Bearer tok'
 
     def test_named_variable_beats_the_prefix(
