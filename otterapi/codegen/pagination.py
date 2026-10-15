@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
+from otterapi.codegen._write_journal import ensure_dir, write_text
+
 if TYPE_CHECKING:
     from otterapi.config import PaginationConfig
 
@@ -41,11 +43,12 @@ def generate_pagination_module(output_dir: Path | UPath) -> Path | UPath:
         The path to the generated file.
     """
     output_dir = UPath(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(output_dir)
 
     file_path = output_dir / '_pagination.py'
-    file_path.write_text(
-        files('otterapi.codegen.runtime').joinpath('_pagination.py').read_text('utf-8')
+    write_text(
+        file_path,
+        files('otterapi.codegen.runtime').joinpath('_pagination.py').read_text('utf-8'),
     )
 
     return file_path

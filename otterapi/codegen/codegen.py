@@ -15,6 +15,13 @@ from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 from upath import UPath
 
 from otterapi.codegen._features import all_features, write_enabled_features
+from otterapi.codegen._write_journal import (
+    WriteJournal,
+    activate,
+    ensure_dir,
+    touch,
+    write_text,
+)
 from otterapi.codegen.ast_utils import (
     MODELS_MODULE,
     ImportCollector,
@@ -188,66 +195,6 @@ def _disambiguate_flattened_fields(
             suffix += 1
         field.name = candidate
         taken.add(candidate)
-
-
-def _snapshot_directory(directory: UPath) -> dict[str, bytes]:
-    """Read every file under *directory* into memory, keyed by relative path.
-
-    Generated packages are a handful of Python source files, so holding them
-    in memory costs less than the temp-directory bookkeeping the alternative
-    would need -- and it works the same for a remote ``UPath``.
-    """
-    snapshot: dict[str, bytes] = {}
-    for path in directory.rglob('*'):
-        if path.is_file():
-            snapshot[str(path.relative_to(directory))] = path.read_bytes()
-    return snapshot
-
-
-def _restore_directory(
-    directory: UPath, snapshot: dict[str, bytes] | None, *, existed: bool
-) -> None:
-    """Put *directory* back the way it was before generation started.
-
-    Best-effort: a failure here must not mask the generation error that
-    triggered the rollback, so cleanup problems are logged rather than raised.
-    """
-    try:
-        if not existed:
-            if directory.exists():
-                _remove_tree(directory)
-            return
-
-        for path in list(directory.rglob('*')):
-            if path.is_file():
-                path.unlink()
-        for path in sorted(
-            (p for p in directory.rglob('*') if p.is_dir()),
-            key=lambda p: len(p.parts),
-            reverse=True,
-        ):
-            path.rmdir()
-
-        for relative, content in (snapshot or {}).items():
-            target = directory / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
-    except OSError as exc:  # pragma: no cover - depends on filesystem state
-        logger.warning(
-            'Could not fully roll back %s after a failed generation: %s',
-            directory,
-            exc,
-        )
-
-
-def _remove_tree(directory: UPath) -> None:
-    """Delete *directory* and everything under it."""
-    for path in sorted(directory.rglob('*'), key=lambda p: len(p.parts), reverse=True):
-        if path.is_file():
-            path.unlink()
-        else:
-            path.rmdir()
-    directory.rmdir()
 
 
 def _topo_sort_by_base_classes(
@@ -1939,7 +1886,12 @@ class Codegen(OpenAPIProcessor):
 
         Returns:
             The list of generated file paths, relative to the output directory.
+
+        Raises:
+            ConfigurationError: If a module name chosen in ``module_split``
+                collides with a file of the generated package.
         """
+        self._check_module_split_names()
         self._load_schema()
 
         if self.openapi is None:
@@ -1951,21 +1903,52 @@ class Codegen(OpenAPIProcessor):
             raise ValueError('OpenAPI spec has no paths to generate endpoints from')
 
         directory = UPath(self.config.output)
-        existed = directory.exists()
-        # Snapshot rather than generate-then-swap: client.py is deliberately
+        # A journal rather than generate-then-swap: client.py is deliberately
         # preserved across runs, as is anything else the user keeps in the
-        # output directory, and a swap would discard both.
-        snapshot = _snapshot_directory(directory) if existed else None
+        # output directory, and a swap would discard both.  Nor a snapshot of
+        # the directory: that reads, and on failure rewrites, files this run
+        # never touched.  The journal records only what the run itself writes,
+        # so rolling back cannot disturb the rest, and it refuses to write
+        # outside the output directory at all.
+        journal = WriteJournal(directory)
 
         try:
-            return self._generate_into(directory)
+            with activate(journal):
+                return self._generate_into(directory)
         except BaseException:
-            _restore_directory(directory, snapshot, existed=existed)
+            journal.rollback()
             raise
+
+    def _reserved_module_names(self) -> frozenset[str]:
+        """Module names a split endpoint module must not take."""
+        from otterapi.codegen.splitting import reserved_module_names
+
+        return reserved_module_names(
+            self.config.models_file, self.config.endpoints_file
+        )
+
+    def _check_module_split_names(self) -> None:
+        """Reject a reserved module name chosen in the config, before any work.
+
+        A ``module_map`` key or ``fallback_module`` that names a generated file
+        would overwrite it, so this fails up front -- ahead of loading the spec
+        -- rather than part-way through writing the package.
+
+        Raises:
+            ConfigurationError: If a name chosen in ``module_split`` is reserved.
+        """
+        if not (self.generate_endpoints and self.config.module_split.enabled):
+            return
+
+        from otterapi.codegen.splitting import validate_user_module_names
+
+        validate_user_module_names(
+            self.config.module_split, self._reserved_module_names()
+        )
 
     def _generate_into(self, directory: UPath):
         """Write every generated file into *directory*."""
-        directory.mkdir(parents=True, exist_ok=True)
+        ensure_dir(directory)
 
         if not os.access(str(directory), os.W_OK):
             raise RuntimeError(f'Directory {directory} is not writable')
@@ -2013,7 +1996,7 @@ class Codegen(OpenAPIProcessor):
 
         if self.create_py_typed:
             py_typed = directory / 'py.typed'
-            py_typed.touch()
+            touch(py_typed)
             generated_files.append(f'{output_name}/py.typed')
 
         return generated_files
@@ -2188,7 +2171,9 @@ class Codegen(OpenAPIProcessor):
         )
 
         # Build the module tree
-        builder = ModuleTreeBuilder(self.config.module_split)
+        builder = ModuleTreeBuilder(
+            self.config.module_split, self._reserved_module_names()
+        )
         tree = builder.build(endpoints)
 
         # Emit the split modules
@@ -2324,7 +2309,7 @@ class Codegen(OpenAPIProcessor):
                 base_class_name=base_client_name,
                 module_name='_client',
             )
-            user_client_file.write_text(stub_content)
+            write_text(user_client_file, stub_content)
             generated_files.append(f'{output_name}/client.py')
 
         return generated_files

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from upath import UPath
 
+from otterapi.codegen._write_journal import ensure_dir, write_text
 from otterapi.codegen.ast_utils import (
     ImportDict,
     _argument,
@@ -65,10 +66,11 @@ __all__ = [
 def generate_export_module(output_dir: Path | UPath) -> Path | UPath:
     """Generate the ``_export.py`` utility module in the output directory."""
     output_dir = UPath(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(output_dir)
     file_path = output_dir / '_export.py'
-    file_path.write_text(
-        files('otterapi.codegen.runtime').joinpath('_export.py').read_text('utf-8')
+    write_text(
+        file_path,
+        files('otterapi.codegen.runtime').joinpath('_export.py').read_text('utf-8'),
     )
     return file_path
 

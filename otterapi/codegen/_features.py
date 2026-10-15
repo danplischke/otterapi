@@ -33,6 +33,7 @@ from otterapi.codegen._pep695 import (
     modernize_type_aliases,
     modernize_type_params,
 )
+from otterapi.codegen._write_journal import ensure_dir, write_text
 
 if TYPE_CHECKING:
     from otterapi.config import DocumentConfig
@@ -102,7 +103,7 @@ class FeatureModule(ABC):
                 config, e.g. ``generate_dataframe_module``).
         """
         output_dir = UPath(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        ensure_dir(output_dir)
         content = self.module_content
         if config is not None:
             content = self.transform_content(content, config)
@@ -113,7 +114,7 @@ class FeatureModule(ABC):
                 content = modernize_type_params(content)
                 content = modernize_type_aliases(content)
         target = output_dir / self.module_filename
-        target.write_text(content, encoding='utf-8')
+        write_text(target, content)
         return target
 
 

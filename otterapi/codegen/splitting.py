@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from upath import UPath
 
+from otterapi.codegen._features import all_features
+from otterapi.codegen._write_journal import ensure_dir, touch
 from otterapi.codegen.ast_utils import (
     MODELS_MODULE,
     ImportCollector,
@@ -39,6 +42,8 @@ from otterapi.codegen.pagination import (
     get_pagination_config_for_endpoint,
 )
 from otterapi.codegen.utils import write_mod
+from otterapi.config import DEFAULT_ENDPOINTS_FILENAME, DEFAULT_MODELS_FILENAME
+from otterapi.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from otterapi.codegen.types import Endpoint, Type
@@ -51,7 +56,13 @@ if TYPE_CHECKING:
         ResponseUnwrapConfig,
     )
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
+    # Reserved module names
+    'ROOT_MODULE_NAME',
+    'reserved_module_names',
+    'validate_user_module_names',
     # Tree classes
     'ModuleTree',
     'ModuleTreeBuilder',
@@ -63,6 +74,158 @@ __all__ = [
     'EmittedModule',
     'SplitModuleEmitter',
 ]
+
+# =============================================================================
+# Reserved Module Names
+# =============================================================================
+
+#: Name the emitter gives the endpoints that sit directly at the tree's root.
+ROOT_MODULE_NAME = 'endpoints'
+
+# Windows refuses these as a file's base name whatever its extension, so
+# ``aux.py`` cannot be created there.
+_WINDOWS_DEVICE_NAMES = (
+    'con',
+    'prn',
+    'aux',
+    'nul',
+    *(f'com{n}' for n in range(1, 10)),
+    *(f'lpt{n}' for n in range(1, 10)),
+)
+
+
+def reserved_module_names(
+    models_file: str = DEFAULT_MODELS_FILENAME,
+    endpoints_file: str = DEFAULT_ENDPOINTS_FILENAME,
+) -> frozenset[str]:
+    """Return the names a split endpoint module must not be given.
+
+    A split module is written to ``<output>/<name>.py`` (or into a package
+    called ``<name>``), so a name that matches a file the generator writes, or
+    one it leaves alone such as ``client.py``, would overwrite or shadow it.
+    Names are matched as they appear on disk, without ``.py``, and
+    case-insensitively because macOS and Windows filesystems are; the result is
+    therefore lower case.  The Windows device names are reserved as well.
+
+    The runtime helper modules come from :func:`all_features`, so a new feature
+    module is reserved without touching this function.
+
+    Args:
+        models_file: The configured models file name.
+        endpoints_file: The configured endpoints file name.
+
+    Returns:
+        The reserved module names.
+    """
+    names = {
+        '__init__',
+        'client',
+        '_client',
+        ROOT_MODULE_NAME,
+        # Generated modules import ``.models`` whatever models_file says.
+        MODELS_MODULE.lstrip('.'),
+        Path(models_file).stem,
+        Path(endpoints_file).stem,
+        *(Path(feature.module_filename).stem for feature in all_features()),
+        *_WINDOWS_DEVICE_NAMES,
+    }
+    return frozenset(name.casefold() for name in names)
+
+
+def _normalize_reserved(names: Collection[str] | None) -> frozenset[str]:
+    """Case-fold ``names``, defaulting to the names reserved out of the box."""
+    if names is None:
+        return reserved_module_names()
+    return frozenset(name.casefold() for name in names)
+
+
+def _uses_module_map(config: ModuleSplitConfig) -> bool:
+    """Check whether the configured strategy consults ``module_map``."""
+    from otterapi.config import SplitStrategy
+
+    return SplitStrategy(config.strategy) in (
+        SplitStrategy.CUSTOM,
+        SplitStrategy.HYBRID,
+    )
+
+
+def _module_map_names(
+    module_map: dict[str, ModuleDefinition],
+    parent: tuple[str, ...],
+    flat_structure: bool,
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(label, module name)`` for every key in a ``module_map``.
+
+    Every level counts, since a key names a package when it has children.  The
+    flat layout joins a nested path into a single file name, so that name is
+    checked as well.
+    """
+    for key, definition in module_map.items():
+        path = (*parent, key)
+        label = f"module_map key '{'.'.join(path)}'"
+        yield label, key
+        if flat_structure and parent:
+            joined = '_'.join(path)
+            yield f'{label} (written as {joined}.py)', joined
+        yield from _module_map_names(definition.modules, path, flat_structure)
+
+
+def validate_user_module_names(
+    config: ModuleSplitConfig, reserved: Collection[str] | None = None
+) -> None:
+    """Reject a module name the user chose that collides with a generated file.
+
+    ``module_map`` keys and ``fallback_module`` are names the user picked on
+    purpose, so quietly renaming one would hand them a module they did not ask
+    for.  Names derived from the spec (tags, path segments) are renamed by
+    :class:`ModuleTreeBuilder` instead.
+
+    Args:
+        config: The module split configuration.
+        reserved: The reserved names; defaults to those of
+            :func:`reserved_module_names` with its default file names.
+
+    Raises:
+        ConfigurationError: If ``fallback_module``, or a ``module_map`` key
+            while the strategy consults the ``module_map``, is a reserved name.
+    """
+    reserved_names = _normalize_reserved(reserved)
+
+    # (config field, label for the message, module name) for each name chosen.
+    chosen = [
+        (
+            'module_split.fallback_module',
+            f"fallback_module '{config.fallback_module}'",
+            config.fallback_module,
+        )
+    ]
+    if _uses_module_map(config):
+        chosen.extend(
+            ('module_split.module_map', label, name)
+            for label, name in _module_map_names(
+                cast('dict[str, ModuleDefinition]', config.module_map),
+                (),
+                config.flat_structure,
+            )
+        )
+
+    offenders = [
+        (config_field, label)
+        for config_field, label, name in chosen
+        if name.casefold() in reserved_names
+    ]
+    if not offenders:
+        return
+
+    raise ConfigurationError(
+        'Reserved module name in the module split configuration: '
+        f'{"; ".join(label for _, label in offenders)}. A module with such a '
+        'name would overwrite or shadow a file the generator writes or leaves '
+        'alone in the output directory, so choose another. Reserved names '
+        f'(case-insensitive): {", ".join(sorted(reserved_names))}',
+        field=offenders[0][0],
+    )
+
 
 # =============================================================================
 # Module Tree
@@ -192,17 +355,34 @@ class ModuleTreeBuilder:
         >>> tree = builder.build(endpoints)
     """
 
-    def __init__(self, config: ModuleSplitConfig):
+    def __init__(
+        self,
+        config: ModuleSplitConfig,
+        reserved_names: Collection[str] | None = None,
+    ):
         """Initialize the tree builder.
 
         Args:
             config: The module split configuration.
+            reserved_names: Module names that collide with files the generator
+                owns, as returned by :func:`reserved_module_names`.  Defaults
+                to the names reserved with the default models and endpoints
+                file names.
+
+        Raises:
+            ConfigurationError: If a name chosen in ``config`` is reserved.
         """
         self.config = config
-        self.resolver = ModuleMapResolver(config)
+        self.reserved_names = _normalize_reserved(reserved_names)
+        self.resolver = ModuleMapResolver(config, self.reserved_names)
 
     def build(self, endpoints: list[Endpoint]) -> ModuleTree:
         """Build a module tree from a list of endpoints.
+
+        The names in the returned tree are the final module names: the emitter
+        writes, imports and re-exports exactly these.  A name derived from the
+        spec that is reserved gets a trailing ``_``; see
+        :meth:`_rename_reserved_modules`.
 
         Args:
             endpoints: List of Endpoint objects to organize.
@@ -233,7 +413,60 @@ class ModuleTreeBuilder:
         if self.config.min_endpoints > 1:
             self._consolidate_small_modules(root)
 
+        self._rename_reserved_modules(root, [])
+
         return root
+
+    def _rename_reserved_modules(self, node: ModuleTree, path: list[str]) -> None:
+        """Rename the reserved modules below ``node`` to free, unreserved names.
+
+        This is the one place final module names are decided, and it runs on
+        the finished tree -- after small modules were consolidated -- so a name
+        only counts as taken when a module of that name will really be written.
+        Names the user chose never get here: the resolver rejects them, which
+        leaves tags and path segments.
+
+        Each directory is handled on its own, as ``a/models.py`` and
+        ``models.py`` are different files, but every component of a path is
+        checked, because a package shadows a module of the same name.  Only
+        reserved names change and they are handled in sorted order, so the
+        result does not depend on the order the endpoints arrived in.
+
+        Args:
+            node: The node whose children are renamed.
+            path: The module path of ``node``, for the log message.
+        """
+        taken = {name.casefold() for name in node.children}
+        renames: dict[str, str] = {}
+        for name in sorted(node.children):
+            if name.casefold() not in self.reserved_names:
+                continue
+            new_name = name
+            while (
+                new_name.casefold() in self.reserved_names
+                or new_name.casefold() in taken
+            ):
+                new_name += '_'
+            taken.add(new_name.casefold())
+            renames[name] = new_name
+            logger.warning(
+                "Module '%s' would collide with a file of the generated "
+                "package; using '%s' instead.",
+                '.'.join([*path, name]),
+                new_name,
+            )
+
+        if renames:
+            children: dict[str, ModuleTree] = {}
+            for name, child in node.children.items():
+                new_name = renames.get(name, name)
+                if new_name != name:
+                    child.name = new_name
+                children[new_name] = child
+            node.children = children
+
+        for name, child in node.children.items():
+            self._rename_reserved_modules(child, [*path, name])
 
     def _consolidate_small_modules(self, root: ModuleTree) -> None:
         """Consolidate modules with fewer than min_endpoints into fallback."""
@@ -270,17 +503,20 @@ class ModuleTreeBuilder:
 def build_module_tree(
     endpoints: list[Endpoint],
     config: ModuleSplitConfig,
+    reserved_names: Collection[str] | None = None,
 ) -> ModuleTree:
     """Convenience function to build a module tree.
 
     Args:
         endpoints: List of Endpoint objects to organize.
         config: The module split configuration.
+        reserved_names: Module names that collide with files the generator
+            owns; see :class:`ModuleTreeBuilder`.
 
     Returns:
         A ModuleTree with endpoints organized according to the configuration.
     """
-    builder = ModuleTreeBuilder(config)
+    builder = ModuleTreeBuilder(config, reserved_names)
     return builder.build(endpoints)
 
 
@@ -345,9 +581,31 @@ class ModuleMapResolver:
         'users'
     """
 
-    def __init__(self, config: ModuleSplitConfig):
-        """Initialize the resolver with configuration."""
+    def __init__(
+        self,
+        config: ModuleSplitConfig,
+        reserved_names: Collection[str] | None = None,
+    ):
+        """Initialize the resolver with configuration.
+
+        Names derived from the spec are returned as sanitised; renaming one
+        that is reserved needs to know which other modules will exist, so
+        :class:`ModuleTreeBuilder` does that.  Names the user chose are checked
+        here instead, and a reserved one is an error.
+
+        Args:
+            config: The module split configuration.
+            reserved_names: Module names that collide with files the generator
+                owns, as returned by :func:`reserved_module_names`.  Defaults
+                to the names reserved with the default models and endpoints
+                file names.
+
+        Raises:
+            ConfigurationError: If a name chosen in ``config`` is reserved.
+        """
         self.config = config
+        self.reserved_names = _normalize_reserved(reserved_names)
+        validate_user_module_names(config, self.reserved_names)
 
     def resolve(
         self,
@@ -402,12 +660,7 @@ class ModuleMapResolver:
 
     def _should_use_module_map(self) -> bool:
         """Check if module_map should be used based on strategy."""
-        from otterapi.config import SplitStrategy
-
-        strategy = self.config.strategy
-        if isinstance(strategy, str):
-            strategy = SplitStrategy(strategy)
-        return strategy in (SplitStrategy.CUSTOM, SplitStrategy.HYBRID)
+        return _uses_module_map(self.config)
 
     def _should_use_tags(self) -> bool:
         """Check if tags should be used based on strategy."""
@@ -689,7 +942,7 @@ class SplitModuleEmitter:
             if not node.endpoints:
                 continue
 
-            flat_name = '_'.join(module_path) if module_path else 'endpoints'
+            flat_name = '_'.join(module_path) if module_path else ROOT_MODULE_NAME
             file_path = self.output_dir / f'{flat_name}.py'
 
             endpoint_names = self._emit_module_file(
@@ -720,7 +973,7 @@ class SplitModuleEmitter:
 
             if len(module_path) > 1:
                 dir_path = self.output_dir / '/'.join(module_path[:-1])
-                dir_path.mkdir(parents=True, exist_ok=True)
+                ensure_dir(dir_path)
                 directories.add(tuple(module_path[:-1]))
 
                 for i in range(1, len(module_path) - 1):
@@ -728,7 +981,7 @@ class SplitModuleEmitter:
 
                 file_path = dir_path / f'{module_path[-1]}.py'
             else:
-                module_name = module_path[0] if module_path else 'endpoints'
+                module_name = module_path[0] if module_path else ROOT_MODULE_NAME
                 file_path = self.output_dir / f'{module_name}.py'
 
             endpoint_names = self._emit_module_file(
@@ -1400,7 +1653,7 @@ class SplitModuleEmitter:
         )
 
         file_path = UPath(file_path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_dir(file_path.parent)
         write_mod(
             final_body,
             file_path,
@@ -1689,7 +1942,7 @@ class SplitModuleEmitter:
                 validate_code=self.validate_output,
             )
         else:
-            init_path.touch()
+            touch(init_path)
 
     def _emit_root_init(self) -> None:
         """Emit the root __init__.py file."""

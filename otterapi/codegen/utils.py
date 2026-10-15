@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from upath import UPath
 
+from otterapi.codegen._write_journal import ensure_dir, write_text
 from otterapi.codegen.ast_utils import (
     IMPORT_SECTION_SEPARATOR,
     find_unresolved_names,
@@ -278,6 +279,9 @@ def write_mod(
     builder that forgot to register an import, which would otherwise surface
     as a ``NameError`` in the user's client.
 
+    The write goes through ``_write_journal``, so when a generation run is
+    active a failure later in the run can undo it.
+
     Args:
         body: List of AST statement nodes to write.
         path: Path where the file should be written.
@@ -321,9 +325,8 @@ def write_mod(
         file_content = format_source(file_content)
 
     # Write to file
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(str(path), 'w', encoding='utf-8') as f:
-        f.write(file_content)
+    ensure_dir(path.parent)
+    write_text(path, file_content)
 
 
 @dataclass
