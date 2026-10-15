@@ -4,10 +4,15 @@ This module provides utilities for:
 - Loading OpenAPI schemas from various sources (URLs, local files, YAML/JSON)
 - Automatic version detection and upgrading of older OpenAPI/Swagger specifications
 - Resolving $ref references and managing schema lookups in OpenAPI documents
+- Bounding what an untrusted specification can cost to load: download size and
+  time, redirects, and YAML alias expansion
 """
 
+import ipaddress
 import json
 import logging
+import socket
+import time
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -34,6 +39,311 @@ __all__ = [
 
 
 # =============================================================================
+# Limits for untrusted specifications
+# =============================================================================
+
+# Largest response body accepted from a URL, measured after decompression.
+MAX_SPEC_BYTES = 50 * 1024 * 1024
+
+# Wall-clock budget, in seconds, for downloading one spec, redirects included.
+MAX_FETCH_SECONDS = 60.0
+
+# Redirects followed for one download before giving up.
+MAX_REDIRECTS = 5
+
+# A YAML document is refused when its aliases expand it to more than
+# max(MAX_ALIAS_AMPLIFICATION * distinct nodes, MIN_AMPLIFICATION_NODES) nodes.
+# The floor keeps ordinary anchor and merge-key use far away from the limit.
+MAX_ALIAS_AMPLIFICATION = 100
+MIN_AMPLIFICATION_NODES = 100_000
+
+# Per-read network timeout of the client the loader creates for itself. The
+# overall budget above is enforced separately, as the body arrives.
+_READ_TIMEOUT_SECONDS = 30.0
+
+# The only content codings requested or accepted. One gzip or deflate stream
+# inflates at most about 1000:1 per network read, which the size check absorbs;
+# stacked codings, brotli and zstd can inflate a single read without bound.
+_CONTENT_CODINGS = ('gzip', 'deflate')
+
+# YAML node counts saturate here, so the alias walk stays cheap and its figures
+# printable however deeply aliases nest.
+_NODE_COUNT_CEILING = 1 << 62
+
+_YAML_CONTAINERS = (dict, list, tuple, set, frozenset)
+
+_NAT64_PREFIX = ipaddress.IPv6Network('64:ff9b::/96')
+
+
+def _describe_bytes(count: int) -> str:
+    """Render a byte count for error messages."""
+    if count >= 1024 * 1024:
+        return f'{count / (1024 * 1024):g} MiB'
+    return f'{count} bytes'
+
+
+def _resolve_addresses(host: str) -> list[str]:
+    """Resolve ``host`` to every IP address it maps to.
+
+    A function of its own so tests can swap DNS for a lookup table.
+    """
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(str(info[4][0]) for info in infos))
+
+
+def _is_non_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether ``ip`` is anything other than an ordinary public address.
+
+    Covers loopback, private (RFC 1918 and unique-local), link-local (which
+    includes the cloud metadata address 169.254.169.254), site-local,
+    multicast, reserved, unspecified and shared (carrier-grade NAT) space. An
+    IPv4 address wrapped in IPv6 (mapped, 6to4 or NAT64 form) is judged by the
+    address inside.
+    """
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = ip.ipv4_mapped
+        if embedded is None:
+            embedded = ip.sixtofour
+        if embedded is None and ip in _NAT64_PREFIX:
+            embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if embedded is not None:
+            return _is_non_public(embedded)
+        if ip.is_site_local:
+            return True
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+        or not ip.is_global
+    )
+
+
+def _host_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Return the addresses ``host`` stands for.
+
+    An IP literal stands for itself; any other name is resolved, which also
+    covers the numeric spellings (``2130706433``, ``127.1``) that the system
+    resolver, and therefore the connection, reads as IPv4 addresses.
+
+    Raises:
+        OSError: If the name does not resolve.
+    """
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        return [ipaddress.ip_address(address) for address in _resolve_addresses(host)]
+
+
+def _is_internal_host(host: str) -> bool:
+    """Whether every address ``host`` stands for is non-public."""
+    try:
+        addresses = _host_addresses(host)
+    except (OSError, ValueError):
+        return False
+    return bool(addresses) and all(_is_non_public(a) for a in addresses)
+
+
+def _vet_redirect(
+    source: str, current: httpx.URL, location: str, origin_host: str
+) -> httpx.URL:
+    """Resolve a ``Location`` header against ``current`` and check it may be followed.
+
+    Only http(s) URLs with a host are followed. A target on a non-public
+    address (loopback, private, link-local, ...) is refused unless the spec was
+    itself served from one (``origin_host``), so a dev server on localhost can
+    still redirect within localhost. The target is parsed by httpx, the same
+    parser that will make the request, so the host checked is the host fetched.
+    Names are resolved here, which makes the check best effort: DNS may answer
+    differently when the connection is actually made. A name that cannot be
+    resolved from here is followed, not refused: behind a proxy it is the
+    proxy that resolves names, and without one a name nobody can resolve cannot
+    be connected to either, so refusing would only break ordinary redirects on
+    networks where DNS happens at the proxy.
+
+    Args:
+        source: The URL the user asked for, used in error messages.
+        current: The URL that answered with the redirect.
+        location: The ``Location`` header value.
+        origin_host: Host of ``source``.
+
+    Returns:
+        The absolute URL to fetch next.
+
+    Raises:
+        SchemaLoadError: If the redirect must not be followed.
+        httpx.InvalidURL: If ``location`` cannot be parsed as a URL.
+    """
+    target = current.join(location)
+    host = target.raw_host.decode('ascii')
+    if target.scheme not in ('http', 'https') or not host:
+        raise SchemaLoadError(
+            source,
+            cause=ValueError(
+                f"redirect to '{target}' refused: only http(s) URLs are followed"
+            ),
+        )
+
+    try:
+        addresses = _host_addresses(host)
+    except OSError as e:
+        logger.warning(
+            "Could not resolve '%s' to check the redirect to '%s' (%s); following it.",
+            host,
+            target,
+            e,
+        )
+        return target
+    except ValueError as e:
+        raise SchemaLoadError(
+            source,
+            cause=ValueError(
+                f"redirect to '{target}' refused: {host} resolved to an "
+                f'unusable address ({e})'
+            ),
+        )
+
+    blocked = next((str(a) for a in addresses if _is_non_public(a)), None)
+    if blocked is not None and not _is_internal_host(origin_host):
+        points_to = host if blocked == host else f'{host} resolves to {blocked}'
+        raise SchemaLoadError(
+            source,
+            cause=ValueError(
+                f"redirect to '{target}' refused: {points_to}, "
+                'which is not a public address'
+            ),
+        )
+    return target
+
+
+def _check_content_coding(source: str, response: httpx.Response) -> None:
+    """Refuse content codings other than a single gzip or deflate stream."""
+    header = response.headers.get('content-encoding', '')
+    codings = [c.strip().lower() for c in header.split(',')]
+    codings = [c for c in codings if c and c != 'identity']
+    if len(codings) > 1 or (codings and codings[0] not in _CONTENT_CODINGS):
+        raise SchemaLoadError(
+            source,
+            cause=ValueError(
+                f'unsupported Content-Encoding {header!r} '
+                f'(only {" or ".join(_CONTENT_CODINGS)} are accepted)'
+            ),
+        )
+
+
+def _measure_aliasing(document: Any) -> tuple[int, int]:
+    """Measure how far YAML aliases inflate a parsed document.
+
+    ``yaml.safe_load`` shares aliased objects instead of copying them, so a few
+    hundred bytes can describe a tree with billions of nodes that validation
+    later walks reference by reference. This walk is iterative, so nesting
+    depth is no concern, and it visits every distinct container once, so its
+    cost follows the size of the text however heavily the document is aliased.
+
+    Returns:
+        ``(expanded, unique)``: the node count a consumer that follows every
+        reference separately would see, and the count of nodes that exist
+        (each container once, plus its scalar children). ``expanded`` saturates
+        at ``_NODE_COUNT_CEILING``.
+
+    Raises:
+        ValueError: If a container contains itself through an alias.
+    """
+    if not isinstance(document, _YAML_CONTAINERS):
+        return 1, 1
+
+    expanded: dict[int, int] = {}
+    in_progress: set[int] = set()
+    unique = 0
+    # (container, False) enters a container, (container, True) leaves it once
+    # everything below it has been measured.
+    stack: list[tuple[Any, bool]] = [(document, False)]
+    while stack:
+        node, leaving = stack.pop()
+        node_id = id(node)
+        children = node.values() if isinstance(node, dict) else node
+        if leaving:
+            total = 1
+            for child in children:
+                if isinstance(child, _YAML_CONTAINERS):
+                    total += expanded[id(child)]
+                else:
+                    total += 1
+            expanded[node_id] = min(total, _NODE_COUNT_CEILING)
+            in_progress.discard(node_id)
+            continue
+        if node_id in expanded:
+            continue
+        in_progress.add(node_id)
+        unique += 1
+        stack.append((node, True))
+        for child in children:
+            if not isinstance(child, _YAML_CONTAINERS):
+                unique += 1
+            elif id(child) in in_progress:
+                raise ValueError(
+                    'an alias refers to the node that contains it (recursive YAML)'
+                )
+            elif id(child) not in expanded:
+                stack.append((child, False))
+    return expanded[id(document)], unique
+
+
+def _check_yaml_aliases(document: Any, source: str) -> None:
+    """Reject YAML documents whose aliases are recursive or expand explosively.
+
+    Ordinary anchors and merge keys share a handful of nodes and stay far below
+    the limit. Documents without any sharing (all JSON, YAML without aliases)
+    measure ``expanded == unique`` and can never trip it.
+
+    Raises:
+        SchemaLoadError: If the document is recursive or its aliases expand it
+            past ``max(MAX_ALIAS_AMPLIFICATION * unique, MIN_AMPLIFICATION_NODES)``
+            nodes.
+    """
+    try:
+        expanded, unique = _measure_aliasing(document)
+    except ValueError as e:
+        raise SchemaLoadError(source, cause=e)
+
+    limit = max(MAX_ALIAS_AMPLIFICATION * unique, MIN_AMPLIFICATION_NODES)
+    if expanded > limit:
+        reached = f'{expanded:,}'
+        if expanded >= _NODE_COUNT_CEILING:
+            reached = f'over {reached}'
+        raise SchemaLoadError(
+            source,
+            cause=ValueError(
+                f'YAML aliases expand {unique:,} distinct nodes to {reached}, '
+                f'past the limit of {limit:,}; refusing what looks like an '
+                'alias bomb'
+            ),
+        )
+
+
+def _parse_document(text: str, source: str, *, is_yaml: bool) -> Any:
+    """Parse JSON or YAML text into plain Python data.
+
+    Raises:
+        SchemaLoadError: If the text is not valid, nests too deeply to parse,
+            or (YAML only) uses aliases recursively or explosively.
+    """
+    try:
+        document = yaml.safe_load(text) if is_yaml else json.loads(text)
+    except (json.JSONDecodeError, yaml.YAMLError) as e:
+        raise SchemaLoadError(source, cause=e)
+    except RecursionError:
+        raise SchemaLoadError(
+            source, cause=ValueError('the document is nested too deeply to parse')
+        )
+    if is_yaml:
+        _check_yaml_aliases(document, source)
+    return document
+
+
+# =============================================================================
 # Schema Loader
 # =============================================================================
 
@@ -53,6 +363,10 @@ class SchemaLoader:
         - Automatic upgrade to OpenAPI 3.2 for code generation
         - External $ref resolution for URLs and relative files
         - Caching of loaded external schemas
+        - Bounded downloads: capped decoded size, an overall time limit, and
+          redirects that are limited, http(s)-only and kept off internal
+          addresses (unless the spec itself came from one)
+        - YAML alias bombs and recursive aliases are rejected
 
     Example:
         >>> loader = SchemaLoader()
@@ -70,12 +384,19 @@ class SchemaLoader:
         resolve_external_refs: bool = False,
         base_path: str | Path | None = None,
         lenient: bool = False,
+        max_bytes: int | None = None,
+        fetch_timeout: float | None = None,
     ):
         """Initialize the schema loader.
 
         Args:
             http_client: Optional HTTP client to use for URL requests.
                         If not provided, a default client will be created.
+                        Redirects are followed by the loader itself (at most
+                        ``MAX_REDIRECTS``, whatever the client's own setting),
+                        so the client's default headers and auth are sent on
+                        every hop: do not attach credentials to a client used
+                        for specs from hosts you do not control.
             resolve_external_refs: Whether to resolve external $ref references.
                                   If True, external URLs and relative file paths
                                   will be loaded and inlined.
@@ -89,6 +410,10 @@ class SchemaLoader:
                     exception is the type-discriminated security-scheme objects,
                     which still reject unknown keys (including ``x-*``) so their
                     variant union stays unambiguous.
+            max_bytes: Largest response body, counted after decompression,
+                      accepted from a URL. Defaults to ``MAX_SPEC_BYTES``.
+            fetch_timeout: Seconds a URL download may take overall, redirects
+                          included. Defaults to ``MAX_FETCH_SECONDS``.
         """
         self._http_client = http_client
         self._resolve_external_refs = resolve_external_refs
@@ -96,6 +421,10 @@ class SchemaLoader:
         self._external_cache: dict[str, dict] = {}
         self._upgrade_warnings: list[str] = []
         self._lenient = lenient
+        self._max_bytes = MAX_SPEC_BYTES if max_bytes is None else max_bytes
+        self._fetch_timeout = (
+            MAX_FETCH_SECONDS if fetch_timeout is None else fetch_timeout
+        )
 
     def load(self, source: str) -> OpenAPIv3:
         """Load and validate an OpenAPI schema from a URL or file path.
@@ -167,26 +496,121 @@ class SchemaLoader:
             return False
 
     def _load_from_url(self, url: str) -> dict:
-        """Load schema content from a URL."""
+        """Load schema content from a URL.
+
+        The download is bounded in size and time and its redirects are vetted
+        hop by hop, see ``_download``.
+        """
         try:
-            if self._http_client:
-                response = self._http_client.get(url)
-            else:
-                response = httpx.get(url, follow_redirects=True, timeout=30.0)
-
-            response.raise_for_status()
-            content_type = response.headers.get('content-type', '')
-            content = response.text
-
-            if 'yaml' in content_type or url.endswith(('.yaml', '.yml')):
-                return yaml.safe_load(content)
-            else:
-                return json.loads(content)
-
-        except httpx.HTTPError as e:
+            text, content_type = self._download(url)
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
             raise SchemaLoadError(url, cause=e)
-        except (json.JSONDecodeError, yaml.YAMLError) as e:
-            raise SchemaLoadError(url, cause=e)
+
+        is_yaml = 'yaml' in content_type or url.endswith(('.yaml', '.yml'))
+        return _parse_document(text, url, is_yaml=is_yaml)
+
+    def _download(self, url: str) -> tuple[str, str]:
+        """Download ``url`` within the size, time and redirect limits.
+
+        Redirects are followed here, never by httpx, so each hop can be vetted
+        by ``_vet_redirect``; the first URL is the user's own choice and is
+        fetched as given. The client is asked not to follow redirects on every
+        request, which also holds for an injected client configured to follow
+        them.
+
+        Returns:
+            The decoded response body and its ``Content-Type`` header.
+
+        Raises:
+            SchemaLoadError: If a limit is exceeded or a redirect is refused.
+            httpx.HTTPError: If the request or the response status fails.
+        """
+        client = self._http_client
+        if client is None:
+            client = httpx.Client(
+                timeout=min(_READ_TIMEOUT_SECONDS, self._fetch_timeout),
+                follow_redirects=False,
+            )
+
+        try:
+            deadline = time.monotonic() + self._fetch_timeout
+            current = httpx.URL(url)
+            origin_host = current.raw_host.decode('ascii')
+            headers = {'Accept-Encoding': ', '.join(_CONTENT_CODINGS)}
+            redirects = 0
+            while True:
+                if time.monotonic() > deadline:
+                    raise self._too_slow(url)
+                with client.stream(
+                    'GET', current, headers=headers, follow_redirects=False
+                ) as response:
+                    if not response.has_redirect_location:
+                        response.raise_for_status()
+                        text = self._read_body(url, response, deadline)
+                        return text, response.headers.get('content-type', '')
+                    location = response.headers['location']
+
+                redirects += 1
+                if redirects > MAX_REDIRECTS:
+                    raise SchemaLoadError(
+                        url,
+                        cause=ValueError(
+                            f'too many redirects (more than {MAX_REDIRECTS})'
+                        ),
+                    )
+                current = _vet_redirect(url, current, location, origin_host)
+        finally:
+            if client is not self._http_client:
+                client.close()
+
+    def _read_body(self, url: str, response: httpx.Response, deadline: float) -> str:
+        """Read a response body, enforcing the size limit and the deadline.
+
+        Bytes are counted after decompression, as each chunk arrives, so a
+        small compressed body that inflates enormously is stopped as soon as it
+        passes the limit instead of being held in memory first.
+        """
+        limit = self._max_bytes
+        _check_content_coding(url, response)
+
+        try:
+            announced = int(response.headers.get('content-length', ''))
+        except ValueError:
+            announced = 0
+        if announced > limit:
+            raise SchemaLoadError(
+                url,
+                cause=ValueError(
+                    f'the server announced a {announced} byte response, over '
+                    f'the {_describe_bytes(limit)} limit'
+                ),
+            )
+
+        chunks: list[bytes] = []
+        size = 0
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > limit:
+                raise SchemaLoadError(
+                    url,
+                    cause=ValueError(
+                        f'response is larger than the {_describe_bytes(limit)} '
+                        'limit (counted after decompression)'
+                    ),
+                )
+            if time.monotonic() > deadline:
+                raise self._too_slow(url)
+            chunks.append(chunk)
+        return b''.join(chunks).decode(response.encoding or 'utf-8', errors='replace')
+
+    def _too_slow(self, url: str) -> SchemaLoadError:
+        """Build the error for a download that overran its overall budget."""
+        return SchemaLoadError(
+            url,
+            cause=ValueError(
+                f'download did not finish within {self._fetch_timeout:g} seconds'
+            ),
+        )
 
     def _load_from_file(self, file_path: str) -> dict:
         """Load schema content from a file."""
@@ -201,14 +625,11 @@ class SchemaLoader:
 
         try:
             content = path.read_text(encoding='utf-8')
-            if path.suffix.lower() in ('.yaml', '.yml'):
-                return yaml.safe_load(content)
-            else:
-                return json.loads(content)
-        except (json.JSONDecodeError, yaml.YAMLError) as e:
-            raise SchemaLoadError(str(file_path), cause=e)
         except OSError as e:
             raise SchemaLoadError(str(file_path), cause=e)
+
+        is_yaml = path.suffix.lower() in ('.yaml', '.yml')
+        return _parse_document(content, str(file_path), is_yaml=is_yaml)
 
     def _resolve_refs(self, content: dict, source: str) -> dict:
         """Resolve all external $ref references in the schema."""

@@ -7,8 +7,8 @@ automatic version detection, upgrade paths, and external $ref resolution.
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 
@@ -525,32 +525,34 @@ class TestURLLoading:
         assert not loader._is_url('/absolute/path/api.json')
         assert not loader._is_url('relative/path/api.json')
 
-    @patch('httpx.get')
-    def test_load_from_url(self, mock_get):
+    def test_load_from_url(self):
         """Test loading schema from URL."""
-        mock_response = MagicMock()
-        mock_response.text = json.dumps(OPENAPI_30_SPEC)
-        mock_response.headers = {'content-type': 'application/json'}
-        mock_response.raise_for_status = MagicMock()
-        mock_get.return_value = mock_response
+        requested = []
 
-        loader = SchemaLoader()
+        def handler(request):
+            requested.append(str(request.url))
+            return httpx.Response(200, json=OPENAPI_30_SPEC)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        loader = SchemaLoader(http_client=client)
         schema = loader.load('https://api.example.com/openapi.json')
 
         assert schema is not None
         assert schema.info.title == 'OpenAPI 3.0 API'
-        mock_get.assert_called_once()
+        assert requested == ['https://api.example.com/openapi.json']
 
-    @patch('httpx.get')
-    def test_load_yaml_from_url(self, mock_get):
+    def test_load_yaml_from_url(self):
         """Test loading YAML schema from URL."""
-        mock_response = MagicMock()
-        mock_response.text = yaml.dump(OPENAPI_30_SPEC)
-        mock_response.headers = {'content-type': 'application/x-yaml'}
-        mock_response.raise_for_status = MagicMock()
-        mock_get.return_value = mock_response
 
-        loader = SchemaLoader()
+        def handler(request):
+            return httpx.Response(
+                200,
+                text=yaml.dump(OPENAPI_30_SPEC),
+                headers={'content-type': 'application/x-yaml'},
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        loader = SchemaLoader(http_client=client)
         schema = loader.load('https://api.example.com/openapi.yaml')
 
         assert schema is not None
