@@ -222,19 +222,25 @@ def format_source(source: str) -> str:
     Returns:
         Formatted source code, or original if formatters unavailable.
     """
-    # Try ruff first
+    # Try ruff first.  The source goes in and comes out as UTF-8 bytes: in text
+    # mode Python would use the locale's encoding, and on Windows (cp1252) the
+    # em dash in a docstring becomes a byte that ruff rejects as invalid UTF-8,
+    # so the module silently came out unformatted -- long imports unwrapped, and
+    # a finding (I001) in the user's own linter.
     try:
         import subprocess
 
         result = subprocess.run(
             ['ruff', 'format', '-'],
-            input=source,
+            input=source.encode('utf-8'),
             capture_output=True,
-            text=True,
         )
         if result.returncode == 0:
-            return _add_blank_lines(result.stdout)
-    except (FileNotFoundError, subprocess.SubprocessError):
+            # ruff keeps the line endings it is given or is configured for; the
+            # file is written in text mode, which adds its own.
+            formatted = result.stdout.decode('utf-8').replace('\r\n', '\n')
+            return _add_blank_lines(formatted)
+    except (FileNotFoundError, subprocess.SubprocessError, UnicodeError):
         pass
 
     # Try black
