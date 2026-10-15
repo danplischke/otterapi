@@ -1014,7 +1014,10 @@ class TestHelpers:
     def test_write_text_defaults_to_utf8_not_the_locale(self, tmp_path: Path):
         write_text(tmp_path / 'x.py', "name = 'café'\n")
 
-        assert (tmp_path / 'x.py').read_bytes() == b"name = 'caf\xc3\xa9'\n"
+        # Text mode writes the platform's line ending (CRLF on Windows), as the
+        # ``open(path, 'w')`` this replaced did; the point here is the encoding.
+        written = (tmp_path / 'x.py').read_bytes().replace(b'\r\n', b'\n')
+        assert written == b"name = 'caf\xc3\xa9'\n"
 
     def test_activation_ends_with_the_block_even_on_error(self, tmp_path: Path):
         journal = WriteJournal(tmp_path)
