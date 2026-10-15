@@ -78,3 +78,46 @@ otterapi does **not** execute the OpenAPI documents it reads, but generation
 does construct Python source from spec-controlled values. Treat OpenAPI
 documents from untrusted sources as untrusted input, review generated code
 before running it, and prefer generating in an isolated environment.
+
+What the generator does about them:
+
+- **Source:** names that become Python identifiers are reduced to
+  `[A-Za-z0-9_]`; every other spec string is emitted as a string literal. A path
+  that does not start with `/`, contains a `.`/`..` segment, or has a
+  `{placeholder}` with no matching parameter fails generation.
+- **Files:** module names derived from tags and paths are reduced to
+  `[a-z0-9_]` and renamed if they would collide with a file the generator owns
+  (`client`, `models`, `__init__`, the runtime helpers). The generator refuses to
+  write through a symlink that leaves the output directory, and a failed run
+  undoes only what it wrote.
+- **Loading:** downloads are capped at 50 MiB after decompression and 60 seconds,
+  redirects onto private or loopback addresses are refused, and YAML alias bombs
+  are rejected. The address check resolves names before connecting, so DNS
+  rebinding is not covered; fetch specs from hosts you trust, or save them to a
+  file first.
+- **Defaults:** a relative server URL is resolved without the credentials or API
+  key in the URL the spec came from, server URLs that are not `http(s)` are
+  rejected, and a Swagger 2.0 document without `schemes` defaults to `https`.
+
+## Untrusted data in generated clients
+
+A generated client treats what the API returns, and the values callers pass as
+path parameters, as untrusted:
+
+- Every model's `_repr_html_` (used by Jupyter) escapes its values, so a string in
+  a response cannot inject markup into a notebook.
+- A path parameter that is `None`, empty, `.` or `..` raises instead of being
+  sent, and a request path that does not start with `/` or contains a dot segment
+  is refused, so a value or a spec path cannot retarget a request or change its
+  host.
+- Credentials are read from environment variables prefixed with the output
+  package's name (not a prefix shared by every client), and with an empty prefix
+  only the schemes named in `auth.env_vars` read the environment.
+- `POST` and `PATCH` are not retried after a timeout or a 5xx, which could repeat
+  a request the server already acted on; `Retry-After` is capped.
+- CSV and TSV exports neutralise cells that a spreadsheet would run as formulas.
+- Cursor pagination stops with an error when the server returns a cursor it
+  already returned.
+
+A case where one of these does not hold is in scope as "generated code that is
+insecure by default".

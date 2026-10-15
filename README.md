@@ -212,6 +212,25 @@ def paginate_offset[T](..., extract_items: Callable[[Any], list[T]]) -> list[T]:
 The setting describes the *generated* code — OtterAPI itself still runs on any
 supported interpreter, including when it emits 3.12-only syntax.
 
+### Loading Specs From a URL
+
+A spec fetched over HTTP is treated as untrusted input and bounded accordingly:
+
+- The body is capped at 50 MiB **after decompression**, and the whole download
+  (redirects included) at 60 seconds. Only one `gzip` or `deflate` coding is
+  accepted.
+- Redirects are followed by otterapi, at most five, to `http(s)` URLs only. A
+  redirect onto a loopback, private, link-local (including the cloud metadata
+  address) or other non-public address is refused unless the spec itself came
+  from such a host, so a dev server on `localhost` can still redirect within
+  `localhost`.
+- YAML documents whose aliases expand explosively (an "alias bomb"), and
+  recursive aliases, are rejected before validation. Ordinary anchors and merge
+  keys are unaffected.
+
+From the library, `SchemaLoader(max_bytes=..., fetch_timeout=...)` adjusts the
+first two limits.
+
 ### Environment Variable Support
 
 Any string value in a config file can reference environment variables:
@@ -409,6 +428,17 @@ module_split:
 | `module_map` | object | `{}` | Custom module-to-path mappings |
 | `split_models` | bool | `false` | Generate per-module model files instead of one shared `models.py` |
 | `shared_models_module` | string | `_models` | Module name for shared models when `split_models` is `true` |
+
+#### Reserved module names
+
+Every module is written to `<output>/<name>.py`, so it cannot share a name with a
+file the generator writes or leaves alone (`__init__`, `client`, `_client`, the
+models and endpoints files, the runtime helpers such as `_retry`, and the Windows
+device names such as `aux` and `nul`), compared case-insensitively. A tag- or
+path-derived name that hits one gets a trailing underscore (`models` →
+`models_.py`) and a warning is logged. A name you choose yourself (a `module_map`
+key or `fallback_module`) is never renamed: it fails with an error naming the key,
+before anything is written.
 
 ### Output Structure
 
@@ -1158,6 +1188,12 @@ OtterAPI is **idempotent** for generated files:
 
 - `models.py`, `endpoints.py`, `_client.py`, `_pagination.py`, `_export.py`, `_dataframe.py` are **rewritten on every run** — never edit them by hand.
 - `client.py` is generated **once** and left alone — this is your customization seam.
+
+If generation fails part-way, only the files it created or overwrote are put back
+(contents and permissions) and the directories it created are removed if they are
+empty. Nothing else in the output directory is read, modified or deleted, so
+`-o .` in a project with a virtualenv is safe. Generation also refuses to write
+through a symlink that leads outside the output directory.
 
 ---
 
