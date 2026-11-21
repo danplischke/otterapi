@@ -1,7 +1,7 @@
 """Tests for the PEP 695 rewrite applied to emitted runtime helper modules.
 
 Generated code defaults to the pre-3.12 ``TypeVar`` spelling so it keeps
-running on Python 3.10/3.11.  Projects that declare ``target_python: "3.12"``
+running on Python 3.11.  Projects that declare ``target_python: "3.12"``
 get type parameters instead, which is what linters configured for a modern
 Python expect (ruff's UP047 / ``non-pep695-generic-function``).
 """
@@ -228,7 +228,7 @@ class TestRuntimeModulesEmission:
 
     def test_default_target_keeps_typevars(self, tmp_path: Path):
         doc = _doc(pagination=PaginationConfig(enabled=True))
-        assert doc.target_python == '3.10'
+        assert doc.target_python == '3.11'
 
         pagination = Path(PaginationFeature().write(tmp_path, doc)).read_text('utf-8')
         concurrency = Path(ConcurrencyFeature().write(tmp_path, doc)).read_text('utf-8')
@@ -253,7 +253,7 @@ class TestRuntimeModulesEmission:
         assert 'def run_sync[T](' in concurrency
         assert 'def run_concurrently[T](' in concurrency
 
-    @pytest.mark.parametrize('target', ['3.10', '3.11'])
+    @pytest.mark.parametrize('target', ['3.11'])
     def test_older_targets_keep_typevars(self, tmp_path: Path, target: str):
         doc = _doc(target_python=target, pagination=PaginationConfig(enabled=True))
         pagination = Path(PaginationFeature().write(tmp_path, doc)).read_text('utf-8')

@@ -53,6 +53,7 @@ _RESERVED_GENERATED_CLASS_NAMES: frozenset[str] = frozenset(
         'Optional',
         'Literal',
         'Enum',
+        'StrEnum',
         # Classes the generated package defines and imports next to the models:
         # a schema of the same name would shadow them -- ``client or Client()``
         # in endpoints.py would build the model, ``from pkg import Client``

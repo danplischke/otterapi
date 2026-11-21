@@ -8,11 +8,14 @@ Each case compiled and imported but generated the wrong thing, silently:
 3. A schema named like a class the package itself defines (``Client``,
    ``Query``, ``NotFoundError``) shadowed it.
 4. Which field names count as reserved depended on the installed pydantic.
+5. String enums are ``StrEnum`` now that 3.11 is the oldest target; values
+   YAML read as booleans must not break them.
 """
 
 import importlib
 import json
 import sys
+from enum import StrEnum
 from pathlib import Path
 
 import pytest
@@ -183,3 +186,30 @@ def test_reserved_names_cover_installed_pydantic():
     # this flags a pydantic release that adds a public BaseModel name.
     public = {n for n in dir(BaseModel) if not n.startswith('_')}
     assert public <= _PYDANTIC_RESERVED_NAMES, sorted(public - _PYDANTIC_RESERVED_NAMES)
+
+
+class TestStringEnums:
+    def test_string_enums_are_strenums_and_coerce_yaml_booleans(self, tmp_path):
+        # YAML 1.1 reads unquoted ``ON`` / ``OFF`` as booleans; a ``type:
+        # string`` enum must still import (StrEnum rejects non-str values).
+        spec = _spec(
+            {
+                'A': _object(
+                    {
+                        'mode': {
+                            'type': 'string',
+                            'enum': [True, False, 'AUTO'],
+                            'default': 'AUTO',
+                        },
+                        'level': {'type': 'integer', 'enum': [1, 2]},
+                    }
+                )
+            }
+        )
+        pkg = _generate(tmp_path, 'strenums', spec)
+        mode_enum = type(pkg.models.A().mode)
+        assert issubclass(mode_enum, StrEnum)
+        assert [m.value for m in mode_enum] == ['True', 'False', 'AUTO']
+        assert str(pkg.models.A().mode) == 'AUTO'
+        level = pkg.models.A.model_validate({'level': 2}).level
+        assert not isinstance(level, str) and level.value == 2

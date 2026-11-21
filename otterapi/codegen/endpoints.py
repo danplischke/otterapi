@@ -25,7 +25,7 @@ import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, Self, cast
 
 from otterapi.codegen.ast_utils import (
     HTTP_MODULE,
@@ -45,10 +45,6 @@ from otterapi.codegen.ast_utils import (
 from otterapi.openapi.constants import MediaType
 
 if TYPE_CHECKING:
-    # typing.Self is 3.11+, and otterapi still supports 3.10. Annotations
-    # are deferred above, so the name is only needed by a type checker.
-    from typing import Self
-
     from otterapi.codegen.types import Parameter, RequestBodyInfo, ResponseInfo, Type
 
 # String annotations for the optional dataframe-conversion return types

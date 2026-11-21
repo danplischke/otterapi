@@ -12,7 +12,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -71,7 +71,7 @@ def _expand_env_vars_recursive(obj: Any) -> Any:
         return obj
 
 
-class SplitStrategy(str, Enum):
+class SplitStrategy(StrEnum):
     """Strategy for splitting endpoints into modules."""
 
     NONE = 'none'  # No splitting, all endpoints in one file
@@ -116,7 +116,7 @@ class EndpointDataFrameConfig(BaseModel):
     model_config = {'extra': 'forbid'}
 
 
-class PaginationStyle(str, Enum):
+class PaginationStyle(StrEnum):
     """Style of pagination used by an API endpoint."""
 
     OFFSET = 'offset'  # Offset/limit based pagination
@@ -1254,12 +1254,12 @@ class DocumentConfig(BaseModel):
         ),
     )
 
-    target_python: Literal['3.10', '3.11', '3.12', '3.13', '3.14'] = Field(
-        default='3.10',
+    target_python: Literal['3.11', '3.12', '3.13', '3.14'] = Field(
+        default='3.11',
         description=(
             'Oldest Python version the generated code has to run on. The '
             'default keeps the emitted runtime helpers compatible with '
-            'Python 3.10. From "3.12" on, the helpers use PEP 695 type '
+            'Python 3.11. From "3.12" on, the helpers use PEP 695 type '
             'parameters (``def paginate_offset[T](...)``) instead of module-'
             'level ``TypeVar``s, which is what linters configured for a modern '
             'Python expect (the UP047 rule in ruff).'
@@ -1474,12 +1474,7 @@ def load_toml(path: str | Path) -> dict:
         FileNotFoundError: If the file doesn't exist.
         KeyError: If the file doesn't contain otterapi configuration.
     """
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
-        # tomllib landed in 3.11; tomli is the same parser, installed via the
-        # version-conditional dependency in pyproject.toml.
-        import tomli as tomllib  # type: ignore[no-redef]
+    import tomllib
 
     path = Path(path)
     if not path.exists():

@@ -305,7 +305,7 @@ def test_generated_package_passes_ruff(fixture: str, overrides: dict, tmp_path: 
             '--select',
             _RUFF_RULES,
             '--target-version',
-            'py310',
+            'py311',
             '--output-format',
             'concise',
             str(tmp_path),

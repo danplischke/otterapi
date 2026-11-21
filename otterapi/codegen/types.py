@@ -663,7 +663,7 @@ class TypeGenerator(OpenAPIProcessor):
                 continue
             existing_class = existing_type.implementation_ast
             if not any(
-                isinstance(base, ast.Name) and base.id == 'Enum'
+                isinstance(base, ast.Name) and base.id in ('Enum', 'StrEnum')
                 for base in existing_class.bases
             ):
                 continue
@@ -688,7 +688,7 @@ class TypeGenerator(OpenAPIProcessor):
         return f'{name}{counter}'
 
     @staticmethod
-    def _build_enum_member_assignments(schema: Schema) -> list[ast.stmt]:
+    def _build_enum_member_assignments(values: list[Any]) -> list[ast.stmt]:
         """Build ``NAME = 'value'`` assignments for each non-null enum value.
 
         Sanitizes values into valid identifiers and disambiguates collisions
@@ -696,7 +696,7 @@ class TypeGenerator(OpenAPIProcessor):
         """
         enum_body: list[ast.stmt] = []
         seen_member_names: dict[str, int] = {}
-        for value in schema.enum or []:
+        for value in values:
             if value is None:
                 continue
             if isinstance(value, str):
@@ -720,6 +720,20 @@ class TypeGenerator(OpenAPIProcessor):
             )
         return enum_body
 
+    @staticmethod
+    def _enum_type_is_string(t: Any) -> bool:
+        """Whether an enum schema's ``type`` is string (or a nullable string).
+
+        ``schema.type`` may be a list -- a nullable type array such as
+        ``["string", "null"]``.
+        """
+        if isinstance(t, list):
+            return any(
+                (hasattr(item, 'value') and item.value == 'string') or item == 'string'
+                for item in t
+            )
+        return bool(t and hasattr(t, 'value') and t.value == 'string')
+
     def _create_enum_type(
         self,
         schema: Schema,
@@ -740,38 +754,35 @@ class TypeGenerator(OpenAPIProcessor):
         """
         enum_name = self._resolve_enum_name(schema, name, base_name, field_name)
 
-        enum_values_key = tuple(
-            sorted(
-                (type(v).__name__, str(v)) for v in (schema.enum or []) if v is not None
-            )
-        )
+        # A ``type: string`` enum is a StrEnum, whose members must be str. YAML
+        # 1.1 reads unquoted ``ON`` / ``OFF`` / ``yes`` as booleans, so coerce
+        # such values with ``str()`` -- what the former ``(str, Enum)`` base did
+        # to them at runtime -- instead of failing at import.
+        is_string_enum = self._enum_type_is_string(schema.type)
+        values = [
+            v if isinstance(v, str) or not is_string_enum else str(v)
+            for v in (schema.enum or [])
+            if v is not None
+        ]
+
+        enum_values_key = tuple(sorted((type(v).__name__, str(v)) for v in values))
         existing = self._find_existing_identical_enum(enum_values_key)
         if existing is not None:
             return existing
 
         enum_name = self._make_unique_enum_name(enum_name)
 
-        enum_body = self._build_enum_member_assignments(schema)
+        enum_body = self._build_enum_member_assignments(values)
         if not enum_body:
             return self._create_literal_type(schema)
 
-        # class EnumName(str, Enum):  # str mixin for string enums
+        # class EnumName(StrEnum):  # string enums; plain Enum otherwise
         #     MEMBER = 'value'
-        # schema.type may be a list (nullable type array like ["string", "null"])
-        def _type_is_string(t) -> bool:
-            if isinstance(t, list):
-                return any(
-                    (hasattr(item, 'value') and item.value == 'string')
-                    or item == 'string'
-                    for item in t
-                )
-            return bool(t and hasattr(t, 'value') and t.value == 'string')
-
-        bases: list[ast.expr] = (
-            [_name('str'), _name('Enum')]
-            if _type_is_string(schema.type)
-            else [_name('Enum')]
-        )
+        # StrEnum (3.11+, the oldest supported target) is what ``(str, Enum)``
+        # is spelled as on 3.11 (ruff UP042), and its ``str()`` / f-string
+        # rendering is the value rather than ``EnumName.MEMBER``.
+        enum_base = 'StrEnum' if is_string_enum else 'Enum'
+        bases: list[ast.expr] = [_name(enum_base)]
 
         enum_class = ast.ClassDef(
             name=enum_name,
@@ -789,7 +800,7 @@ class TypeGenerator(OpenAPIProcessor):
             implementation_ast=enum_class,
             type='model',  # Treat as model so it gets included in models.py
         )
-        type_.add_implementation_import('enum', 'Enum')
+        type_.add_implementation_import('enum', enum_base)
 
         self.types[enum_name] = type_
 

@@ -873,7 +873,7 @@ def _context_manager_exit_args() -> list[ast.arg]:
     that lint the generated package; the rule wants the exact protocol types
     (or bare ``object``).  The annotations evaluate at runtime -- generated
     modules have no ``from __future__ import annotations`` -- so everything
-    used here has to exist on Python 3.10, which ``type[...] | None`` and
+    used here has to exist on Python 3.11, which ``type[...] | None`` and
     ``TracebackType`` do.
     """
     return [

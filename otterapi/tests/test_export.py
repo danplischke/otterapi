@@ -10,7 +10,7 @@ import json
 import sys
 from datetime import date, datetime, time
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -30,7 +30,7 @@ from otterapi.config import (
 # -----------------------------------------------------------------------------
 
 
-class Status(str, Enum):
+class Status(StrEnum):
     ACTIVE = 'active'
     INACTIVE = 'inactive'
 

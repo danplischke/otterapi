@@ -104,10 +104,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        # requires-python is >=3.10, so the oldest supported version has to
-        # be exercised: typing.Self and tomllib are 3.11+, and nothing
-        # caught that while 3.10 went untested.
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        # requires-python is >=3.11, so the oldest supported version has to
+        # be exercised.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         include:
           - os: macos-latest
             python-version: "3.14"
