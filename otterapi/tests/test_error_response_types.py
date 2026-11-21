@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from otterapi.codegen.codegen import Codegen
@@ -151,7 +151,7 @@ class TestReturnTypeIgnoresErrorResponses:
     def test_a_non_json_error_does_not_make_the_endpoint_return_response(
         self, tmp_path: Path
     ):
-        """A ``text/plain`` 500 used to drag ``httpx.Response`` into the union.
+        """A ``text/plain`` 500 used to drag ``httpx2.Response`` into the union.
 
         That arm also broke parsing outright: ``Response`` is not something a
         ``TypeAdapter`` can validate a JSON body against.
@@ -266,13 +266,13 @@ class TestGeneratedClientReturnsTheTypedModel:
                 pass
 
     @staticmethod
-    def _handler(request: httpx.Request) -> httpx.Response:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == '/entry/4HHB':
-            return httpx.Response(200, json={'rcsb_id': '4HHB', 'title': 'Hemoglobin'})
-        return httpx.Response(404, json={'message': 'unknown entry'})
+            return httpx2.Response(200, json={'rcsb_id': '4HHB', 'title': 'Hemoglobin'})
+        return httpx2.Response(404, json={'message': 'unknown entry'})
 
     def test_a_200_returns_the_model_not_a_dict(self, module):
-        with httpx.Client(transport=httpx.MockTransport(self._handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(self._handler)) as http:
             client = module.Client(http_client=http)
             result = module.get_entry_by_id('4HHB', client=client)
 
@@ -281,8 +281,8 @@ class TestGeneratedClientReturnsTheTypedModel:
 
     @pytest.mark.asyncio
     async def test_the_async_endpoint_returns_the_model_too(self, module):
-        transport = httpx.MockTransport(self._handler)
-        async with httpx.AsyncClient(transport=transport) as http:
+        transport = httpx2.MockTransport(self._handler)
+        async with httpx2.AsyncClient(transport=transport) as http:
             client = module.Client(async_http_client=http)
             result = await module.async_get_entry_by_id('4HHB', client=client)
 
@@ -290,7 +290,7 @@ class TestGeneratedClientReturnsTheTypedModel:
         assert result.title == 'Hemoglobin'
 
     def test_a_404_still_raises_rather_than_parsing(self, module):
-        with httpx.Client(transport=httpx.MockTransport(self._handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(self._handler)) as http:
             client = module.Client(http_client=http, max_retries=0)
             with pytest.raises(module.NotFoundError):
                 module.get_entry_by_id('0000', client=client)

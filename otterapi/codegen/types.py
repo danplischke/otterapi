@@ -275,7 +275,7 @@ class Parameter:
 
     @property
     def uses_default_style(self) -> bool:
-        """True when httpx's own rendering already matches the spec.
+        """True when httpx2's own rendering already matches the spec.
 
         Endpoints only emit a ``param_styles`` entry for parameters that
         deviate, keeping the common case free of generated noise.
@@ -302,7 +302,7 @@ class ResponseInfo:
     def is_error(self) -> bool:
         """Check if this response is one the client raises on.
 
-        The generated client raises on ``response.is_error`` -- httpx's name
+        The generated client raises on ``response.is_error`` -- httpx2's name
         for 4xx and 5xx -- before any parsing happens, so an error response's
         schema never reaches the parser and must not widen the return type.
         """
@@ -408,10 +408,10 @@ class RequestBodyInfo:
 
     @property
     def httpx_param_name(self) -> str:
-        """Get the httpx parameter name for this content type.
+        """Get the httpx2 parameter name for this content type.
 
         Returns:
-            The appropriate httpx parameter name: 'json', 'data', 'files', or 'content'.
+            The appropriate httpx2 parameter name: 'json', 'data', 'files', or 'content'.
         """
         if self.is_json:
             return 'json'

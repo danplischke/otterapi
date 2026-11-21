@@ -28,6 +28,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal, cast
 
 from otterapi.codegen.ast_utils import (
+    HTTP_MODULE,
     ImportDict,
     _argument,
     _assign,
@@ -639,7 +640,7 @@ class ParameterASTBuilder:
         """Build an AST expression for the request body parameter.
 
         Handles different content types and determines the appropriate
-        httpx parameter name to use.
+        httpx2 parameter name to use.
 
         Args:
             body: The RequestBodyInfo object, or None if no body.
@@ -992,7 +993,7 @@ class EndpointFunctionFactory:
         if self.config.response_type:
             return self._response_return_type()
 
-        self._add_import('httpx', 'Response')
+        self._add_import(HTTP_MODULE, 'Response')
         return _name('Response')
 
     def _dataframe_return_type(self) -> ast.expr:
@@ -1089,7 +1090,7 @@ class EndpointFunctionFactory:
 
         if self._is_raw_response_type(self.config.response_type):
             # Raw types skip Pydantic parsing, but a function annotated
-            # ``-> str`` returning the httpx Response is a lie: the caller gets
+            # ``-> str`` returning the httpx2 Response is a lie: the caller gets
             # an object, not the text it asked for. Pull the body out for the
             # scalar cases; a genuine ``-> Response`` is returned as-is.
             attribute = self._raw_response_attribute(self.config.response_type)
@@ -1994,7 +1995,7 @@ def _build_base_request_fn(
             _async_func
         )
         func_name = 'request_async'
-        http_imports = {'httpx': {'AsyncClient'}}
+        http_imports = {HTTP_MODULE: {'AsyncClient'}}
     else:
         request_call = _call(
             func=_name('request'),
@@ -2007,7 +2008,7 @@ def _build_base_request_fn(
         ]
         func_builder = _func
         func_name = 'request_sync'
-        http_imports = {'httpx': {'request'}}
+        http_imports = {HTTP_MODULE: {'request'}}
 
     func_ast = func_builder(
         name=func_name,
@@ -2057,7 +2058,7 @@ def base_async_request_fn(
     """Generate an asynchronous base request function.
 
     Creates a `request_async` function that handles HTTP requests with response
-    validation and model deserialization using httpx.AsyncClient.
+    validation and model deserialization using httpx2.AsyncClient.
 
     Args:
         base_url_var: The variable name containing the base URL configuration.
@@ -2131,7 +2132,7 @@ def get_base_call_keywords(
         response_model_ast: AST expression for the response model type.
         supported_status_codes: List of valid HTTP status codes.
         body_expr: AST expression for the request body.
-        body_param_name: The httpx parameter name for the body.
+        body_param_name: The httpx2 parameter name for the body.
         timeout: Optional request timeout in seconds.
         stream: Whether to stream the response.
         param_styles: AST expression for the non-default ``style``/``explode``
@@ -2431,7 +2432,7 @@ def _resolve_endpoint_return_type(
     """Resolve the endpoint's return annotation, registering imports in place."""
     if response_model and response_model.annotation_ast is not None:
         return response_model.annotation_ast
-    imports.setdefault('httpx', set()).add('Response')
+    imports.setdefault(HTTP_MODULE, set()).add('Response')
     return _name('Response')
 
 

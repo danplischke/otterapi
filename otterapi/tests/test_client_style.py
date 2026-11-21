@@ -14,7 +14,7 @@ import json
 import sys
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from pydantic import ValidationError
 
@@ -49,41 +49,41 @@ _PAGES = {
 }
 
 
-def _paginated_handler(request: httpx.Request) -> httpx.Response:
+def _paginated_handler(request: httpx2.Request) -> httpx2.Response:
     offset = int(dict(request.url.params).get('offset', 0))
-    return httpx.Response(200, json=_PAGES.get(offset, []))
+    return httpx2.Response(200, json=_PAGES.get(offset, []))
 
 
-def _nested_handler(request: httpx.Request) -> httpx.Response:
+def _nested_handler(request: httpx2.Request) -> httpx2.Response:
     if request.url.path == '/identity/users':
-        return httpx.Response(200, json=[{'id': 1, 'name': 'alice'}])
+        return httpx2.Response(200, json=[{'id': 1, 'name': 'alice'}])
     if request.url.path == '/identity/users/1':
-        return httpx.Response(200, json={'id': 1, 'name': 'alice'})
+        return httpx2.Response(200, json={'id': 1, 'name': 'alice'})
     if request.url.path == '/billing/invoices':
-        return httpx.Response(200, json=[{'id': 9, 'amount': 4.2}])
-    return httpx.Response(404, json={'detail': 'unknown route'})
+        return httpx2.Response(200, json=[{'id': 9, 'amount': 4.2}])
+    return httpx2.Response(404, json={'detail': 'unknown route'})
 
 
-def _mock_handler(request: httpx.Request) -> httpx.Response:
+def _mock_handler(request: httpx2.Request) -> httpx2.Response:
     if request.url.path == '/users' and request.method == 'GET':
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json=[
                 {'id': 1, 'username': 'alice', 'age': 30, 'tags': ['admin']},
                 {'id': 2, 'username': 'bob_2', 'age': 28, 'tags': []},
             ],
         )
-    return httpx.Response(404, json={'detail': 'unknown route'})
+    return httpx2.Response(404, json={'detail': 'unknown route'})
 
 
-def _tagged_handler(request: httpx.Request) -> httpx.Response:
+def _tagged_handler(request: httpx2.Request) -> httpx2.Response:
     if request.url.path == '/users':
-        return httpx.Response(200, json=[{'id': 1, 'name': 'alice'}])
+        return httpx2.Response(200, json=[{'id': 1, 'name': 'alice'}])
     if request.url.path == '/users/1':
-        return httpx.Response(200, json={'id': 1, 'name': 'alice'})
+        return httpx2.Response(200, json={'id': 1, 'name': 'alice'})
     if request.url.path == '/orders':
-        return httpx.Response(200, json=[{'id': 7, 'total': 9.5}])
-    return httpx.Response(404, json={'detail': 'unknown route'})
+        return httpx2.Response(200, json=[{'id': 7, 'total': 9.5}])
+    return httpx2.Response(404, json={'detail': 'unknown route'})
 
 
 def _generate(target: Path, **overrides) -> None:
@@ -154,7 +154,7 @@ class TestSyncClient:
     def test_method_delegates_and_returns_models(self, client_style_module):
         Client = client_style_module.Client
         User = client_style_module.User
-        with httpx.Client(transport=httpx.MockTransport(_mock_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_mock_handler)) as http:
             client = Client(http_client=http)
             users = client.list_users()
         assert [u.username for u in users] == ['alice', 'bob_2']
@@ -164,10 +164,10 @@ class TestSyncClient:
         Client = client_style_module.Client
         BaseAPIError = client_style_module.BaseAPIError
 
-        def fail(_request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={'detail': 'nope'})
+        def fail(_request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(404, json={'detail': 'nope'})
 
-        with httpx.Client(transport=httpx.MockTransport(fail)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(fail)) as http:
             with pytest.raises(BaseAPIError):
                 Client(http_client=http).list_users()
 
@@ -177,8 +177,8 @@ class TestAsyncClient:
     async def test_method_delegates_and_returns_models(self, client_style_module):
         AsyncClient = client_style_module.AsyncClient
         User = client_style_module.User
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_mock_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_mock_handler)
         ) as http:
             client = AsyncClient(async_http_client=http)
             users = await client.list_users()
@@ -202,7 +202,7 @@ class TestResourceStyle:
     def test_sync_resource_call_returns_models(self, resource_style_module):
         Client = resource_style_module.Client
         User = resource_style_module.User
-        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_tagged_handler)) as http:
             client = Client(http_client=http)
             users = client.users.list_users()
             orders = client.orders.list_orders()
@@ -213,8 +213,8 @@ class TestResourceStyle:
     @pytest.mark.asyncio
     async def test_async_resource_call_returns_models(self, resource_style_module):
         AsyncClient = resource_style_module.AsyncClient
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_tagged_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_tagged_handler)
         ) as http:
             client = AsyncClient(async_http_client=http)
             users = await client.users.list_users()
@@ -258,7 +258,7 @@ class TestSplitClientStyle:
         mod = _import_fresh(tmp_path, 'sr')
         assert 'Client' in mod.__all__ and 'AsyncClient' in mod.__all__
         assert 'list_users' not in mod.__all__
-        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_tagged_handler)) as http:
             client = mod.Client(http_client=http)
             assert [u.name for u in client.users.list_users()] == ['alice']
             assert client.orders.list_orders()[0].total == 9.5
@@ -272,7 +272,7 @@ class TestSplitClientStyle:
         mod = _import_fresh(tmp_path, 'sc')
         assert hasattr(mod.Client, 'list_users')
         assert hasattr(mod.Client, 'list_orders')
-        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_tagged_handler)) as http:
             client = mod.Client(http_client=http)
             assert [u.name for u in client.list_users()] == ['alice']
 
@@ -284,8 +284,8 @@ class TestSplitClientStyle:
             module_split={'enabled': True, 'strategy': 'tag'},
         )
         mod = _import_fresh(tmp_path, 'sra')
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_tagged_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_tagged_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
             users = await client.users.list_users()
@@ -323,7 +323,7 @@ class TestNestedResources:
         _generate_nested(tmp_path / f'nst_{naming}', naming)
         mod = _import_fresh(tmp_path, f'nst_{naming}')
         list_users, get_user, list_invoices = names
-        with httpx.Client(transport=httpx.MockTransport(_nested_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_nested_handler)) as http:
             client = mod.Client(http_client=http)
             # Two levels of nesting: client.identity.users.<method>
             users = getattr(client.identity.users, list_users)()
@@ -337,8 +337,8 @@ class TestNestedResources:
     async def test_nested_async(self, tmp_path):
         _generate_nested(tmp_path / 'nst_a', 'path')
         mod = _import_fresh(tmp_path, 'nst_a')
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_nested_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_nested_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
             users = await client.identity.users.identity_users_list()
@@ -377,7 +377,7 @@ class TestResultObjects:
         )
         mod = _import_fresh(tmp_path, 'ro')
         out = tmp_path / 'out.csv'
-        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_paginated_handler)) as http:
             client = mod.Client(http_client=http)
             assert [r.id for r in client.items.list_items().all()] == [1, 2, 3]
             assert client.items.list_items().to_pandas().shape == (3, 2)
@@ -394,8 +394,8 @@ class TestResultObjects:
             dataframe={'enabled': True, 'pandas': True},
         )
         mod = _import_fresh(tmp_path, 'roa')
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_paginated_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_paginated_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
             assert [r.id for r in await client.items.list_items().all()] == [1, 2, 3]
@@ -410,7 +410,7 @@ class TestResultObjects:
             dataframe={'enabled': True, 'pandas': True},
         )
         mod = _import_fresh(tmp_path, 'ros')
-        with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_tagged_handler)) as http:
             client = mod.Client(http_client=http)
             listed = client.users.list_users()
             assert type(listed).__name__ == 'Query'
@@ -431,7 +431,7 @@ class TestResultObjects:
             dataframe={'enabled': True, 'pandas': True},
         )
         mod = _import_fresh(tmp_path, 'roc')
-        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_paginated_handler)) as http:
             q = mod.Client(http_client=http).list_items()
             assert type(q).__name__ == 'Query'
             assert [r.id for r in q.all()] == [1, 2, 3]
@@ -481,7 +481,7 @@ class TestFeatureCombinations:
             dataframe={'enabled': True, 'pandas': True},
         )
         mod = _import_fresh(tmp_path, 'sro')
-        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_paginated_handler)) as http:
             client = mod.Client(http_client=http)
             q = client.items.list_items()
             assert type(q).__name__ == 'Query'
@@ -497,12 +497,12 @@ class TestFeatureCombinations:
         )
         mod = _import_fresh(tmp_path, 'unw')
 
-        def handler(_r: httpx.Request) -> httpx.Response:
-            return httpx.Response(
+        def handler(_r: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
                 200, json={'data': [{'id': 1}, {'id': 2}], 'status': 'ok'}
             )
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             result = mod.Client(http_client=http).items.list_items()
         assert [i.id for i in result] == [1, 2]
 
@@ -632,7 +632,7 @@ class TestComposedFacade:
                 return [i.name for i in self.items().all()]
 
         out = tmp_path / 'items.csv'
-        with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_paginated_handler)) as http:
             catalog = Catalog(mod.Client(http_client=http))
             assert isinstance(catalog.items(), mod.Query)
             assert catalog.item_names() == ['a', 'b', 'c']
@@ -660,8 +660,8 @@ class TestComposedFacade:
                 return self._api.list_items()
 
         out = tmp_path / 'items_async.csv'
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_paginated_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_paginated_handler)
         ) as http:
             catalog = Catalog(mod.AsyncClient(async_http_client=http))
             assert isinstance(catalog.items(), mod.AsyncQuery)
@@ -688,10 +688,10 @@ class TestComposedFacade:
                 except mod.BaseAPIError as e:
                     raise DirectoryError(e.status_code) from e
 
-        def fail(_request: httpx.Request) -> httpx.Response:
-            return httpx.Response(503, json={'detail': 'down'})
+        def fail(_request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(503, json={'detail': 'down'})
 
-        with httpx.Client(transport=httpx.MockTransport(fail)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(fail)) as http:
             with pytest.raises(DirectoryError) as info:
                 Directory(mod.Client(http_client=http)).users()
         assert info.value.args == (503,)
@@ -906,8 +906,8 @@ class TestReviewRegressions:
             dataframe={'enabled': True, 'pandas': True},
         )
         mod = _import_fresh(tmp_path, 'aq')
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_tagged_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_tagged_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
             assert [u.name async for u in client.users.list_users()] == ['alice']
@@ -957,12 +957,12 @@ class TestReviewRegressions:
         assert _own_public_methods(type(client.user.login)) == {'login_user'}
         assert 'list_invoices' in _own_public_methods(type(client.billing.invoices))
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             if request.url.path == '/pet/findByStatus':
-                return httpx.Response(200, json=[{'id': 1, 'name': 'rex'}])
-            return httpx.Response(404, json={'detail': 'unknown route'})
+                return httpx2.Response(200, json=[{'id': 1, 'name': 'rex'}])
+            return httpx2.Response(404, json={'detail': 'unknown route'})
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             pets = mod.Client(http_client=http).pet.find_by_status.find_pets_by_status()
         assert [p.name for p in pets] == ['rex']
 
@@ -998,12 +998,12 @@ class TestReviewRegressions:
         endpoints = importlib.import_module('xf.endpoints')
         seen: list[str | None] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             seen.append(request.url.params.get('format'))
-            return httpx.Response(200, json=[{'id': 1, 'name': 'a'}])
+            return httpx2.Response(200, json=[{'id': 1, 'name': 'a'}])
 
         out = tmp_path / 'items.csv'
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = mod.Client(http_client=http)
             assert (
                 endpoints.list_items_export(str(out), format_='wide', client=client)
@@ -1185,12 +1185,12 @@ class TestReviewRegressions:
         endpoints = importlib.import_module('xb.endpoints')
         seen: list[dict] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             seen.append(json.loads(request.content))
-            return httpx.Response(200, json=[{'id': 1, 'name': 'a'}])
+            return httpx2.Response(200, json=[{'id': 1, 'name': 'a'}])
 
         out = tmp_path / 'reports.csv'
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = mod.Client(http_client=http)
             assert (
                 endpoints.search_reports_export(
@@ -1228,11 +1228,11 @@ def _two_ops(prefix: str, *, tag: str | None = None, params: list | None = None)
 
 
 def _path_recorder(seen: list[str]):
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request.url.path)
         if request.method == 'POST':
-            return httpx.Response(200, json={'id': 1, 'name': 'x'})
-        return httpx.Response(200, json=[])
+            return httpx2.Response(200, json={'id': 1, 'name': 'x'})
+        return httpx2.Response(200, json=[])
 
     return handler
 
@@ -1287,7 +1287,9 @@ class TestGeneratedIdentifiers:
         )
         mod = _import_fresh(tmp_path, 'seg_pkg')
         seen: list[str] = []
-        with httpx.Client(transport=httpx.MockTransport(_path_recorder(seen))) as http:
+        with httpx2.Client(
+            transport=httpx2.MockTransport(_path_recorder(seen))
+        ) as http:
             client = mod.Client(http_client=http)
             client.n2fa.codes.list_codes()
             client.repos.import_.list_imports(1)
@@ -1320,8 +1322,8 @@ class TestGeneratedIdentifiers:
         if is_async:
 
             async def run() -> None:
-                async with httpx.AsyncClient(
-                    transport=httpx.MockTransport(handler)
+                async with httpx2.AsyncClient(
+                    transport=httpx2.MockTransport(handler)
                 ) as http:
                     client = mod.AsyncClient(async_http_client=http)
                     await client.user.groups.list_nested_groups()
@@ -1333,7 +1335,7 @@ class TestGeneratedIdentifiers:
 
             asyncio.run(run())
         else:
-            with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
                 client = mod.Client(http_client=http)
                 client.user.groups.list_nested_groups()
                 client.user_groups.list_flat_groups()
@@ -1718,11 +1720,11 @@ class TestExtendedReviewRegressions:
         mod = _import_fresh(tmp_path, 'both')
         seen: list[str] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             seen.append(request.url.path)
-            return httpx.Response(200, json=[])
+            return httpx2.Response(200, json=[])
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = mod.Client(http_client=http)
             assert client.users.search() == []
             assert client.users.search.advanced.advanced_search() == []
@@ -1773,10 +1775,10 @@ class TestExtendedReviewRegressions:
         )
         mod = _import_fresh(tmp_path, 'qnone')
 
-        def handler(_r: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={'status': 'ok'})
+        def handler(_r: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(200, json={'status': 'ok'})
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             assert mod.Client(http_client=http).list_things().all() == []
 
     def test_split_root_reexports_errors_and_helpers(self, tmp_path):

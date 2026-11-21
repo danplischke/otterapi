@@ -47,6 +47,10 @@ __all__ = [
 # Relative import path for the generated models module — single source of truth.
 MODELS_MODULE = '.models'
 
+#: The HTTP library generated clients import. httpx2 is pydantic's maintained
+#: fork of httpx (forked from 0.28.1, package renamed, same public API).
+HTTP_MODULE = 'httpx2'
+
 # Type alias for import dictionaries used throughout codegen.
 ImportDict = dict[str, set[str]]
 

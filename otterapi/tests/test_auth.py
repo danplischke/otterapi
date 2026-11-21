@@ -3,7 +3,7 @@
 ``components.securitySchemes`` used to be parsed and then ignored -- the only
 mention in the whole generator was a count printed by ``otter validate``.  Each
 test here generates a client for one scheme type and drives it through an
-``httpx.MockTransport`` to assert the credential lands where the spec says.
+``httpx2.MockTransport`` to assert the credential lands where the spec says.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 import yaml
 
@@ -69,13 +69,13 @@ def _generate(tmp_path: Path, spec: dict, package: str, **kwargs: Any):
 
 def _send(mod, client):
     """Call the one endpoint and return the request it produced."""
-    captured: dict[str, httpx.Request] = {}
+    captured: dict[str, httpx2.Request] = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         captured['request'] = request
-        return httpx.Response(200, json={})
+        return httpx2.Response(200, json={})
 
-    client._sync_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client._sync_client = httpx2.Client(transport=httpx2.MockTransport(handler))
     mod.get_thing(client=client)
     return captured['request']
 

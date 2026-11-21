@@ -40,7 +40,10 @@ dependencies = [
     # upper bounds only exclude the next major/minor with known breaking
     # changes. Compatible-release pins (~=) here forced every downstream
     # project onto one patch series of httpx and pydantic.
-    "httpx>=0.28.1,<0.29",
+    # httpx2: pydantic's maintained fork of httpx 0.28.1 (same API, renamed
+    # package). 2.14 is the last release supporting Python 3.10; installers
+    # pick the newest release each interpreter supports.
+    "httpx2>=2.14.0,<3",
     "pydantic-settings>=2.11,<3",
     "pydantic[email]>=2.12,<3",
     "pyyaml>=6.0.3,<7",
@@ -64,7 +67,6 @@ test = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=4.0.0",
-    "httpx>=0.25.0",
     "responses>=0.24.0",
     "pytest-mock>=3.12.0",
     "fastapi>=0.139.0",

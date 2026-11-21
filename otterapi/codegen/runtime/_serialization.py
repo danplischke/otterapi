@@ -1,6 +1,6 @@
 """Wire-format serialization for request parameters.
 
-httpx renders query parameters with ``str(value)`` and rejects ``None`` header
+httpx2 renders query parameters with ``str(value)`` and rejects ``None`` header
 values outright.  Neither matches the OpenAPI wire format:
 
 * a ``str``-mixin enum stringifies to ``'PetStatus.AVAILABLE'`` instead of
@@ -170,7 +170,7 @@ def serialize_query_params(
     params: Any,
     styles: Any = None,
 ) -> list[tuple[str, str]] | None:
-    """Flatten query parameters into httpx-ready ``(key, value)`` pairs.
+    """Flatten query parameters into httpx2-ready ``(key, value)`` pairs.
 
     ``None`` and :data:`NOTSET` values are dropped (an unset optional
     parameter is an absent parameter, not an empty one).  A list of pairs
@@ -186,7 +186,7 @@ def serialize_query_params(
             ``('form', True)``.
 
     Returns:
-        The pairs to hand to httpx, or ``None`` when nothing is left to send.
+        The pairs to hand to httpx2, or ``None`` when nothing is left to send.
     """
     if not params:
         return None
@@ -203,7 +203,7 @@ def serialize_query_params(
 def serialize_headers(headers: Any) -> dict[str, str]:
     """Drop unset headers and render the rest as wire strings.
 
-    httpx requires ``str``/``bytes`` header values, so an unset optional header
+    httpx2 requires ``str``/``bytes`` header values, so an unset optional header
     parameter would otherwise raise ``TypeError`` on the default call path.
 
     Args:

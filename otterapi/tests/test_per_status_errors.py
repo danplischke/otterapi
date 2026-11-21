@@ -10,7 +10,7 @@ import importlib
 import sys
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from otterapi.codegen.codegen import Codegen
@@ -101,10 +101,10 @@ class TestDispatch:
         Client = generated_pkg.Client
         list_users = generated_pkg.list_users
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(status, json={'detail': body or 'oops'})
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(status, json={'detail': body or 'oops'})
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = Client(http_client=http)
             list_users(client=client)
 
@@ -163,9 +163,9 @@ class TestFromResponseBodyParsing:
     (flake8-bugbear's BLE001).
     """
 
-    def _response(self, **kwargs) -> httpx.Response:
-        return httpx.Response(
-            request=httpx.Request('GET', 'https://example.test'), **kwargs
+    def _response(self, **kwargs) -> httpx2.Response:
+        return httpx2.Response(
+            request=httpx2.Request('GET', 'https://example.test'), **kwargs
         )
 
     def test_json_detail_is_extracted(self, errors):

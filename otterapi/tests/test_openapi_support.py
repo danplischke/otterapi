@@ -525,7 +525,7 @@ class TestURLLoading:
         assert not loader._is_url('/absolute/path/api.json')
         assert not loader._is_url('relative/path/api.json')
 
-    @patch('httpx.get')
+    @patch('httpx2.get')
     def test_load_from_url(self, mock_get):
         """Test loading schema from URL."""
         mock_response = MagicMock()
@@ -541,7 +541,7 @@ class TestURLLoading:
         assert schema.info.title == 'OpenAPI 3.0 API'
         mock_get.assert_called_once()
 
-    @patch('httpx.get')
+    @patch('httpx2.get')
     def test_load_yaml_from_url(self, mock_get):
         """Test loading YAML schema from URL."""
         mock_response = MagicMock()

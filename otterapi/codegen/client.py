@@ -9,6 +9,7 @@ import ast
 from importlib.resources import files
 
 from otterapi.codegen.ast_utils import (
+    HTTP_MODULE,
     ImportDict,
     _ann_assign,
     _argument,
@@ -476,7 +477,7 @@ including the HTTP status code, error message, and full response body.
 
 Attributes:
     status_code: The HTTP status code of the response.
-    response: The httpx Response object.
+    response: The httpx2 Response object.
     detail: Parsed error detail from the response body (if available).
     body: Raw response body text.
 """
@@ -627,7 +628,7 @@ def generate_base_client_class(
     auth_schemes = auth_schemes or []
     if pydantic_version == 1:
         imports: ImportDict = {
-            'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
+            HTTP_MODULE: {'Client', 'AsyncClient', 'Response', 'TransportError'},
             'typing': {'Any'},
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter'},
@@ -636,7 +637,7 @@ def generate_base_client_class(
         }
     else:
         imports = {
-            'httpx': {'Client', 'AsyncClient', 'Response', 'TransportError'},
+            HTTP_MODULE: {'Client', 'AsyncClient', 'Response', 'TransportError'},
             'typing': {'Any'},
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter', 'RootModel'},
@@ -706,8 +707,8 @@ Args:
     base_url: Base URL for API requests. Default: {default_base_url}
     timeout: Request timeout in seconds. Default: {default_timeout}
     headers: Default headers to include in all requests.
-    http_client: Custom httpx.Client for sync requests (persisted and reused).
-    async_http_client: Custom httpx.AsyncClient for async requests.
+    http_client: Custom httpx2.Client for sync requests (persisted and reused).
+    async_http_client: Custom httpx2.AsyncClient for async requests.
     max_retries: Retry attempts for transient failures (429/5xx/network errors).
         Set to 0 to disable retries. Default: 3.
     retry_statuses: HTTP status codes that trigger a retry.
@@ -1039,7 +1040,7 @@ def _build_validate_response_method() -> ast.FunctionDef:
         RootModel responses.
 
         Args:
-            response: The raw httpx Response object.
+            response: The raw httpx2 Response object.
             validated: The parsed and validated Pydantic model.
 
         Raises:
@@ -1095,7 +1096,7 @@ def _build_before_request_method() -> ast.FunctionDef:
         including retries.
 
         The ``request`` mapping holds the keyword arguments passed to
-        ``httpx.Client.request`` / ``httpx.AsyncClient.request``:
+        ``httpx2.Client.request`` / ``httpx2.AsyncClient.request``:
         ``method``, ``url``, ``params``, ``headers``, ``json``, ``data``,
         ``files``, ``content`` and ``timeout``.
 
@@ -1105,7 +1106,7 @@ def _build_before_request_method() -> ast.FunctionDef:
         here.
 
         Args:
-            request: Mutable mapping of httpx request keyword arguments.
+            request: Mutable mapping of httpx2 request keyword arguments.
 
         Returns:
             The request mapping to send (or None to use the original).
@@ -1160,14 +1161,14 @@ def _build_async_before_request_method() -> ast.AsyncFunctionDef:
         client itself, reassign ``self._async_client`` here.
 
         The ``request`` mapping holds the keyword arguments passed to
-        ``httpx.AsyncClient.request``: ``method``, ``url``, ``params``,
+        ``httpx2.AsyncClient.request``: ``method``, ``url``, ``params``,
         ``headers``, ``json``, ``data``, ``files``, ``content`` and ``timeout``.
 
         Mutate ``request`` in place and/or return the mapping to use. Returning
         ``None`` keeps the (possibly mutated) original.
 
         Args:
-            request: Mutable mapping of httpx request keyword arguments.
+            request: Mutable mapping of httpx2 request keyword arguments.
 
         Returns:
             The request mapping to send (or None to use the original).
@@ -1539,7 +1540,7 @@ def _build_request_dict(
 ) -> ast.Dict:
     """Build the mutable request-kwargs dict passed through ``_before_request``.
 
-    Keys match ``httpx.Client.request`` parameters so the dict can be splatted
+    Keys match ``httpx2.Client.request`` parameters so the dict can be splatted
     with ``**request`` into the send call.
     """
     return ast.Dict(

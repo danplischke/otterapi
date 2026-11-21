@@ -1,8 +1,8 @@
 # 🦦 OtterAPI
 
-> *A cute otter that turns OpenAPI & Swagger specs into type-safe, async Python clients — powered by httpx and Pydantic.*
+> *A cute otter that turns OpenAPI & Swagger specs into type-safe, async Python clients — powered by [httpx2](https://github.com/pydantic/httpx2) and Pydantic.*
 
-**OtterAPI** is a sleek Python library that transforms OpenAPI specifications into clean, type-safe client code with Pydantic models and httpx-based HTTP clients.
+**OtterAPI** is a sleek Python library that transforms OpenAPI specifications into clean, type-safe client code with Pydantic models and httpx2-based HTTP clients.
 
 ## ✨ Features
 
@@ -25,6 +25,12 @@
 ```bash
 pip install otterapi
 ```
+
+Generated clients use [httpx2](https://github.com/pydantic/httpx2), pydantic's
+maintained fork of httpx (same API, package renamed), installed alongside
+otterapi. A custom `http_client` / `async_http_client` you pass in must be an
+`httpx2.Client` / `httpx2.AsyncClient`. Note that httpx2 verifies TLS against
+the operating system's trust store (`truststore`) rather than `certifi`.
 
 ### Basic Usage
 
@@ -972,7 +978,7 @@ class UserDirectory:
 ```
 
 The async facade is the same shape around `AsyncClient`, returning
-`AsyncQuery[User]`. Inject an `httpx` client (`Client(http_client=...)`) to test
+`AsyncQuery[User]`. Inject an `httpx2` client (`Client(http_client=...)`) to test
 the facade against a mock transport.
 
 Two things to know when composing: `resource` is not a good base for a facade

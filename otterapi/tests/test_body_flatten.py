@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 import yaml
 
@@ -147,14 +147,14 @@ class Sent:
     """The last request a generated client produced."""
 
     def __init__(self) -> None:
-        self.request: httpx.Request | None = None
+        self.request: httpx2.Request | None = None
 
     def bind(self, client: Any) -> Any:
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             self.request = request
-            return httpx.Response(200, json={})
+            return httpx2.Response(200, json={})
 
-        client._sync_client = httpx.Client(transport=httpx.MockTransport(handler))
+        client._sync_client = httpx2.Client(transport=httpx2.MockTransport(handler))
         return client
 
     @property
@@ -163,7 +163,7 @@ class Sent:
         return self.request.content.decode()
 
     @property
-    def url(self) -> httpx.URL:
+    def url(self) -> httpx2.URL:
         assert self.request is not None
         return self.request.url
 

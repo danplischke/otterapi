@@ -2,7 +2,7 @@
 
 OtterAPI is a code generation library that creates fully-typed Python client
 code from OpenAPI 3.x specifications. It generates Pydantic models for data
-validation and httpx-based endpoint functions for making API requests.
+validation and httpx2-based endpoint functions for making API requests.
 
 Quick Start:
     >>> from otterapi import Codegen, DocumentConfig

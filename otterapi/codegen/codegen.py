@@ -16,6 +16,7 @@ from upath import UPath
 
 from otterapi.codegen._features import all_features, write_enabled_features
 from otterapi.codegen.ast_utils import (
+    HTTP_MODULE,
     ImportCollector,
     _all,
     _assign,
@@ -282,7 +283,7 @@ class Codegen(OpenAPIProcessor):
     - Writing output files with proper imports and structure
 
     The generator supports OpenAPI 3.x specifications and produces
-    fully typed Python code compatible with httpx for HTTP requests
+    fully typed Python code compatible with httpx2 for HTTP requests
     and Pydantic for data validation.
 
     Attributes:
@@ -386,7 +387,7 @@ class Codegen(OpenAPIProcessor):
         content types for better type safety.
 
         For non-JSON content types (XML, binary, text, etc.), no response type is
-        generated and the endpoint will return the raw httpx.Response object.
+        generated and the endpoint will return the raw httpx2.Response object.
 
         Args:
             operation: The OpenAPI operation to extract responses from.
@@ -416,7 +417,7 @@ class Codegen(OpenAPIProcessor):
             )
 
             # Only generate typed response for JSON content types
-            # For other content types (XML, binary, etc.), return raw httpx.Response
+            # For other content types (XML, binary, etc.), return raw httpx2.Response
             response_type = None
 
             if (
@@ -479,7 +480,7 @@ class Codegen(OpenAPIProcessor):
         """Collect non-JSON response types.
 
         For all non-JSON content types (binary, text, XML, etc.), we return
-        the raw httpx.Response object. This gives users full control over
+        the raw httpx2.Response object. This gives users full control over
         how to handle the response (.content, .text, .json(), etc.).
         """
         # Check if there are any non-JSON responses
@@ -492,7 +493,7 @@ class Codegen(OpenAPIProcessor):
                 type='primitive',
                 annotation_ast=_name('Response'),
             )
-            response_type.add_annotation_import('httpx', 'Response')
+            response_type.add_annotation_import(HTTP_MODULE, 'Response')
             return [response_type]
 
         return []

@@ -1,7 +1,7 @@
 """End-to-end wire-format tests for generated clients.
 
 Every test here generates a real client from a spec, imports it, and drives it
-through an ``httpx.MockTransport`` to assert on the bytes that would go on the
+through an ``httpx2.MockTransport`` to assert on the bytes that would go on the
 wire.  The AST-level tests elsewhere prove the right *code* is emitted; these
 prove the emitted code sends the right *request*, which is the failure mode
 that reaches users.
@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 import yaml
 
@@ -65,21 +65,21 @@ class Recorder:
 
     def __init__(self, payload: Any = None) -> None:
         self.payload = payload if payload is not None else {}
-        self.request: httpx.Request | None = None
+        self.request: httpx2.Request | None = None
 
-    def transport(self) -> httpx.MockTransport:
-        def handler(request: httpx.Request) -> httpx.Response:
+    def transport(self) -> httpx2.MockTransport:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             self.request = request
-            return httpx.Response(200, json=self.payload)
+            return httpx2.Response(200, json=self.payload)
 
-        return httpx.MockTransport(handler)
+        return httpx2.MockTransport(handler)
 
     def bind(self, client: Any) -> Any:
-        client._sync_client = httpx.Client(transport=self.transport())
+        client._sync_client = httpx2.Client(transport=self.transport())
         return client
 
     @property
-    def url(self) -> httpx.URL:
+    def url(self) -> httpx2.URL:
         assert self.request is not None, 'no request was sent'
         return self.request.url
 
@@ -590,9 +590,9 @@ class TestRawResponseTypes:
         """
         mod = _generate(tmp_path, _scalar_body_spec('application/json'), 'wire_raw_str')
         client = mod.Client()
-        client._sync_client = httpx.Client(
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, text='hello')
+        client._sync_client = httpx2.Client(
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, text='hello')
             )
         )
         assert mod.get_blob(client=client) == 'hello'
@@ -605,13 +605,13 @@ class TestRawResponseTypes:
         package = 'wire_raw_' + content_type.split('/')[1].replace('-', '_')
         mod = _generate(tmp_path, _scalar_body_spec(content_type), package)
         client = mod.Client()
-        client._sync_client = httpx.Client(
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, text='hello')
+        client._sync_client = httpx2.Client(
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, text='hello')
             )
         )
         result = mod.get_blob(client=client)
-        assert isinstance(result, httpx.Response)
+        assert isinstance(result, httpx2.Response)
         assert result.text == 'hello'
 
 

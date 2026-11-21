@@ -30,6 +30,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
+    HTTP_MODULE,
     MODELS_MODULE,
     ImportCollector,
     _all,
@@ -54,7 +55,7 @@ ASYNC_PREFIX = 'async_'
 # real imports come from the endpoint sink (see ``_build_imports``); this map
 # is consulted only for names the sink does not provide.
 _NAME_IMPORTS: dict[str, tuple[str, str]] = {
-    'Response': ('httpx', 'Response'),
+    'Response': (HTTP_MODULE, 'Response'),
     'Iterator': ('collections.abc', 'Iterator'),
     'AsyncIterator': ('collections.abc', 'AsyncIterator'),
     'Any': ('typing', 'Any'),
