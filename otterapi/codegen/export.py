@@ -377,13 +377,15 @@ def _build_export_function(
     target_returns_optional: bool = False,
     omit_page_size: bool = False,
     start_knob: tuple[str, str] | None = None,
+    default_page_size: int = 100,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Shared builder body for both standalone + paginated export wrappers.
 
     A paginated wrapper mirrors its ``_iter`` target's knobs exactly:
     ``start_knob`` is the starting-position argument (``offset`` / ``cursor``
-    / ``page``) and ``omit_page_size`` drops ``page_size`` for a cursor
-    paginator with ``send_page_size: false``. Anything else would either be
+    / ``page``), ``page_size`` defaults to the paginator's configured
+    ``default_page_size``, and ``omit_page_size`` drops ``page_size`` for a
+    cursor paginator with ``send_page_size: false``. Anything else would either be
     silently ignored or be forwarded to the file writer by ``**format_kwargs``.
     """
     # Local import avoids a circular dependency at module load.
@@ -423,7 +425,9 @@ def _build_export_function(
                 )
             )
         if not omit_page_size:
-            paging_knobs.append(('page_size', _name('int'), ast.Constant(value=100)))
+            paging_knobs.append(
+                ('page_size', _name('int'), ast.Constant(value=default_page_size))
+            )
         paging_knobs.append(
             (
                 'max_items',
@@ -604,4 +608,7 @@ def build_standalone_paginated_export_fn(
         default_batch_size=default_batch_size,
         omit_page_size=pagination_omits_page_size(pagination_style, pagination_config),
         start_knob=pagination_start_knob(pagination_style),
+        # The same default ``_iter`` declares, so an unset ``page_size`` asks
+        # for the configured page size rather than a hard-coded 100.
+        default_page_size=(pagination_config or {}).get('default_page_size', 100),
     )

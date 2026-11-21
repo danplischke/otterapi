@@ -385,6 +385,7 @@ def build_client_module_body(
     endpoints_module: str = 'endpoints',
     module_of: dict[str, str] | None = None,
     use_query: bool = False,
+    reserved_members: frozenset[str] = frozenset(),
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
@@ -406,6 +407,11 @@ def build_client_module_body(
         use_query: Collapse each endpoint family (core request plus its
             pagination / DataFrame / export variants) into one method returning
             a deferred ``Query`` instead of one method per variant.
+        reserved_members: Extra names that must stay free on ``Client`` /
+            ``AsyncClient`` besides the fixed base-client members -- the
+            per-spec auth attributes ``BaseClient.__init__`` assigns
+            (``self.<scheme>``), which a same-named method or resource
+            accessor would otherwise shadow or turn read-only.
         sync_class_name: Name of the generated sync client class.
         async_class_name: Name of the generated async client class.
 
@@ -440,8 +446,9 @@ def build_client_module_body(
 
     # Methods live on Client / AsyncClient, so a method named like a base-client
     # member (close, headers, ...) must be renamed to avoid shadowing it.
-    _avoid_member_collisions(sync_methods, _CLIENT_RESERVED_MEMBERS)
-    _avoid_member_collisions(async_methods, _CLIENT_RESERVED_MEMBERS)
+    reserved = _CLIENT_RESERVED_MEMBERS | reserved_members
+    _avoid_member_collisions(sync_methods, reserved)
+    _avoid_member_collisions(async_methods, reserved)
 
     sync_body: list[ast.stmt] = [*sync_methods] or [ast.Pass()]
     async_body: list[ast.stmt] = [*async_methods] or [ast.Pass()]
@@ -802,6 +809,37 @@ def _endpoint_methods(
     return sorted(built, key=lambda m: m.name)
 
 
+def _resource_tree(
+    function_defs: Sequence[ast.FunctionDef | ast.AsyncFunctionDef],
+    resource_path_of: Mapping[str, tuple[str, ...]],
+) -> tuple[
+    dict[tuple[str, ...], list[ast.FunctionDef | ast.AsyncFunctionDef]],
+    set[tuple[str, ...]],
+    dict[tuple[str, ...], set[str]],
+]:
+    """The resource tree: functions per path, every node, children per node.
+
+    Returns ``(functions_at, all_paths, children_of)``: the functions living at
+    exactly each resource path, every node including ancestors (``()`` is the
+    client itself), and each node's child segment names.
+    """
+    functions_at: dict[
+        tuple[str, ...], list[ast.FunctionDef | ast.AsyncFunctionDef]
+    ] = {}
+    for fn in function_defs:
+        functions_at.setdefault(resource_path_of.get(fn.name, ()), []).append(fn)
+
+    all_paths: set[tuple[str, ...]] = set()
+    for path in functions_at:
+        for i in range(len(path) + 1):
+            all_paths.add(path[:i])
+    children_of: dict[tuple[str, ...], set[str]] = {}
+    for path in all_paths:
+        if path:
+            children_of.setdefault(path[:-1], set()).add(path[-1])
+    return functions_at, all_paths, children_of
+
+
 def build_resource_client_module_body(
     function_defs: list[ast.FunctionDef | ast.AsyncFunctionDef],
     resolver: TypeResolver,
@@ -814,6 +852,7 @@ def build_resource_client_module_body(
     module_of: dict[str, str] | None = None,
     use_query: bool = False,
     method_name_of: Mapping[str, str] | None = None,
+    reserved_members: frozenset[str] = frozenset(),
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
@@ -835,22 +874,9 @@ def build_resource_client_module_body(
         function_defs, module_of, endpoints_module
     )
 
-    # Functions living at exactly each resource path.
-    functions_at: dict[
-        tuple[str, ...], list[ast.FunctionDef | ast.AsyncFunctionDef]
-    ] = {}
-    for fn in function_defs:
-        functions_at.setdefault(resource_path_of.get(fn.name, ()), []).append(fn)
-
-    # Every node incl. ancestors, and each node's child segment names.
-    all_paths: set[tuple[str, ...]] = set()
-    for path in functions_at:
-        for i in range(len(path) + 1):
-            all_paths.add(path[:i])
-    children_of: dict[tuple[str, ...], set[str]] = {}
-    for path in all_paths:
-        if path:
-            children_of.setdefault(path[:-1], set()).add(path[-1])
+    functions_at, all_paths, children_of = _resource_tree(
+        function_defs, resource_path_of
+    )
 
     all_methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
 
@@ -869,6 +895,41 @@ def build_resource_client_module_body(
             use_query=use_query,
             method_name_of=method_name_of,
         )
+
+    def own_methods(
+        path: tuple[str, ...], is_async: bool
+    ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+        """Methods at ``path``, minus any that a sub-resource's name takes over."""
+        children = children_of.get(path, set())
+        return [m for m in methods_for(path, is_async) if m.name not in children]
+
+    def call_method(
+        path: tuple[str, ...], is_async: bool
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        """The parent's same-named method, as this sub-resource's ``__call__``.
+
+        When a method and a sub-resource share a name (``GET /users`` with
+        operationId ``search`` next to ``/users/search/advanced``), the
+        accessor keeps the name and the sub-resource becomes callable:
+        ``client.users.search()`` still runs the operation and
+        ``client.users.search.advanced_search()`` reaches the child. Renaming
+        either one instead would break existing callers whenever the other is
+        added to the spec.
+        """
+        parent, segment = path[:-1], path[-1]
+        for method in _endpoint_methods(
+            functions_at.get(parent, []),
+            is_async=is_async,
+            alias_of=alias_of,
+            owner_of=owner_of,
+            client_value=_attr('self', '_client'),
+            use_query=use_query,
+            method_name_of=method_name_of,
+        ):
+            if method.name == segment:
+                method.name = '__call__'
+                return method
+        return None
 
     def child_props(
         path: tuple[str, ...], is_async: bool, *, on_client: bool
@@ -889,7 +950,10 @@ def build_resource_client_module_body(
         if not path:
             continue
         for is_async in (False, True):
-            methods = methods_for(path, is_async)
+            methods = own_methods(path, is_async)
+            call = call_method(path, is_async)
+            if call is not None:
+                methods.insert(0, call)
             all_methods.extend(methods)
             members: list[ast.FunctionDef | ast.AsyncFunctionDef] = [
                 *child_props(path, is_async, on_client=False),
@@ -905,13 +969,13 @@ def build_resource_client_module_body(
     # Root: methods + top-level resource accessors live on Client / AsyncClient,
     # so they must not shadow the base client's own members.
     def client_class(name: str, is_async: bool) -> ast.ClassDef:
-        methods = methods_for((), is_async)
+        methods = own_methods((), is_async)
         all_methods.extend(methods)
         members: list[ast.FunctionDef | ast.AsyncFunctionDef] = [
             *child_props((), is_async, on_client=True),
             *methods,
         ]
-        _avoid_member_collisions(members, _CLIENT_RESERVED_MEMBERS)
+        _avoid_member_collisions(members, _CLIENT_RESERVED_MEMBERS | reserved_members)
         class_body: list[ast.stmt] = [*members] or [ast.Pass()]
         return _class_def(name, [_name('_BaseClient')], class_body)
 

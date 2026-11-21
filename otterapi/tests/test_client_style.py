@@ -1393,24 +1393,37 @@ def _class_surface(package_dir: Path) -> dict[tuple[str, str], tuple[str, ...]]:
     name that silently moved to a different operation.
     """
     tree = ast.parse((package_dir / '_clients.py').read_text())
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+
+    def signature(member: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]:
+        returns = ast.unparse(member.returns) if member.returns else ''
+        calls = sorted(
+            {
+                node.attr
+                for node in ast.walk(member)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id.startswith(('_endpoints', '_ep_'))
+            }
+        )
+        return (returns, *calls)
+
+    # A sub-resource that took over a method's name is callable: calling the
+    # accessor's result runs that method, so it counts as the same member.
+    call_of = {
+        cls.name: signature(member)
+        for cls in classes
+        for member in cls.body
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and member.name == '__call__'
+    }
     surface: dict[tuple[str, str], tuple[str, ...]] = {}
-    for cls in tree.body:
-        if not isinstance(cls, ast.ClassDef):
-            continue
+    for cls in classes:
         for member in cls.body:
             if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            returns = ast.unparse(member.returns) if member.returns else ''
-            calls = sorted(
-                {
-                    node.attr
-                    for node in ast.walk(member)
-                    if isinstance(node, ast.Attribute)
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id.startswith(('_endpoints', '_ep_'))
-                }
-            )
-            surface[(cls.name, member.name)] = (returns, *calls)
+            sig = signature(member)
+            surface[(cls.name, member.name)] = call_of.get(sig[0], sig)
     return surface
 
 
@@ -1492,6 +1505,11 @@ def _grown_paths() -> dict:
         )
     }
     paths['/list'] = {'get': _tagged(_list_op('list'), 'users')}
+    # Under resource_naming="path" this adds a ``list_users`` sub-resource next
+    # to the existing ``list_users`` method.
+    paths['/users/list_users/archived'] = {
+        'get': _tagged(_list_op('list_archived_users'), 'users')
+    }
     paths['/user_groups']['post'] = _tagged(
         {'operationId': 'create_user_group', 'responses': _ITEM_RESPONSE}, 'groups'
     )
@@ -1667,9 +1685,126 @@ class TestOperationIdNaming:
                 '/identity/users/search': {'get': _list_op('identity.users.search')},
                 '/identity/groups': {'get': _list_op('identity.groups.list')},
                 '/list': {'get': _list_op('list')},
+                # A ``list`` sub-resource next to the existing ``list`` method.
+                '/identity/users/archived': {
+                    'get': _list_op('identity.users.list.archived')
+                },
             },
         )
         _gen(tmp_path / 'opa', grown, **config)
         before = _class_surface(tmp_path / 'opb')
         assert before
         assert not _surface_regressions(before, _class_surface(tmp_path / 'opa'))
+
+
+class TestExtendedReviewRegressions:
+    def test_method_and_subresource_sharing_a_name_both_work(self, tmp_path):
+        id_param = _ID_PARAM
+        spec = _write_spec(
+            tmp_path / 'both.json',
+            {
+                '/users': {'get': _list_op('search')},
+                '/users/search/advanced': {'get': _list_op('advanced_search')},
+                '/users/{id}': {
+                    'get': {
+                        'operationId': 'get_user',
+                        'parameters': id_param,
+                        'responses': _ITEM_RESPONSE,
+                    }
+                },
+            },
+        )
+        _gen(tmp_path / 'both', spec, client_style='resource', resource_naming='path')
+        mod = _import_fresh(tmp_path, 'both')
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, json=[])
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = mod.Client(http_client=http)
+            assert client.users.search() == []
+            assert client.users.search.advanced.advanced_search() == []
+        assert seen == ['/users', '/users/search/advanced']
+
+    @pytest.mark.parametrize('style', ['client', 'resource'])
+    def test_auth_attribute_is_never_shadowed(self, tmp_path, style):
+        spec = {
+            'openapi': '3.0.3',
+            'info': {'title': 'T', 'version': '1'},
+            'paths': {
+                '/oauth2/token': {
+                    'post': {
+                        'operationId': 'oauth2',
+                        'tags': ['oauth2'],
+                        'responses': _ITEM_RESPONSE,
+                    }
+                },
+                '/oauth2/revoke': {
+                    'post': {
+                        'operationId': 'revoke',
+                        'tags': ['oauth2'],
+                        'responses': _ITEM_RESPONSE,
+                    }
+                },
+            },
+            'components': {
+                'schemas': {'Item': _ITEM_SCHEMA},
+                'securitySchemes': {'oauth2': {'type': 'http', 'scheme': 'bearer'}},
+            },
+            'security': [{'oauth2': []}],
+        }
+        path = tmp_path / f'auth_{style}.json'
+        path.write_text(json.dumps(spec))
+        _gen(tmp_path / f'auth_{style}', path, client_style=style)
+        mod = _import_fresh(tmp_path, f'auth_{style}')
+        client = mod.Client(base_url='https://example.test', oauth2='tok')
+        assert client.oauth2 == 'tok'
+        assert hasattr(type(client), 'oauth2_')  # the method / resource moved aside
+
+    def test_query_all_reads_a_missing_optional_list_as_empty(self, tmp_path):
+        _gen(
+            tmp_path / 'qnone',
+            GOLDEN / 'envelope_optional' / 'spec.yaml',
+            client_style='client',
+            result_objects=True,
+            response_unwrap={'enabled': True, 'data_path': 'data'},
+        )
+        mod = _import_fresh(tmp_path, 'qnone')
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={'status': 'ok'})
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            assert mod.Client(http_client=http).list_things().all() == []
+
+    def test_split_root_reexports_errors_and_helpers(self, tmp_path):
+        _gen(
+            tmp_path / 'split_errs',
+            TAGGED_SPEC,
+            client_style='client',
+            module_split={'enabled': True, 'strategy': 'tag'},
+            pagination={'enabled': True, 'auto_detect': True},
+        )
+        mod = _import_fresh(tmp_path, 'split_errs')
+        assert issubclass(mod.NotFoundError, mod.BaseAPIError)
+        assert {'BaseAPIError', 'NotFoundError', 'paginate_offset'} <= set(mod.__all__)
+
+    def test_export_page_size_defaults_to_the_configured_page_size(self, tmp_path):
+        _gen(
+            tmp_path / 'pgsz',
+            PAGINATED_SPEC,
+            pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 25},
+            export={'enabled': True, 'formats': ['csv']},
+        )
+        src = (tmp_path / 'pgsz' / 'endpoints.py').read_text()
+        for name in ('list_items_iter', 'list_items_export'):
+            fn = _function(src, name)
+            defaults = dict(
+                zip(
+                    (a.arg for a in fn.args.kwonlyargs),
+                    (ast.unparse(d) if d else None for d in fn.args.kw_defaults),
+                )
+            )
+            assert defaults['page_size'] == '25', name

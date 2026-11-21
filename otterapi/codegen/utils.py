@@ -23,8 +23,28 @@ __all__ = ('is_url', 'sanitize_identifier', 'to_snake_case')
 # Names that conflict with Pydantic/typing imports used in the generated
 # models.py.  Schemas whose sanitized name would collide get a trailing ``_``
 # (e.g. a schema named "Field" becomes the class ``Field_``).
+# Error classes every generated client defines in ``_client.py`` and
+# re-exports from the package (``from my_pkg import NotFoundError``).
+EXPORTED_ERROR_NAMES: tuple[str, ...] = (
+    'BaseAPIError',
+    'ClientError',
+    'ServerError',
+    'BadRequestError',
+    'UnauthorizedError',
+    'ForbiddenError',
+    'NotFoundError',
+    'ConflictError',
+    'UnprocessableEntityError',
+    'RateLimitError',
+    'InternalServerError',
+    'BadGatewayError',
+    'ServiceUnavailableError',
+    'GatewayTimeoutError',
+)
+
 _RESERVED_GENERATED_CLASS_NAMES: frozenset[str] = frozenset(
     {
+        # Names imported into models.py.
         'Field',
         'BaseModel',
         'Annotated',
@@ -33,6 +53,15 @@ _RESERVED_GENERATED_CLASS_NAMES: frozenset[str] = frozenset(
         'Optional',
         'Literal',
         'Enum',
+        # Classes the generated package defines and imports next to the models:
+        # a schema of the same name would shadow them -- ``client or Client()``
+        # in endpoints.py would build the model, ``from pkg import Client``
+        # would return it, and ``except pkg.NotFoundError`` would raise.
+        'Client',
+        'AsyncClient',
+        'Query',
+        'AsyncQuery',
+        *EXPORTED_ERROR_NAMES,
     }
 )
 

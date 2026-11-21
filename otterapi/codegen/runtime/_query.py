@@ -75,8 +75,13 @@ class Query(Generic[T]):
         self._export = export
 
     def all(self) -> list[T]:
-        """Fetch and return the full list."""
-        return self._fetch(client=self._client, **self._params)
+        """Fetch and return the full list.
+
+        An endpoint whose list is an optional envelope field returns ``None``
+        when the field is absent; that reads as an empty list here, as it
+        does for ``export``.
+        """
+        return self._fetch(client=self._client, **self._params) or []
 
     def __iter__(self) -> Iterator[T]:
         # Mirrors ``AsyncQuery.__aiter__``: stream page by page when a
@@ -137,8 +142,8 @@ class AsyncQuery(Generic[T]):
         self._export = export
 
     async def all(self) -> list[T]:
-        """Fetch and return the full list."""
-        return await self._fetch(client=self._client, **self._params)
+        """Fetch and return the full list (``None`` reads as empty, see ``Query``)."""
+        return await self._fetch(client=self._client, **self._params) or []
 
     def __aiter__(self) -> AsyncIterator[T]:
         # Mirrors ``Query.__iter__``: without a pagination terminal, plain

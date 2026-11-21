@@ -1250,6 +1250,9 @@ class Codegen(OpenAPIProcessor):
             for module, names in sink.imports.as_dict().items():
                 sink_imports.setdefault(module, set()).update(names)
         endpoints_module = self.config.endpoints_file.replace('.py', '')
+        # BaseClient.__init__ assigns one attribute per auth scheme; a method
+        # or resource accessor of that name must not shadow it.
+        auth_members = frozenset(s.python_name for s in self._auth_schemes())
 
         if self.config.client_style == 'resource':
             resource_path_of = self._resource_path_of(owner_of)
@@ -1267,6 +1270,7 @@ class Codegen(OpenAPIProcessor):
                 module_of=module_of,
                 use_query=self.config.result_objects,
                 method_name_of=method_name_of,
+                reserved_members=auth_members,
             )
         else:
             body, _class_names = build_client_module_body(
@@ -1278,6 +1282,7 @@ class Codegen(OpenAPIProcessor):
                 endpoints_module=endpoints_module,
                 module_of=module_of,
                 use_query=self.config.result_objects,
+                reserved_members=auth_members,
             )
         write_mod(
             body,
@@ -1837,6 +1842,15 @@ class Codegen(OpenAPIProcessor):
         tree = builder.build(endpoints)
 
         # Emit the split modules
+        # The root package re-exports the error hierarchy and enabled runtime
+        # helpers in split mode too, exactly as the single-module layout does.
+        root_reexports: list[ast.stmt] = []
+        root_reexport_names: list[str] = []
+        self._add_reexport(
+            root_reexports, root_reexport_names, '_client', _exported_error_names()
+        )
+        self._add_feature_reexports(root_reexports, root_reexport_names)
+
         emitter = SplitModuleEmitter(
             config=self.config.module_split,
             output_dir=directory,
@@ -1853,6 +1867,8 @@ class Codegen(OpenAPIProcessor):
             result_objects=self.config.result_objects,
             reexport_models=self.config.reexport_models,
             reexport_model_exclude_patterns=self.config.reexport_model_exclude_patterns,
+            root_reexports=root_reexports,
+            root_reexport_names=root_reexport_names,
             format_output=self.format_output,
             validate_output=self.validate_output,
         )

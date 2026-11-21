@@ -628,6 +628,8 @@ class SplitModuleEmitter:
         result_objects: bool = False,
         reexport_models: bool = False,
         reexport_model_exclude_patterns: list[str] | None = None,
+        root_reexports: list[ast.stmt] | None = None,
+        root_reexport_names: list[str] | None = None,
         format_output: bool = True,
         validate_output: bool = True,
     ):
@@ -653,6 +655,11 @@ class SplitModuleEmitter:
                 root ``__init__`` then also exports the result-object runtime.
             reexport_models: Whether to include model names in __all__.
             reexport_model_exclude_patterns: Glob patterns of model names to exclude.
+            root_reexports: Extra import statements for the root ``__init__``
+                (the error hierarchy and enabled runtime helpers), built by the
+                caller exactly as for the single-module layout.
+            root_reexport_names: The names those statements bring in, for
+                ``__all__``.
             format_output: Whether to format generated code with ruff/black.
             validate_output: Whether to validate generated code syntax.
         """
@@ -676,6 +683,8 @@ class SplitModuleEmitter:
         self.reexport_model_exclude_patterns: list[str] = (
             reexport_model_exclude_patterns or []
         )
+        self.root_reexports: list[ast.stmt] = list(root_reexports or [])
+        self.root_reexport_names: list[str] = list(root_reexport_names or [])
         self.format_output = format_output
         self.validate_output = validate_output
         self._emitted_modules: list[EmittedModule] = []
@@ -1002,6 +1011,11 @@ class SplitModuleEmitter:
             )
         )
         all_names.append(base_client_name)
+
+        # The error hierarchy and enabled runtime helpers, as in the
+        # single-module layout (``from my_pkg import NotFoundError``).
+        body.extend(self.root_reexports)
+        all_names.extend(self.root_reexport_names)
 
         # Import and export all models
         model_names = self._get_model_names()

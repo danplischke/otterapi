@@ -27,6 +27,7 @@ from otterapi.codegen.auth import (
     build_auth_init_args,
     build_auth_init_body,
 )
+from otterapi.codegen.utils import EXPORTED_ERROR_NAMES
 
 # Prefix used when building `f'HTTP {status_code} ...'` error messages in generated code
 _HTTP_ERROR_PREFIX = 'HTTP '
@@ -582,22 +583,7 @@ def _resolve_error_class(status_code: int, default: type[BaseAPIError]) -> type[
 
 def _exported_error_names() -> list[str]:
     """Names of every emitted error class for ``__all__`` re-export."""
-    return [
-        'BaseAPIError',
-        'ClientError',
-        'ServerError',
-        'BadRequestError',
-        'UnauthorizedError',
-        'ForbiddenError',
-        'NotFoundError',
-        'ConflictError',
-        'UnprocessableEntityError',
-        'RateLimitError',
-        'InternalServerError',
-        'BadGatewayError',
-        'ServiceUnavailableError',
-        'GatewayTimeoutError',
-    ]
+    return list(EXPORTED_ERROR_NAMES)
 
 
 def generate_api_error_hierarchy() -> list[ast.stmt]:

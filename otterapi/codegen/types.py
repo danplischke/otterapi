@@ -8,6 +8,7 @@ This module provides:
 
 import ast
 import dataclasses
+import keyword
 import logging
 from collections.abc import Iterable
 from datetime import date, datetime, time, timedelta
@@ -60,11 +61,44 @@ _PYTHON_BUILTIN_TYPE_NAMES: frozenset[str] = frozenset(
 # after one of these shadows the parent attribute -- pydantic v2 emits a
 # ``UserWarning`` at class-definition time (an error under ``filterwarnings =
 # error``) and type-checkers flag the incompatible override -- so such fields
-# are suffixed with ``_`` and keep the original name as an alias. Derived from
-# the live class so it tracks the installed pydantic version (covers ``dict``,
-# ``json``, ``copy``, ``validate``, ``schema``, ``model_*`` and friends).
+# are suffixed with ``_`` and keep the original name as an alias.
+#
+# A fixed list (pydantic 2.12's public ``BaseModel`` names, which include the
+# v1 API) rather than ``dir(BaseModel)`` at import time: generated attribute
+# names must not depend on which pydantic happens to be installed where the
+# generator runs. ``test_reserved_names_cover_installed_pydantic`` flags a
+# pydantic release that adds a name.
 _PYDANTIC_RESERVED_NAMES: frozenset[str] = frozenset(
-    name for name in dir(BaseModel) if not name.startswith('_')
+    {
+        'construct',
+        'copy',
+        'dict',
+        'from_orm',
+        'json',
+        'model_computed_fields',
+        'model_config',
+        'model_construct',
+        'model_copy',
+        'model_dump',
+        'model_dump_json',
+        'model_extra',
+        'model_fields',
+        'model_fields_set',
+        'model_json_schema',
+        'model_parametrized_name',
+        'model_post_init',
+        'model_rebuild',
+        'model_validate',
+        'model_validate_json',
+        'model_validate_strings',
+        'parse_file',
+        'parse_obj',
+        'parse_raw',
+        'schema',
+        'schema_json',
+        'update_forward_refs',
+        'validate',
+    }
 )
 
 __all__ = [
@@ -512,6 +546,14 @@ class TypeGenerator(OpenAPIProcessor):
     # that refs back to it would recurse forever; this tracks in-progress unions
     # so the re-entry can fall back to ``Any`` instead.
     _building_unions: set[str] = dataclasses.field(default_factory=set, init=False)
+    # ``$ref`` path -> name of the type generated for it (see schema_to_type).
+    _ref_type_names: dict[str, str] = dataclasses.field(
+        default_factory=dict, init=False
+    )
+    # ``$ref`` path -> registry name its in-progress build is expected to use.
+    _refs_in_progress: dict[str, str] = dataclasses.field(
+        default_factory=dict, init=False
+    )
 
     @staticmethod
     def _rename_type(type_: Type, new_name: str) -> None:
@@ -934,7 +976,17 @@ class TypeGenerator(OpenAPIProcessor):
         field_type: Type,
         is_required: bool = False,
         is_nullable: bool = False,
+        taken: set[str] | None = None,
+        keep: frozenset[str] = frozenset(),
     ) -> ast.AnnAssign:
+        """Build one model field.
+
+        ``taken`` holds the Python names already used by this model's fields
+        and receives this one's. ``keep`` holds the model's property names that
+        are usable as-is; a *renamed* field (``_id`` -> ``field_id``) steps
+        around both, so it never silently replaces a real ``field_id`` property
+        -- whatever order the properties come in.
+        """
         if hasattr(field_schema, 'ref'):
             field_schema, _ = self._resolve_reference(field_schema)
 
@@ -1006,6 +1058,12 @@ class TypeGenerator(OpenAPIProcessor):
             annotation_ast = _union_expr(
                 [field_type.annotation_ast, ast.Constant(value=None)]
             )
+
+        if taken is not None:
+            avoid = taken if sanitized_field_name == field_name else taken | keep
+            while sanitized_field_name in avoid:
+                sanitized_field_name += '_'
+            taken.add(sanitized_field_name)
 
         if sanitized_field_name != field_name:
             field_keywords.append(
@@ -1165,7 +1223,17 @@ class TypeGenerator(OpenAPIProcessor):
         body: list[ast.stmt] = []
         field_types: list[Type] = []
         required_fields = set(schema.required or [])
-        for property_name, property_schema in (schema.properties or {}).items():
+        properties = schema.properties or {}
+        # Property names usable verbatim keep them; renamed ones step around.
+        keep = frozenset(
+            name
+            for name in properties
+            if name.isidentifier()
+            and not keyword.iskeyword(name)
+            and not name.startswith('_')
+        )
+        taken: set[str] = set()
+        for property_name, property_schema in properties.items():
             # Resolve reference to check for nullable
             resolved_schema = cast('Schema', property_schema)
             if hasattr(property_schema, 'ref') and property_schema.ref:
@@ -1185,6 +1253,8 @@ class TypeGenerator(OpenAPIProcessor):
                 type_,
                 is_required,
                 is_nullable,
+                taken=taken,
+                keep=keep,
             )
 
             body.append(field)
@@ -1497,22 +1567,52 @@ class TypeGenerator(OpenAPIProcessor):
         base_name: str | None = None,
         field_name: str | None = None,
     ) -> Type:
-        if isinstance(schema, Reference):
-            ref_name = schema.ref.split('/')[-1]
-            sanitized_ref_name = sanitize_identifier(ref_name)
-            # A named schema is registered under either its ``$ref`` key or a
-            # title-derived name -- e.g. Stripe's component key ``charge``
-            # carries title ``Charge`` -- so check both. Missing the cache here
-            # makes a mutually-recursive ``$ref`` rebuild the model forever
-            # instead of breaking on the cached (possibly still-building) type.
-            for cache_key in (sanitized_ref_name, self._referenced_type_name(schema)):
-                if cache_key and cache_key in self.types:
-                    # If the cached type is still being built, this is a cycle;
-                    # mark the whole in-progress chain that just closed.
-                    if cache_key in self._building:
-                        self._cyclic.update(self._building)
-                    return self.types[cache_key]
+        if not isinstance(schema, Reference):
+            return self._schema_to_type_uncached(schema, base_name, field_name)
 
+        # A ``$ref`` is cached by its own path: the generated model can be named
+        # after the schema's ``title`` rather than its component key (Stripe:
+        # key ``charge``, title ``Charge``), and titles are not unique -- two
+        # schemas titled ``Address`` are different models -- so neither name is
+        # a safe cache key on its own.
+        ref = schema.ref
+        known = self._ref_type_names.get(ref)
+        if known is not None and known in self.types:
+            if known in self._building:
+                self._cyclic.update(self._building)
+            return self.types[known]
+
+        sanitized_ref_name = sanitize_identifier(ref.split('/')[-1])
+        if sanitized_ref_name in self.types:
+            # If the cached type is still being built, this is a cycle;
+            # mark the whole in-progress chain that just closed.
+            if sanitized_ref_name in self._building:
+                self._cyclic.update(self._building)
+            return self.types[sanitized_ref_name]
+
+        # Re-entry while this very ref is still being built (a recursive
+        # schema): break on its own placeholder, registered under the name the
+        # build is using -- which may be the title-derived one.
+        in_progress = self._refs_in_progress.get(ref)
+        if in_progress is not None and in_progress in self._building:
+            self._cyclic.update(self._building)
+            return self.types[in_progress]
+
+        self._refs_in_progress[ref] = self._referenced_type_name(schema) or ''
+        try:
+            type_ = self._schema_to_type_uncached(schema, base_name, field_name)
+        finally:
+            self._refs_in_progress.pop(ref, None)
+        if type_.name and type_.name in self.types:
+            self._ref_type_names[ref] = type_.name
+        return type_
+
+    def _schema_to_type_uncached(
+        self,
+        schema: Schema | Reference,
+        base_name: str | None = None,
+        field_name: str | None = None,
+    ) -> Type:
         schema, schema_name = self._resolve_reference(schema)
 
         # Use schema_name (from $ref) as base_name for nested types if available
