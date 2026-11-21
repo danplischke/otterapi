@@ -307,16 +307,28 @@ def _generate_nested(target: Path, resource_naming: str, **overrides) -> None:
 
 
 class TestNestedResources:
-    @pytest.mark.parametrize('naming', ['path', 'operation_id'])
-    def test_nested_chain_calls(self, tmp_path, naming):
+    # path: methods keep the function name; operation_id: the operationId
+    # declares its own method name (``identity.users.list`` -> ``list``).
+    @pytest.mark.parametrize(
+        ('naming', 'names'),
+        [
+            (
+                'path',
+                ('identity_users_list', 'identity_users_get', 'billing_invoices_list'),
+            ),
+            ('operation_id', ('list', 'get', 'list')),
+        ],
+    )
+    def test_nested_chain_calls(self, tmp_path, naming, names):
         _generate_nested(tmp_path / f'nst_{naming}', naming)
         mod = _import_fresh(tmp_path, f'nst_{naming}')
+        list_users, get_user, list_invoices = names
         with httpx.Client(transport=httpx.MockTransport(_nested_handler)) as http:
             client = mod.Client(http_client=http)
-            # Two levels of nesting: client.identity.users.<function name>
-            users = client.identity.users.identity_users_list()
-            one = client.identity.users.identity_users_get(userId=1)
-            invoices = client.billing.invoices.billing_invoices_list()
+            # Two levels of nesting: client.identity.users.<method>
+            users = getattr(client.identity.users, list_users)()
+            one = getattr(client.identity.users, get_user)(userId=1)
+            invoices = getattr(client.billing.invoices, list_invoices)()
         assert [u.name for u in users] == ['alice']
         assert one.id == 1
         assert invoices[0].amount == 4.2
@@ -1546,3 +1558,118 @@ class TestSurfaceStability:
         assert surface[('Client', 'list_users')][0] == 'Query[Item]'
         assert surface[('AsyncClient', 'list_users')][0] == 'AsyncQuery[Item]'
         assert surface[('Client', 'get_user')][0] == 'Item'
+
+
+def _op_id_spec(target: Path, extra: dict | None = None) -> Path:
+    """A spec whose operationIds declare a hierarchy (``identity.users.list``)."""
+    paths = {
+        '/identity/users': {
+            'get': _list_op('identity.users.list'),
+            'post': {
+                'operationId': 'identity.users.create',
+                'responses': _ITEM_RESPONSE,
+            },
+        },
+        '/identity/users/{id}': {
+            'get': {
+                'operationId': 'identity.users.get',
+                'parameters': _ID_PARAM,
+                'responses': _ITEM_RESPONSE,
+            }
+        },
+        '/health': {'get': {'operationId': 'health', 'responses': _ITEM_RESPONSE}},
+    }
+    for path, ops in (extra or {}).items():
+        paths.setdefault(path, {}).update(ops)
+    return _write_spec(target, paths)
+
+
+class TestOperationIdNaming:
+    """``resource_naming="operation_id"`` names methods as the operationId does."""
+
+    def test_declared_names_with_variants_and_flat_ids(self, tmp_path):
+        _gen(
+            tmp_path / 'opn',
+            _op_id_spec(tmp_path / 'opn.json'),
+            client_style='resource',
+            resource_naming='operation_id',
+            dataframe={'enabled': True, 'pandas': True},
+        )
+        mod = _import_fresh(tmp_path, 'opn')
+        client = mod.Client(base_url='https://example.test')
+        assert _own_public_methods(type(client.identity.users)) == {
+            'create',
+            'get',
+            'list',
+            'list_df',  # a variant keeps its suffix
+        }
+        # A flat operationId already is the function name; it sits on the client.
+        assert 'health' in _own_public_methods(type(client))
+        assert 'list' in _own_public_methods(
+            type(mod.AsyncClient(base_url='https://example.test').identity.users)
+        )
+
+    def test_declared_name_returns_query(self, tmp_path):
+        _gen(
+            tmp_path / 'opq',
+            _op_id_spec(tmp_path / 'opq.json'),
+            client_style='resource',
+            resource_naming='operation_id',
+            result_objects=True,
+        )
+        surface = _class_surface(tmp_path / 'opq')
+        assert surface[('_Identity_UsersResource', 'list')] == (
+            'Query[Item]',
+            'identity_users_list',
+        )
+
+    def test_duplicate_declared_names_keep_function_names(self, tmp_path):
+        # ``identity.users.get`` and ``identity/users.get`` both declare ``get``
+        # in the same resource: neither wins by order, both keep full names.
+        spec = _op_id_spec(
+            tmp_path / 'opd.json',
+            {
+                '/identity/users/me': {
+                    'get': {
+                        'operationId': 'identity/users.get',
+                        'responses': _ITEM_RESPONSE,
+                    }
+                }
+            },
+        )
+        _gen(
+            tmp_path / 'opd',
+            spec,
+            client_style='resource',
+            resource_naming='operation_id',
+        )
+        mod = _import_fresh(tmp_path, 'opd')
+        methods = _own_public_methods(
+            type(mod.Client(base_url='https://example.test').identity.users)
+        )
+        assert 'get' not in methods
+        assert {'list', 'create'} <= methods
+        assert len({m for m in methods if m.startswith('identity_users_get')}) == 2
+
+    @pytest.mark.parametrize('result_objects', [False, True])
+    def test_adding_operations_never_changes_existing_members(
+        self, tmp_path, result_objects
+    ):
+        config = dict(
+            client_style='resource',
+            resource_naming='operation_id',
+            result_objects=result_objects,
+        )
+        _gen(tmp_path / 'opb', _op_id_spec(tmp_path / 'opb.json'), **config)
+        grown = _op_id_spec(
+            tmp_path / 'opa.json',
+            {
+                '/identity/users/search': {'get': _list_op('identity.users.search')},
+                '/identity/groups': {'get': _list_op('identity.groups.list')},
+                '/list': {'get': _list_op('list')},
+            },
+        )
+        _gen(tmp_path / 'opa', grown, **config)
+        before = _class_surface(tmp_path / 'opb')
+        assert before
+        assert not _surface_regressions(before, _class_surface(tmp_path / 'opa'))

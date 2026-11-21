@@ -1253,6 +1253,9 @@ class Codegen(OpenAPIProcessor):
 
         if self.config.client_style == 'resource':
             resource_path_of = self._resource_path_of(owner_of)
+            method_name_of = None
+            if self.config.resource_naming == 'operation_id':
+                method_name_of = self._operation_id_method_names(owner_of)
             body, _class_names = build_resource_client_module_body(
                 function_defs,
                 resolver,
@@ -1263,6 +1266,7 @@ class Codegen(OpenAPIProcessor):
                 endpoints_module=endpoints_module,
                 module_of=module_of,
                 use_query=self.config.result_objects,
+                method_name_of=method_name_of,
             )
         else:
             body, _class_names = build_client_module_body(
@@ -1331,17 +1335,49 @@ class Codegen(OpenAPIProcessor):
         return tuple(segments) or ('common',)
 
     @staticmethod
-    def _operation_id_resource_segments(endpoint: Endpoint) -> tuple[str, ...]:
+    def _operation_id_parts(endpoint: Endpoint) -> list[str]:
+        """The operationId's hierarchy (``.`` / ``/``) as attribute names."""
+        raw = (endpoint.operation_id or '').replace('/', '.').split('.')
+        return [part for part in (to_attribute_name(p) for p in raw if p) if part]
+
+    @classmethod
+    def _operation_id_resource_segments(cls, endpoint: Endpoint) -> tuple[str, ...]:
         """Nested resource path from the operationId hierarchy (``.`` / ``/``).
 
-        All but the last segment form the resource path (the method keeps its
-        full function name). A flat operationId (no separator) yields an empty
-        path -> the method lives on the client.
+        All but the last part form the resource path; the last part names the
+        method (see :meth:`_operation_id_method_names`). A flat operationId (no
+        separator) yields an empty path -> the method lives on the client.
         """
-        op_id = endpoint.operation_id or ''
-        raw = op_id.replace('/', '.').split('.')
-        parts = [to_attribute_name(p) for p in raw if p]
-        return tuple(p for p in parts[:-1] if p)
+        return tuple(cls._operation_id_parts(endpoint)[:-1])
+
+    @classmethod
+    def _operation_id_method_names(
+        cls, owner_of: dict[str, Endpoint]
+    ) -> dict[str, str]:
+        """``{endpoint function name: method name}`` for ``resource_naming=operation_id``.
+
+        A hierarchical operationId declares its method name itself -- the last
+        part: ``identity.users.get`` -> ``client.identity.users.get()`` -- so it
+        is used verbatim rather than the flattened ``identity_users_get``. It
+        depends on nothing but the operation's own operationId, so adding an
+        operation never renames an existing method. Should two operations in the
+        same resource declare the same name, both keep their full function names
+        instead of one winning by order. Flat operationIds are left out (their
+        function name already is the operationId).
+        """
+        declared: dict[tuple[str, ...], dict[str, list[str]]] = {}
+        for endpoint in {id(e): e for e in owner_of.values()}.values():
+            parts = cls._operation_id_parts(endpoint)
+            if len(parts) < 2:
+                continue
+            by_name = declared.setdefault(tuple(parts[:-1]), {})
+            by_name.setdefault(parts[-1], []).append(endpoint.sync_fn_name)
+        names: dict[str, str] = {}
+        for by_name in declared.values():
+            for method, fn_names in by_name.items():
+                if len(fn_names) == 1:
+                    names[fn_names[0]] = method
+        return names
 
     @staticmethod
     def _split_module_of(split_modules: list) -> dict[str, str]:

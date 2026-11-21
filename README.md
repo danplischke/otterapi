@@ -841,8 +841,9 @@ async def main():
 
 **`resource`** — groups the methods into resource sub-clients, derived from the
 same strategy as [module splitting](#-module-splitting) (tags/path/custom). Only
-the grouping changes: every method keeps its function's name, so adding an
-operation to the spec never renames or reshapes a method you already call:
+the grouping changes: every method keeps its function's name (or, with
+`resource_naming: operation_id`, the name its operationId declares), so adding
+an operation to the spec never renames or reshapes a method you already call:
 
 ```yaml
 documents:
@@ -875,8 +876,11 @@ async with AsyncClient() as api:
   `GET /identity/users/{id}` (operationId `getUser`) →
   `client.identity.users.get_user(id)`, and `/pet/findByStatus` →
   `client.pet.find_by_status.find_pets_by_status(...)`.
-- `operation_id` — nests by all but the last part of a dotted operationId:
-  `identity.users.get` → `client.identity.users.identity_users_get()`.
+- `operation_id` — nests by a dotted (or `/`-separated) operationId, whose last
+  part is the method name the spec declares: `identity.users.get` →
+  `client.identity.users.get()` (variants keep their suffix: `get_df`). If two
+  operations in one resource declare the same name, both keep their full
+  function names. A flat operationId (no separator) stays on the client.
 
 Segments are made into valid attribute names (`/2fa` → `client.n2fa`, a keyword
 gets a trailing underscore: `/import` → `client.import_`).

@@ -718,6 +718,28 @@ def _query_method(
     return _function_def(method_name, new_args, body, returns=returns)
 
 
+def _method_name(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner_of: Mapping[str, Endpoint],
+    method_name_of: Mapping[str, str],
+) -> str:
+    """The method name for ``fn``: its function name, or a spec-declared one.
+
+    ``method_name_of`` maps an endpoint's core function name to the name the
+    spec declares for it (the last part of a hierarchical operationId); a
+    variant keeps its suffix (``identity_users_list_df`` -> ``list_df``).
+    """
+    base = _base_name(fn)
+    owner = owner_of.get(fn.name)
+    if owner is None:
+        return base
+    core = owner.sync_fn_name
+    declared = method_name_of.get(core)
+    if declared is None or not base.startswith(core):
+        return base
+    return declared + base[len(core) :]
+
+
 def _endpoint_methods(
     fns: Sequence[ast.FunctionDef | ast.AsyncFunctionDef],
     *,
@@ -726,13 +748,15 @@ def _endpoint_methods(
     owner_of: Mapping[str, Endpoint],
     client_value: ast.expr,
     use_query: bool,
+    method_name_of: Mapping[str, str] | None = None,
 ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
     """Delegating methods for the sync or async side of ``fns``.
 
     Every method is named exactly like the function it wraps (minus the
     ``async_`` prefix on ``AsyncClient``): nothing is derived from the resource
     it lives on or from the rest of the spec, so adding an operation never
-    renames an existing method.
+    renames an existing method. The one exception is a name the spec declares
+    itself (``method_name_of``, see :func:`_method_name`).
 
     With ``use_query`` a *list* endpoint -- its core function returns
     ``list[X]`` -- becomes one method returning a deferred ``Query`` whose
@@ -741,16 +765,24 @@ def _endpoint_methods(
     turning on DataFrames or export never changes a method's return type. Every
     other endpoint keeps one method per generated function.
     """
+    method_name_of = method_name_of or {}
+
+    def wrap(
+        fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        return _method_from_function(
+            fn,
+            alias_of[fn.name],
+            client_value=client_value,
+            method_name=_method_name(fn, owner_of, method_name_of),
+        )
+
     side_fns = [fn for fn in fns if isinstance(fn, ast.AsyncFunctionDef) is is_async]
     if not use_query:
-        built = [
-            _method_from_function(fn, alias_of[fn.name], client_value=client_value)
-            for fn in side_fns
-        ]
-        return sorted(built, key=lambda m: m.name)
+        return sorted((wrap(fn) for fn in side_fns), key=lambda m: m.name)
 
     side = 'async' if is_async else 'sync'
-    built = []
+    built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
     for family in _group_families(side_fns, owner_of).values():
         variants = family[side]
         core = variants.get('fetch')
@@ -761,15 +793,12 @@ def _endpoint_methods(
                     variants,
                     alias_of[core.name],
                     client_value,
-                    _base_name(core),
+                    _method_name(core, owner_of, method_name_of),
                     is_async,
                 )
             )
         else:
-            built.extend(
-                _method_from_function(fn, alias_of[fn.name], client_value=client_value)
-                for fn in variants.values()
-            )
+            built.extend(wrap(fn) for fn in variants.values())
     return sorted(built, key=lambda m: m.name)
 
 
@@ -784,6 +813,7 @@ def build_resource_client_module_body(
     endpoints_module: str = 'endpoints',
     module_of: dict[str, str] | None = None,
     use_query: bool = False,
+    method_name_of: Mapping[str, str] | None = None,
     sync_class_name: str = 'Client',
     async_class_name: str = 'AsyncClient',
 ) -> tuple[list[ast.stmt], list[str]]:
@@ -792,8 +822,9 @@ def build_resource_client_module_body(
     ``resource_path_of`` maps each function to its resource path tuple; a
     single-segment path gives ``client.users.get_user(...)``, a two-segment path
     gives ``client.identity.users.get_user(...)``, and an empty path puts the method
-    directly on the client. Methods keep their function's name (see
-    :func:`_endpoint_methods`). ``module_of`` (split mode) routes each method to
+    directly on the client. Methods keep their function's name unless
+    ``method_name_of`` carries a name the spec declares (see
+    :func:`_method_name`). ``module_of`` (split mode) routes each method to
     its function's real module. ``owner_of`` and ``sink_imports`` are the
     endpoint sink's ``owners`` and collected imports (see
     :func:`build_client_module_body`).
@@ -836,6 +867,7 @@ def build_resource_client_module_body(
             owner_of=owner_of,
             client_value=client_value,
             use_query=use_query,
+            method_name_of=method_name_of,
         )
 
     def child_props(
