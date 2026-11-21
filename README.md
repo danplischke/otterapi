@@ -408,7 +408,7 @@ module_split:
 | `min_endpoints` | int | `2` | Minimum endpoints per module before consolidating into fallback |
 | `flat_structure` | bool | `false` | Flat files instead of nested directories |
 | `path_depth` | int | `1` | Path segments used for `path` strategy (1–5) |
-| `global_strip_prefixes` | list | `/api`, `/api/v1`, `/api/v2`, `/api/v3` | Prefixes stripped from all paths before matching |
+| `global_strip_prefixes` | list | `/api`, `/api/v1`, `/api/v2`, `/api/v3` | Prefixes stripped from all paths before matching (whole segments only: `/api` strips `/api/users` but leaves `/apikeys` alone) |
 | `module_map` | object | `{}` | Custom module-to-path mappings |
 | `split_models` | bool | `false` | Generate per-module model files instead of one shared `models.py` |
 | `shared_models_module` | string | `_models` | Module name for shared models when `split_models` is `true` |

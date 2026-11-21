@@ -255,6 +255,33 @@ class ModuleTreeBuilder:
         return not node.endpoints and not node.children
 
 
+def strip_path_prefix(path: str, prefix: str) -> str | None:
+    """Strip ``prefix`` from ``path`` at a path-segment boundary.
+
+    Returns the remainder (always starting with ``/``), or None when ``path``
+    does not start with ``prefix`` as whole segments: ``/api`` strips
+    ``/api/users`` and ``/api`` itself, but not ``/apikeys`` -- a plain
+    ``startswith`` would turn that into ``/keys``.
+    """
+    if not prefix:
+        return None
+    base = prefix.rstrip('/')
+    if not base:  # a bare '/' prefix strips nothing
+        return path
+    if path != base and not path.startswith(base + '/'):
+        return None
+    return path[len(base) :] or '/'
+
+
+def strip_global_prefixes(path: str, prefixes: list[str]) -> str:
+    """Strip the first of ``prefixes`` that matches ``path`` (see above)."""
+    for prefix in prefixes:
+        stripped = strip_path_prefix(path, prefix)
+        if stripped is not None:
+            return stripped
+    return path
+
+
 def build_module_tree(
     endpoints: list[Endpoint],
     config: ModuleSplitConfig,
@@ -416,24 +443,14 @@ class ModuleMapResolver:
         return strategy in (SplitStrategy.PATH, SplitStrategy.HYBRID)
 
     def _strip_global_prefixes(self, path: str) -> str:
-        """Strip configured global prefixes from the path."""
-        for prefix in self.config.global_strip_prefixes:
-            if path.startswith(prefix):
-                stripped = path[len(prefix) :]
-                if not stripped.startswith('/'):
-                    stripped = '/' + stripped
-                return stripped
-        return path
+        """Strip the first configured global prefix that matches the path."""
+        return strip_global_prefixes(path, self.config.global_strip_prefixes)
 
     @staticmethod
     def _strip_prefix(path: str, prefix: str) -> str:
         """Strip ``prefix`` from ``path`` if present, preserving a leading slash."""
-        if not path.startswith(prefix):
-            return path
-        stripped = path[len(prefix) :]
-        if not stripped.startswith('/'):
-            stripped = '/' + stripped
-        return stripped
+        stripped = strip_path_prefix(path, prefix)
+        return path if stripped is None else stripped
 
     def _match_module_definition(
         self,

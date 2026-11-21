@@ -510,3 +510,22 @@ class TestPatternMatching:
         assert resolver.resolve('/v2/users', 'GET').module_path == ['version']
         # v10 has two characters, shouldn't match
         assert resolver.resolve('/v10/users', 'GET').resolution == 'fallback'
+
+
+class TestPrefixSegmentBoundary:
+    """Prefixes strip whole path segments only."""
+
+    def test_strip_path_prefix(self):
+        from otterapi.codegen.splitting import strip_path_prefix
+
+        assert strip_path_prefix('/api/users', '/api') == '/users'
+        assert strip_path_prefix('/api/users', '/api/') == '/users'
+        assert strip_path_prefix('/api', '/api') == '/'
+        assert strip_path_prefix('/apikeys', '/api') is None
+        assert strip_path_prefix('/users', '') is None
+
+    def test_resolver_keeps_lookalike_segment(self):
+        # The default prefixes include '/api'; '/apikeys' must not become 'keys'.
+        resolver = ModuleMapResolver(ModuleSplitConfig(enabled=True, strategy='path'))
+        assert resolver.resolve('/apikeys', 'GET').module_path == ['apikeys']
+        assert resolver.resolve('/api/users', 'GET').module_path == ['users']

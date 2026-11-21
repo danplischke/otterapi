@@ -79,7 +79,11 @@ class Query(Generic[T]):
         return self._fetch(client=self._client, **self._params)
 
     def __iter__(self) -> Iterator[T]:
-        return iter(self.all())
+        # Mirrors ``AsyncQuery.__aiter__``: stream page by page when a
+        # pagination terminal exists, else iterate the materialized list.
+        if self._iterate is None:
+            return iter(self.all())
+        return self.iter()
 
     def to_pandas(self) -> pd.DataFrame:
         """Fetch and return a pandas ``DataFrame``."""

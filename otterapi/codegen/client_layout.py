@@ -22,7 +22,8 @@ functions remain the implementation the methods call, in ``endpoints.py``.
 from __future__ import annotations
 
 import ast
-from collections.abc import Mapping, Sequence
+import keyword
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
@@ -37,6 +38,7 @@ from otterapi.codegen.ast_utils import (
     _name,
     strip_optional,
 )
+from otterapi.codegen.utils import to_attribute_name
 
 if TYPE_CHECKING:
     from otterapi.codegen.emit import TypeResolver
@@ -526,7 +528,14 @@ def _build_resource_name_map(fn_bases: list[str], tokens: set[str]) -> dict[str,
     taken: set[str] = set()
     for base in sorted(fn_bases):
         candidate = '_'.join(p for p in base.split('_') if p not in tokens)
-        if not candidate or not candidate.isidentifier() or candidate in taken:
+        # ``isidentifier()`` accepts keywords: stripping ``users`` from
+        # ``import_users`` must not leave ``def import(...)``.
+        if (
+            not candidate
+            or not candidate.isidentifier()
+            or keyword.iskeyword(candidate)
+            or candidate in taken
+        ):
             candidate = base
         while candidate in taken:  # pathological; keeps names unique
             candidate = candidate + '_'
@@ -558,14 +567,48 @@ def _resource_class(class_name: str, methods: Sequence[ast.stmt]) -> ast.ClassDe
     return _class_def(class_name, [], [init, *methods])
 
 
-def _resource_class_name(path: tuple[str, ...], is_async: bool) -> str:
-    """Class name for a resource node.
+def _resource_class_names(
+    paths: Iterable[tuple[str, ...]],
+) -> dict[tuple[tuple[str, ...], bool], str]:
+    """Unique class names for every resource node, keyed by ``(path, is_async)``.
 
     ``('identity', 'users')`` -> ``_IdentityUsersResource``
-    (``_AsyncIdentityUsersResource`` on the async side).
+    (``_AsyncIdentityUsersResource`` on the async side). Flattening the path
+    into one PascalCase word is not injective -- ``('user', 'groups')`` and
+    ``('user_groups',)`` both read ``UserGroups``, and a sync ``async_foo``
+    node reads like the async side of ``foo`` -- and a repeated class
+    definition silently replaces the first. So names are claimed in sorted
+    path order and a later clash gets a numeric suffix (``_UserGroups2Resource``),
+    always assigned to the sync / async pair together.
     """
-    pascal = _pascal('_'.join(path))
-    return f'_Async{pascal}Resource' if is_async else f'_{pascal}Resource'
+    names: dict[tuple[tuple[str, ...], bool], str] = {}
+    taken: set[str] = set()
+    for path in sorted(p for p in paths if p):
+        pascal = _pascal('_'.join(path))
+        stem, n = pascal, 1
+        while f'_{stem}Resource' in taken or f'_Async{stem}Resource' in taken:
+            n += 1
+            stem = f'{pascal}{n}'
+        names[(path, False)] = f'_{stem}Resource'
+        names[(path, True)] = f'_Async{stem}Resource'
+        taken |= {names[(path, False)], names[(path, True)]}
+    return names
+
+
+def _sanitize_resource_paths(
+    resource_path_of: Mapping[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Make every resource path segment a valid, non-keyword attribute name.
+
+    Segments become ``@property`` names (and, for folded action leaves, method
+    names), so a URL segment such as ``2fa`` or an operationId part such as
+    ``import`` must not reach the generated code verbatim.
+    """
+    sanitized: dict[str, tuple[str, ...]] = {}
+    for fn_name, path in resource_path_of.items():
+        segments = (to_attribute_name(seg) for seg in path)
+        sanitized[fn_name] = tuple(seg for seg in segments if seg)
+    return sanitized
 
 
 def _child_property(
@@ -917,6 +960,7 @@ def build_resource_client_module_body(
     segment (``client.pet.find_by_status(...)``; see ``_is_action_segment``).
     """
     owner_of = owner_of or {}
+    resource_path_of = _sanitize_resource_paths(resource_path_of)
     module_imports, alias_of = _module_imports_and_aliases(
         function_defs, module_of, endpoints_module
     )
@@ -938,6 +982,7 @@ def build_resource_client_module_body(
     for path in all_paths:
         if path:
             children_of.setdefault(path[:-1], set()).add(path[-1])
+    class_name_of = _resource_class_names(all_paths)
 
     all_methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
 
@@ -960,7 +1005,7 @@ def build_resource_client_module_body(
         return [
             _child_property(
                 child,
-                _resource_class_name(path + (child,), is_async),
+                class_name_of[(path + (child,), is_async)],
                 on_client=on_client,
             )
             for child in sorted(children_of.get(path, set()))
@@ -982,7 +1027,7 @@ def build_resource_client_module_body(
             _avoid_member_collisions(members, frozenset({'_client'}))
             resource_classes.append(
                 _resource_class(
-                    _resource_class_name(path, is_async), members or [ast.Pass()]
+                    class_name_of[(path, is_async)], members or [ast.Pass()]
                 )
             )
 

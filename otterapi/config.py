@@ -1196,7 +1196,8 @@ class DocumentConfig(BaseModel):
     result_objects: bool = Field(
         default=False,
         description=(
-            'When True (with ``client_style="resource"``), a list endpoint returns '
+            'When True (with ``client_style="client"`` or ``"resource"``), a list '
+            'endpoint returns '
             'a deferred ``Query`` object instead of separate ``_df`` / ``_pl`` / '
             '``_iter`` / ``_export`` methods. Terminals materialize it: '
             '``client.users.list().all()`` / ``.to_pandas()`` / ``.iter()`` / '

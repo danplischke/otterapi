@@ -57,6 +57,7 @@ from otterapi.codegen.utils import (
     OpenAPIProcessor,
     sanitize_identifier,
     sanitize_parameter_field_name,
+    to_attribute_name,
     to_snake_case,
     write_mod,
 )
@@ -1315,16 +1316,16 @@ class Codegen(OpenAPIProcessor):
 
     def _path_resource_segments(self, path: str) -> tuple[str, ...]:
         """Nested resource path from URL segments (params dropped, prefix stripped)."""
-        stripped = path
-        for prefix in self.config.module_split.global_strip_prefixes:
-            if prefix and stripped.startswith(prefix):
-                stripped = stripped[len(prefix) :]
-                break
+        from otterapi.codegen.splitting import strip_global_prefixes
+
+        stripped = strip_global_prefixes(
+            path, self.config.module_split.global_strip_prefixes
+        )
         segments: list[str] = []
         for seg in stripped.split('/'):
             if not seg or (seg.startswith('{') and seg.endswith('}')):
                 continue
-            cleaned = to_snake_case(seg.replace('{', '').replace('}', ''))
+            cleaned = to_attribute_name(seg.replace('{', '').replace('}', ''))
             if cleaned:
                 segments.append(cleaned)
         return tuple(segments) or ('common',)
@@ -1339,7 +1340,7 @@ class Codegen(OpenAPIProcessor):
         """
         op_id = endpoint.operation_id or ''
         raw = op_id.replace('/', '.').split('.')
-        parts = [to_snake_case(p) for p in raw if p]
+        parts = [to_attribute_name(p) for p in raw if p]
         return tuple(p for p in parts[:-1] if p)
 
     @staticmethod
@@ -1713,7 +1714,11 @@ class Codegen(OpenAPIProcessor):
         # client_style="client" the public surface is the Client / AsyncClient
         # classes (whose methods wrap the functions) rather than the free
         # functions, which stay in endpoints.py as the implementation.
+        # ``_clients.py`` only exists when endpoints were generated, so without
+        # them fall back to the plain ``Client`` re-export.
         client_style = self.config.client_style
+        if not self.generate_endpoints:
+            client_style = 'functions'
         if endpoint_names and client_style == 'functions':
             self._add_reexport(
                 body,

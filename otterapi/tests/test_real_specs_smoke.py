@@ -16,6 +16,7 @@ dedicated CI job rather than the fast unit matrix.
 
 from __future__ import annotations
 
+import ast
 import gzip
 import importlib
 import json
@@ -94,4 +95,42 @@ def test_real_spec_generates_compiles_and_imports(name, tmp_path):
         compile(path.read_text(), str(path), 'exec')
 
     # ... and actually importable (every pydantic model builds).
+    _import_package(pkg_dir)
+
+
+# (client_style, resource_naming, result_objects): every class-based layout,
+# since each derives its own identifiers (method names, resource properties,
+# resource classes) from the spec.
+CLASS_LAYOUTS = {
+    'client': ('client', 'tag', True),
+    'resource-tag': ('resource', 'tag', False),
+    'resource-path': ('resource', 'path', True),
+    'resource-operation_id': ('resource', 'operation_id', False),
+}
+
+
+@pytest.mark.parametrize('layout', sorted(CLASS_LAYOUTS))
+@pytest.mark.parametrize('name', sorted(SPECS))
+def test_real_spec_class_layouts_compile_and_import(name, layout, tmp_path):
+    spec_path = _load_spec(SPECS[name], tmp_path / f'{name}.json')
+    client_style, resource_naming, result_objects = CLASS_LAYOUTS[layout]
+
+    pkg_dir = tmp_path / f'otterclient_{name}_{layout.replace("-", "_")}'
+    config = DocumentConfig(
+        source=str(spec_path),
+        output=str(pkg_dir),
+        base_url='https://example.test',
+        client_style=client_style,
+        resource_naming=resource_naming,
+        result_objects=result_objects,
+    )
+    Codegen(config, format_output=False).generate()
+
+    clients = pkg_dir / '_clients.py'
+    compile(clients.read_text(), str(clients), 'exec')
+    tree = ast.parse(clients.read_text())
+    class_names = [n.name for n in tree.body if isinstance(n, ast.ClassDef)]
+    assert len(class_names) == len(set(class_names)), f'{name}: duplicate classes'
+
+    # __init__ imports _clients, so this builds every resource class too.
     _import_package(pkg_dir)

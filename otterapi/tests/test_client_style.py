@@ -1191,3 +1191,176 @@ class TestReviewRegressions:
         core = ast.parse('def list_users(): ...').body[0]
         assert isinstance(core, ast.FunctionDef)
         assert _family_of(core, {}) == ('list_users', 'fetch')
+
+
+def _two_ops(prefix: str, *, tag: str | None = None, params: list | None = None):
+    """A path item with a list and a create operation (so it never folds)."""
+    ops = {
+        'get': _list_op(f'list_{prefix}', params),
+        'post': {
+            'operationId': f'create_{prefix}',
+            'responses': _ITEM_RESPONSE,
+            **({'parameters': params} if params else {}),
+        },
+    }
+    if tag:
+        for op in ops.values():
+            op['tags'] = [tag]
+    return ops
+
+
+def _path_recorder(seen: list[str]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.method == 'POST':
+            return httpx.Response(200, json={'id': 1, 'name': 'x'})
+        return httpx.Response(200, json=[])
+
+    return handler
+
+
+class TestGeneratedIdentifiers:
+    """Names derived from the spec must always be valid, distinct Python."""
+
+    def test_token_stripping_never_leaves_a_keyword(self, tmp_path):
+        # ``import_users`` under ``users`` would strip to ``import``.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/users': {
+                    'get': {**_list_op('list_users'), 'tags': ['users']},
+                    'post': {
+                        'operationId': 'import_users',
+                        'tags': ['users'],
+                        'responses': _ITEM_RESPONSE,
+                    },
+                }
+            },
+        )
+        _gen(tmp_path / 'kw_pkg', spec, client_style='resource')
+        mod = _import_fresh(tmp_path, 'kw_pkg')
+        users = mod.Client(base_url='https://example.test').users
+        assert callable(users.list)
+        assert callable(users.import_users)  # fell back to the full name
+
+    def test_path_segments_become_valid_attributes(self, tmp_path):
+        # ``/2fa`` starts with a digit and ``import`` is a keyword; both are
+        # property names under resource_naming="path".
+        id_param = [
+            {
+                'in': 'path',
+                'name': 'id',
+                'required': True,
+                'schema': {'type': 'integer'},
+            }
+        ]
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/2fa/codes': _two_ops('codes'),
+                '/repos/{id}/import': _two_ops('imports', params=id_param),
+            },
+        )
+        _gen(
+            tmp_path / 'seg_pkg',
+            spec,
+            client_style='resource',
+            resource_naming='path',
+        )
+        mod = _import_fresh(tmp_path, 'seg_pkg')
+        seen: list[str] = []
+        with httpx.Client(transport=httpx.MockTransport(_path_recorder(seen))) as http:
+            client = mod.Client(http_client=http)
+            client.n2fa.codes.list()
+            client.repos.import_.list(1)
+        assert seen == ['/2fa/codes', '/repos/1/import']
+
+    @pytest.mark.parametrize('is_async', [False, True])
+    def test_resource_class_names_never_collide(self, tmp_path, is_async):
+        # ('user', 'groups') vs ('user_groups',) both flatten to UserGroups,
+        # and a sync ``async_jobs`` node reads like the async side of ``jobs``.
+        spec = _write_spec(
+            tmp_path / 'spec.json',
+            {
+                '/user_groups': _two_ops('flat_groups'),
+                '/user/groups': _two_ops('nested_groups'),
+                '/async_jobs': _two_ops('async_jobs'),
+                '/jobs': _two_ops('jobs'),
+            },
+        )
+        pkg = f'cls_pkg_{int(is_async)}'
+        _gen(tmp_path / pkg, spec, client_style='resource', resource_naming='path')
+        src = (tmp_path / pkg / '_clients.py').read_text()
+        class_names = [
+            node.name for node in ast.parse(src).body if isinstance(node, ast.ClassDef)
+        ]
+        assert len(class_names) == len(set(class_names)), class_names
+
+        mod = _import_fresh(tmp_path, pkg)
+        seen: list[str] = []
+        handler = _path_recorder(seen)
+        if is_async:
+
+            async def run() -> None:
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler)
+                ) as http:
+                    client = mod.AsyncClient(async_http_client=http)
+                    await client.user.groups.list_nested()
+                    await client.user_groups.list_flat()
+                    await client.async_jobs.list()
+                    await client.jobs.list()
+
+            import asyncio
+
+            asyncio.run(run())
+        else:
+            with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+                client = mod.Client(http_client=http)
+                client.user.groups.list_nested()
+                client.user_groups.list_flat()
+                client.async_jobs.list()
+                client.jobs.list()
+        assert seen == ['/user/groups', '/user_groups', '/async_jobs', '/jobs']
+
+    def test_class_style_without_endpoints_is_importable(self, tmp_path):
+        # _clients.py is only written alongside the endpoints; __init__ must
+        # not re-export it when endpoint generation is off.
+        config = DocumentConfig.model_validate(
+            {
+                'source': str(SPEC),
+                'output': str(tmp_path / 'noep_pkg'),
+                'base_url': 'https://example.test',
+                'client_style': 'client',
+                'result_objects': True,
+            }
+        )
+        Codegen(config, generate_endpoints=False).generate()
+        assert not (tmp_path / 'noep_pkg' / '_clients.py').exists()
+        mod = _import_fresh(tmp_path, 'noep_pkg')
+        assert 'Client' in mod.__all__
+
+
+class TestQueryIteration:
+    def _query_module(self, tmp_path):
+        _gen(
+            tmp_path / 'q_pkg',
+            SPEC,
+            client_style='client',
+            result_objects=True,
+        )
+        return _import_fresh(tmp_path, 'q_pkg')
+
+    def test_iter_streams_when_paginated(self, tmp_path):
+        mod = self._query_module(tmp_path)
+
+        def fetch(**_kw):
+            raise AssertionError('plain iteration must not materialize')
+
+        q = mod.Query(None, {}, fetch=fetch, iterate=lambda **_kw: iter([1, 2]))
+        assert list(q) == [1, 2]
+
+    def test_iter_falls_back_to_fetch(self, tmp_path):
+        mod = self._query_module(tmp_path)
+        q = mod.Query(None, {}, fetch=lambda **_kw: [3, 4])
+        assert list(q) == [3, 4]

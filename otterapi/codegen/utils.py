@@ -110,6 +110,20 @@ def to_snake_case(name: str) -> str:
     return sanitize_name_python_keywords(result)
 
 
+def to_attribute_name(name: str) -> str:
+    """Convert ``name`` into a snake_case Python attribute name.
+
+    Like :func:`to_snake_case` (which already escapes keywords: ``import`` ->
+    ``import_``), but also guarantees a valid identifier when the name starts
+    with a digit: ``2fa`` -> ``n2fa``. Returns ``''`` when nothing usable
+    remains, so callers can drop the name. Idempotent.
+    """
+    result = to_snake_case(name)
+    if result and result[0].isdigit():
+        result = 'n' + result
+    return result
+
+
 def sanitize_identifier(name: str) -> str:
     """Convert a string into a valid Python identifier.
 
