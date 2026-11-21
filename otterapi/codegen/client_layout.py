@@ -17,13 +17,16 @@ Each method is produced by AST-transforming an already-generated function def, s
 every variant (core / dataframe / paginated / iterator / export) is wrapped
 uniformly with its exact typed signature -- no signature is re-derived. The free
 functions remain the implementation the methods call, in ``endpoints.py``.
+
+Method names are the function names. Apart from the ``async_`` prefix, the only
+change ever made is a trailing ``_`` when a name would shadow a base-client
+member (``close``, ``headers``, ...) or a sibling resource accessor.
 """
 
 from __future__ import annotations
 
 import ast
-import keyword
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from otterapi.codegen.ast_utils import (
@@ -413,45 +416,23 @@ def build_client_module_body(
         function_defs, module_of, endpoints_module
     )
 
-    def flat_methods(
-        is_async: bool,
-    ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-        if use_query:
-            # Collapse each endpoint's variants into one Query-returning method.
-            families = _group_families(function_defs, owner_of or {})
-            side = 'async' if is_async else 'sync'
-            built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-            for base in sorted(families):
-                variants = families[base][side]
-                core = variants.get('fetch')
-                if core is None:
-                    continue
-                if len(variants) > 1:
-                    built.append(
-                        _query_method(
-                            core,
-                            variants,
-                            alias_of[core.name],
-                            _name('self'),
-                            base,
-                            is_async,
-                        )
-                    )
-                else:
-                    built.append(
-                        _method_from_function(
-                            core, alias_of[core.name], method_name=base
-                        )
-                    )
-            return sorted(built, key=lambda m: m.name)
-        return [
-            _method_from_function(fn, alias_of[fn.name])
-            for fn in function_defs
-            if isinstance(fn, ast.AsyncFunctionDef) is is_async
-        ]
-
-    sync_methods = flat_methods(is_async=False)
-    async_methods = flat_methods(is_async=True)
+    owner_of = owner_of or {}
+    sync_methods = _endpoint_methods(
+        function_defs,
+        is_async=False,
+        alias_of=alias_of,
+        owner_of=owner_of,
+        client_value=_name('self'),
+        use_query=use_query,
+    )
+    async_methods = _endpoint_methods(
+        function_defs,
+        is_async=True,
+        alias_of=alias_of,
+        owner_of=owner_of,
+        client_value=_name('self'),
+        use_query=use_query,
+    )
 
     imports, type_checking_block = _build_imports(
         sync_methods + async_methods, resolver, sink_imports
@@ -492,56 +473,25 @@ def build_client_module_body(
 
 
 # =============================================================================
-# Resource-grouped layout (client_style="resource"): client.users.get(...)
+# Resource-grouped layout (client_style="resource"): client.users.get_user(...)
 # =============================================================================
 
 
-def _pascal(resource_key: str) -> str:
-    """``identity_users`` -> ``IdentityUsers`` for a resource class name."""
-    return ''.join(part[:1].upper() + part[1:] for part in resource_key.split('_'))
+def _segment_pascal(segment: str) -> str:
+    """PascalCase one snake_case resource segment, reversibly.
 
-
-def _resource_tokens(resource_key: str) -> set[str]:
-    """Tokens stripped from a method name for a resource (naive singular/plural).
-
-    ``users`` -> ``{'users', 'user'}`` so ``list_users`` becomes ``list`` and
-    ``get_user`` becomes ``get`` under ``client.users``.
+    ``identity_users`` -> ``IdentityUsers``. The ``_`` before a digit-led word
+    is kept (``v_1`` -> ``V_1``) so ``v_1`` and ``v1`` stay distinct.
     """
-    tokens: set[str] = set()
-    for comp in resource_key.split('_'):
-        tokens.add(comp)
-        if comp.endswith('s'):
-            tokens.add(comp[:-1])
+    out: list[str] = []
+    for part in segment.split('_'):
+        if not part:
+            continue
+        if part[0].isdigit() and out:
+            out.append('_' + part)
         else:
-            tokens.add(comp + 's')
-    return tokens
-
-
-def _build_resource_name_map(fn_bases: list[str], tokens: set[str]) -> dict[str, str]:
-    """Map each function base name to a resource method name.
-
-    Strips the resource tokens; falls back to the full name when stripping would
-    produce an empty, invalid, or already-taken identifier. Deterministic
-    (sorted) so sync and async siblings resolve to the same method name.
-    """
-    name_map: dict[str, str] = {}
-    taken: set[str] = set()
-    for base in sorted(fn_bases):
-        candidate = '_'.join(p for p in base.split('_') if p not in tokens)
-        # ``isidentifier()`` accepts keywords: stripping ``users`` from
-        # ``import_users`` must not leave ``def import(...)``.
-        if (
-            not candidate
-            or not candidate.isidentifier()
-            or keyword.iskeyword(candidate)
-            or candidate in taken
-        ):
-            candidate = base
-        while candidate in taken:  # pathological; keeps names unique
-            candidate = candidate + '_'
-        name_map[base] = candidate
-        taken.add(candidate)
-    return name_map
+            out.append(part[:1].upper() + part[1:])
+    return ''.join(out)
 
 
 def _base_name(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -567,32 +517,19 @@ def _resource_class(class_name: str, methods: Sequence[ast.stmt]) -> ast.ClassDe
     return _class_def(class_name, [], [init, *methods])
 
 
-def _resource_class_names(
-    paths: Iterable[tuple[str, ...]],
-) -> dict[tuple[tuple[str, ...], bool], str]:
-    """Unique class names for every resource node, keyed by ``(path, is_async)``.
+def _resource_class_name(path: tuple[str, ...], is_async: bool) -> str:
+    """Class name for a resource node -- a function of its own path only.
 
-    ``('identity', 'users')`` -> ``_IdentityUsersResource``
-    (``_AsyncIdentityUsersResource`` on the async side). Flattening the path
-    into one PascalCase word is not injective -- ``('user', 'groups')`` and
-    ``('user_groups',)`` both read ``UserGroups``, and a sync ``async_foo``
-    node reads like the async side of ``foo`` -- and a repeated class
-    definition silently replaces the first. So names are claimed in sorted
-    path order and a later clash gets a numeric suffix (``_UserGroups2Resource``),
-    always assigned to the sync / async pair together.
+    ``('identity', 'users')`` -> ``_Identity_UsersResource``
+    (``_Identity_UsersResourceAsync`` on the async side); ``('user_groups',)``
+    -> ``_UserGroupsResource``. Segments are joined with ``_`` and the async
+    side is a suffix, which keeps the mapping injective -- ``('user',
+    'groups')`` cannot collide with ``('user_groups',)``, nor a sync
+    ``async_jobs`` node with the async side of ``jobs`` -- without consulting
+    any other path, so adding a resource never renames an existing class.
     """
-    names: dict[tuple[tuple[str, ...], bool], str] = {}
-    taken: set[str] = set()
-    for path in sorted(p for p in paths if p):
-        pascal = _pascal('_'.join(path))
-        stem, n = pascal, 1
-        while f'_{stem}Resource' in taken or f'_Async{stem}Resource' in taken:
-            n += 1
-            stem = f'{pascal}{n}'
-        names[(path, False)] = f'_{stem}Resource'
-        names[(path, True)] = f'_Async{stem}Resource'
-        taken |= {names[(path, False)], names[(path, True)]}
-    return names
+    stem = '_'.join(_segment_pascal(segment) for segment in path)
+    return f'_{stem}ResourceAsync' if is_async else f'_{stem}Resource'
 
 
 def _sanitize_resource_paths(
@@ -600,9 +537,9 @@ def _sanitize_resource_paths(
 ) -> dict[str, tuple[str, ...]]:
     """Make every resource path segment a valid, non-keyword attribute name.
 
-    Segments become ``@property`` names (and, for folded action leaves, method
-    names), so a URL segment such as ``2fa`` or an operationId part such as
-    ``import`` must not reach the generated code verbatim.
+    Segments become ``@property`` names, so a URL segment such as ``2fa`` or an
+    operationId part such as ``import`` must not reach the generated code
+    verbatim.
     """
     sanitized: dict[str, tuple[str, ...]] = {}
     for fn_name, path in resource_path_of.items():
@@ -689,78 +626,6 @@ def _group_families(
         side = 'async' if isinstance(fn, ast.AsyncFunctionDef) else 'sync'
         families.setdefault(base, {'sync': {}, 'async': {}})[side][binding] = fn
     return families
-
-
-def _apply_name_overrides(
-    name_map: dict[str, str],
-    core_of: Mapping[str, str],
-    overrides: Mapping[str, str],
-) -> dict[str, str]:
-    """Rename folded-leaf methods after their segment (see ``_fold_action_leaves``).
-
-    A variant keeps its suffix: the ``_df`` sibling of a folded ``find_by_status``
-    becomes ``find_by_status_df``. Names stay unique within the resource.
-    """
-    if not overrides:
-        return name_map
-    taken = set(name_map.values())
-    for base, current in list(name_map.items()):
-        core = core_of.get(base, base)
-        override = overrides.get(core)
-        if override is None:
-            continue
-        candidate = override + base[len(core) :]
-        taken.discard(current)
-        while candidate in taken:
-            candidate += '_'
-        name_map[base] = candidate
-        taken.add(candidate)
-    return name_map
-
-
-def _is_action_segment(segment: str) -> bool:
-    """Whether a path segment reads as an RPC-style action, not a collection.
-
-    Collections are plural nouns (``users``, ``invoices``) and keep their own
-    sub-client even with a single operation: ``list`` today is ``get`` tomorrow,
-    and the shape should not flip when the spec grows. A multi-word segment
-    (``find_by_status``, ``upload_image``) or a singular one (``login``,
-    ``inventory``) with a single operation is an action, and
-    ``client.pet.find_by_status(...)`` reads far better than a one-method
-    ``client.pet.find_by_status.find_pets_by_status(...)``.
-    """
-    return '_' in segment or not segment.endswith('s')
-
-
-def _fold_action_leaves(
-    functions_at: dict[tuple[str, ...], list[ast.FunctionDef | ast.AsyncFunctionDef]],
-    owner_of: Mapping[str, Endpoint],
-) -> dict[str, str]:
-    """Fold single-operation action leaves into their parent resource (in place).
-
-    Returns ``{core function name: method name}``: the folded operation is named
-    after its segment on the parent. Only the tree's original leaves are
-    candidates, so folding never cascades: a parent that absorbs a leaf keeps
-    its own shape.
-    """
-    leaves = [
-        path
-        for path in functions_at
-        if path
-        and not any(
-            other != path and other[: len(path)] == path for other in functions_at
-        )
-    ]
-    overrides: dict[str, str] = {}
-    for path in leaves:
-        fns = functions_at[path]
-        owners = {id(owner_of[fn.name]) for fn in fns if fn.name in owner_of}
-        if len(owners) != 1 or not _is_action_segment(path[-1]):
-            continue
-        core = next(owner_of[fn.name] for fn in fns if fn.name in owner_of).sync_fn_name
-        functions_at.setdefault(path[:-1], []).extend(functions_at.pop(path))
-        overrides[core] = path[-1]
-    return overrides
 
 
 def _list_item_type(returns: ast.expr | None) -> ast.expr | None:
@@ -853,81 +718,58 @@ def _query_method(
     return _function_def(method_name, new_args, body, returns=returns)
 
 
-def _resource_methods(
-    fns: list[ast.FunctionDef | ast.AsyncFunctionDef],
-    path: tuple[str, ...],
-    is_async: bool,
-    alias_of: dict[str, str],
-    owner_of: Mapping[str, Endpoint],
+def _endpoint_methods(
+    fns: Sequence[ast.FunctionDef | ast.AsyncFunctionDef],
     *,
+    is_async: bool,
+    alias_of: Mapping[str, str],
+    owner_of: Mapping[str, Endpoint],
+    client_value: ast.expr,
     use_query: bool,
-    name_overrides: Mapping[str, str] | None = None,
 ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    """Delegating methods for the functions living at one resource ``path``.
+    """Delegating methods for the sync or async side of ``fns``.
 
-    The path's tokens are stripped from the method names (``name_overrides``
-    pins the names of operations folded up from an action leaf). Methods on the
-    client itself (empty path) delegate with ``client=self``; on a sub-resource
-    with ``client=self._client``.
+    Every method is named exactly like the function it wraps (minus the
+    ``async_`` prefix on ``AsyncClient``): nothing is derived from the resource
+    it lives on or from the rest of the spec, so adding an operation never
+    renames an existing method.
+
+    With ``use_query`` a *list* endpoint -- its core function returns
+    ``list[X]`` -- becomes one method returning a deferred ``Query`` whose
+    terminals bind the endpoint's variants. The decision rests on the
+    endpoint's own return type alone, never on which features are enabled, so
+    turning on DataFrames or export never changes a method's return type. Every
+    other endpoint keeps one method per generated function.
     """
-    name_overrides = name_overrides or {}
-    tokens: set[str] = set()
-    for segment in path:
-        tokens |= _resource_tokens(segment)
-    client_value: ast.expr = _name('self') if not path else _attr('self', '_client')
-
-    if use_query:
-        # One method per endpoint family; a family with variants collapses
-        # into a single method returning a deferred Query.
-        families = _group_families(fns, owner_of)
-        name_map = _apply_name_overrides(
-            _build_resource_name_map(list(families), tokens),
-            {core: core for core in families},
-            name_overrides,
-        )
-        side = 'async' if is_async else 'sync'
-        built: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-        for base, family in families.items():
-            variants = family[side]
-            core = variants.get('fetch')
-            if core is None:  # e.g. generate_sync=False leaves no sync core
-                continue
-            if len(variants) > 1:
-                built.append(
-                    _query_method(
-                        core,
-                        variants,
-                        alias_of[core.name],
-                        client_value,
-                        name_map[base],
-                        is_async,
-                    )
-                )
-            else:
-                built.append(
-                    _method_from_function(
-                        core,
-                        alias_of[core.name],
-                        client_value=client_value,
-                        method_name=name_map[base],
-                    )
-                )
+    side_fns = [fn for fn in fns if isinstance(fn, ast.AsyncFunctionDef) is is_async]
+    if not use_query:
+        built = [
+            _method_from_function(fn, alias_of[fn.name], client_value=client_value)
+            for fn in side_fns
+        ]
         return sorted(built, key=lambda m: m.name)
 
-    core_of = {_base_name(fn): _family_of(fn, owner_of)[0] for fn in fns}
-    name_map = _apply_name_overrides(
-        _build_resource_name_map(list(core_of), tokens), core_of, name_overrides
-    )
-    built = [
-        _method_from_function(
-            fn,
-            alias_of[fn.name],
-            client_value=client_value,
-            method_name=name_map[_base_name(fn)],
-        )
-        for fn in fns
-        if isinstance(fn, ast.AsyncFunctionDef) is is_async
-    ]
+    side = 'async' if is_async else 'sync'
+    built = []
+    for family in _group_families(side_fns, owner_of).values():
+        variants = family[side]
+        core = variants.get('fetch')
+        if core is not None and _list_item_type(core.returns) is not None:
+            built.append(
+                _query_method(
+                    core,
+                    variants,
+                    alias_of[core.name],
+                    client_value,
+                    _base_name(core),
+                    is_async,
+                )
+            )
+        else:
+            built.extend(
+                _method_from_function(fn, alias_of[fn.name], client_value=client_value)
+                for fn in variants.values()
+            )
     return sorted(built, key=lambda m: m.name)
 
 
@@ -948,16 +790,13 @@ def build_resource_client_module_body(
     """Build ``_clients.py`` with (possibly nested) resource sub-clients.
 
     ``resource_path_of`` maps each function to its resource path tuple; a
-    single-segment path gives ``client.users.get(...)``, a two-segment path gives
-    ``client.identity.users.get(...)``, and an empty path puts the method directly
-    on the client. Method names have the path's tokens stripped. ``module_of``
-    (split mode) routes each method to its function's real module. ``owner_of``
-    and ``sink_imports`` are the endpoint sink's ``owners`` and collected
-    imports (see :func:`build_client_module_body`).
-
-    A leaf whose segment is an action rather than a collection and that holds
-    a single operation is folded into its parent as a method named after the
-    segment (``client.pet.find_by_status(...)``; see ``_is_action_segment``).
+    single-segment path gives ``client.users.get_user(...)``, a two-segment path
+    gives ``client.identity.users.get_user(...)``, and an empty path puts the method
+    directly on the client. Methods keep their function's name (see
+    :func:`_endpoint_methods`). ``module_of`` (split mode) routes each method to
+    its function's real module. ``owner_of`` and ``sink_imports`` are the
+    endpoint sink's ``owners`` and collected imports (see
+    :func:`build_client_module_body`).
     """
     owner_of = owner_of or {}
     resource_path_of = _sanitize_resource_paths(resource_path_of)
@@ -971,7 +810,6 @@ def build_resource_client_module_body(
     ] = {}
     for fn in function_defs:
         functions_at.setdefault(resource_path_of.get(fn.name, ()), []).append(fn)
-    name_overrides = _fold_action_leaves(functions_at, owner_of)
 
     # Every node incl. ancestors, and each node's child segment names.
     all_paths: set[tuple[str, ...]] = set()
@@ -982,21 +820,22 @@ def build_resource_client_module_body(
     for path in all_paths:
         if path:
             children_of.setdefault(path[:-1], set()).add(path[-1])
-    class_name_of = _resource_class_names(all_paths)
 
     all_methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
 
     def methods_for(
         path: tuple[str, ...], is_async: bool
     ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-        return _resource_methods(
+        # On the client itself ``self`` is the client; a sub-resource delegates
+        # with the ``self._client`` it was built with.
+        client_value: ast.expr = _name('self') if not path else _attr('self', '_client')
+        return _endpoint_methods(
             functions_at.get(path, []),
-            path,
-            is_async,
-            alias_of,
-            owner_of,
+            is_async=is_async,
+            alias_of=alias_of,
+            owner_of=owner_of,
+            client_value=client_value,
             use_query=use_query,
-            name_overrides=name_overrides,
         )
 
     def child_props(
@@ -1005,7 +844,7 @@ def build_resource_client_module_body(
         return [
             _child_property(
                 child,
-                class_name_of[(path + (child,), is_async)],
+                _resource_class_name(path + (child,), is_async),
                 on_client=on_client,
             )
             for child in sorted(children_of.get(path, set()))
@@ -1027,7 +866,7 @@ def build_resource_client_module_body(
             _avoid_member_collisions(members, frozenset({'_client'}))
             resource_classes.append(
                 _resource_class(
-                    class_name_of[(path, is_async)], members or [ast.Pass()]
+                    _resource_class_name(path, is_async), members or [ast.Pass()]
                 )
             )
 

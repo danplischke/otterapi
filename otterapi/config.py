@@ -1189,20 +1189,21 @@ class DocumentConfig(BaseModel):
             'endpoint (``client.get_user(...)``), without the ``async_`` prefix. '
             '"resource" groups those methods into resource sub-clients derived '
             'from the same strategy as ``module_split`` (tags/path/custom), e.g. '
-            '``client.users.get(...)``.'
+            '``client.users.get_user(...)``. Methods always keep the function '
+            'name; they are never shortened or renamed per resource.'
         ),
     )
 
     result_objects: bool = Field(
         default=False,
         description=(
-            'When True (with ``client_style="client"`` or ``"resource"``), a list '
-            'endpoint returns '
-            'a deferred ``Query`` object instead of separate ``_df`` / ``_pl`` / '
-            '``_iter`` / ``_export`` methods. Terminals materialize it: '
-            '``client.users.list().all()`` / ``.to_pandas()`` / ``.iter()`` / '
-            '``.export(path)``. Requires the relevant feature (dataframe / '
-            'pagination / export) enabled for each terminal.'
+            'When True (with ``client_style="client"`` or ``"resource"``), every '
+            'list endpoint (one returning ``list[X]``) returns a deferred '
+            '``Query`` object instead of separate ``_df`` / ``_pl`` / ``_iter`` / '
+            '``_export`` methods; other endpoints are unaffected. Terminals '
+            'materialize it: ``client.users.list_users().all()`` / '
+            '``.to_pandas()`` / ``.iter()`` / ``.export(path)``. A terminal whose '
+            'feature (dataframe / pagination / export) is disabled raises.'
         ),
     )
 
@@ -1212,9 +1213,11 @@ class DocumentConfig(BaseModel):
             'How resource sub-clients are derived when ``client_style="resource"``. '
             '"tag" (default) uses the ``module_split`` strategy (usually one level). '
             '"path" nests by URL path segments '
-            '(``/identity/users/{id}`` -> ``client.identity.users.get(...)``). '
+            '(``/identity/users/{id}`` -> ``client.identity.users.get_user(...)``). '
             '"operation_id" nests by the dotted/slash hierarchy in each '
-            'operationId (``identity.users.get`` -> ``client.identity.users.get()``). '
+            'operationId, all but its last part (``identity.users.get`` -> '
+            '``client.identity.users.identity_users_get()``). Only the grouping '
+            'changes; method names stay the function names. '
             'Ignored for other client styles.'
         ),
     )

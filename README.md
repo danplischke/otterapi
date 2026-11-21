@@ -840,8 +840,9 @@ async def main():
 ```
 
 **`resource`** — groups the methods into resource sub-clients, derived from the
-same strategy as [module splitting](#-module-splitting) (tags/path/custom). The
-resource token is stripped from each method name:
+same strategy as [module splitting](#-module-splitting) (tags/path/custom). Only
+the grouping changes: every method keeps its function's name, so adding an
+operation to the spec never renames or reshapes a method you already call:
 
 ```yaml
 documents:
@@ -854,12 +855,12 @@ documents:
 from client import Client, AsyncClient
 
 client = Client(base_url='https://api.example.com')
-user = client.users.get(user_id=123)        # -> get_user(...)
-users = client.users.list()                 # -> list_users(...)
-order = client.orders.get(order_id=7)
+user = client.users.get_user(user_id=123)
+users = client.users.list_users()
+order = client.orders.get_order(order_id=7)
 
 async with AsyncClient() as api:
-    user = await api.users.get(user_id=123)
+    user = await api.users.get_user(user_id=123)
 ```
 
 `resource_naming` controls how the sub-clients are derived and can **nest**:
@@ -870,24 +871,28 @@ async with AsyncClient() as api:
 ```
 
 - `tag` (default) — one level, from the module-split strategy.
-- `path` — nests by URL segments: `/identity/users/{id}` → `client.identity.users.get(id)`.
-  A leaf that is an action rather than a collection (multi-word or singular
-  segment) with a single operation folds into its parent:
-  `/pet/findByStatus` → `client.pet.find_by_status(...)`, `/user/login` →
-  `client.user.login(...)`. Plural collection leaves such as `/billing/invoices`
-  keep their own sub-client (`client.billing.invoices.list()`).
-- `operation_id` — nests by the dotted operationId: `identity.users.get` → `client.identity.users.get()`.
+- `path` — nests by URL segments, one sub-client per segment:
+  `GET /identity/users/{id}` (operationId `getUser`) →
+  `client.identity.users.get_user(id)`, and `/pet/findByStatus` →
+  `client.pet.find_by_status.find_pets_by_status(...)`.
+- `operation_id` — nests by all but the last part of a dotted operationId:
+  `identity.users.get` → `client.identity.users.identity_users_get()`.
+
+Segments are made into valid attribute names (`/2fa` → `client.n2fa`, a keyword
+gets a trailing underscore: `/import` → `client.import_`).
 
 ```python
-user = client.identity.users.get(user_id=123)
-invoices = client.billing.invoices.list()
+user = client.identity.users.get_user(user_id=123)
+invoices = client.billing.invoices.list_invoices()
 ```
 
 #### Result objects
 
-With `result_objects: true` (with `client_style: client` or `resource`), a
-**list** endpoint returns a deferred `Query` instead of exposing separate
-`_df` / `_pl` / `_iter` / `_export` methods. The endpoint's arguments are captured
+With `result_objects: true` (with `client_style: client` or `resource`), every
+**list** endpoint (one that returns `list[X]`) returns a deferred `Query` instead
+of exposing separate `_df` / `_pl` / `_iter` / `_export` methods. Whether a method
+returns a `Query` depends only on the endpoint's return type, never on which
+features are enabled, so switching on DataFrames or export only adds terminals. The endpoint's arguments are captured
 once; a terminal method materializes it. `Query` / `AsyncQuery` are exported from
 the package for type hints:
 
@@ -897,19 +902,20 @@ the package for type hints:
 ```
 
 ```python
-q = client.users.list(status="active")   # nothing sent yet
-rows = q.all()                            # list[User]
-df   = q.to_pandas()                      # pandas DataFrame
-for u in q.iter(): ...                    # streamed, page by page
-q.export("users.csv")                     # write to a file
+q = client.users.list_users(status="active")   # nothing sent yet
+rows = q.all()                                  # list[User]
+df   = q.to_pandas()                            # pandas DataFrame
+for u in q.iter(): ...                          # streamed, page by page
+q.export("users.csv")                           # write to a file
 
 async with AsyncClient() as api:
-    rows = await api.users.list().all()
-    async for u in api.users.list().iter(): ...
+    rows = await api.users.list_users().all()
+    async for u in api.users.list_users().iter(): ...
 ```
 
 Terminals whose feature wasn't enabled at generation time raise a clear error;
-scalar (non-list) endpoints keep returning the model directly. Iterating a
+every other endpoint keeps returning its model directly, with its variants as
+separate methods. Iterating a
 result object directly (`for row in q` / `async for row in q`) streams pages
 when pagination is enabled and otherwise walks the fetched list.
 

@@ -1334,9 +1334,9 @@ class Codegen(OpenAPIProcessor):
     def _operation_id_resource_segments(endpoint: Endpoint) -> tuple[str, ...]:
         """Nested resource path from the operationId hierarchy (``.`` / ``/``).
 
-        All but the last segment form the resource path; the last is the method
-        basis (stripped from the method name later). A flat operationId (no
-        separator) yields an empty path -> the method lives on the client.
+        All but the last segment form the resource path (the method keeps its
+        full function name). A flat operationId (no separator) yields an empty
+        path -> the method lives on the client.
         """
         op_id = endpoint.operation_id or ''
         raw = op_id.replace('/', '.').split('.')

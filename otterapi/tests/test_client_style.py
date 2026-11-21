@@ -187,24 +187,25 @@ class TestAsyncClient:
 
 
 class TestResourceStyle:
-    def test_resources_grouped_with_stripped_method_names(self, resource_style_module):
+    def test_resources_grouped_keeping_function_names(self, resource_style_module):
         Client = resource_style_module.Client
         client = Client(base_url='https://example.test')
         # Grouped under resource sub-clients ...
         assert hasattr(client, 'users')
         assert hasattr(client, 'orders')
-        # ... with the resource token stripped from the method name.
-        assert hasattr(client.users, 'list')
-        assert hasattr(client.users, 'get')
-        assert not hasattr(client.users, 'list_users')
+        # ... with each method named exactly like its function.
+        assert hasattr(client.users, 'list_users')
+        assert hasattr(client.users, 'get_user')
+        assert not hasattr(client.users, 'list')
+        assert not hasattr(client.users, 'get')
 
     def test_sync_resource_call_returns_models(self, resource_style_module):
         Client = resource_style_module.Client
         User = resource_style_module.User
         with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
             client = Client(http_client=http)
-            users = client.users.list()
-            orders = client.orders.list()
+            users = client.users.list_users()
+            orders = client.orders.list_orders()
         assert [u.name for u in users] == ['alice']
         assert all(isinstance(u, User) for u in users)
         assert orders[0].total == 9.5
@@ -216,7 +217,7 @@ class TestResourceStyle:
             transport=httpx.MockTransport(_tagged_handler)
         ) as http:
             client = AsyncClient(async_http_client=http)
-            users = await client.users.list()
+            users = await client.users.list_users()
         assert [u.name for u in users] == ['alice']
 
     def test_exports_client_classes(self, resource_style_module):
@@ -259,8 +260,8 @@ class TestSplitClientStyle:
         assert 'list_users' not in mod.__all__
         with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
             client = mod.Client(http_client=http)
-            assert [u.name for u in client.users.list()] == ['alice']
-            assert client.orders.list()[0].total == 9.5
+            assert [u.name for u in client.users.list_users()] == ['alice']
+            assert client.orders.list_orders()[0].total == 9.5
 
     def test_split_client_flat_calls_across_modules(self, tmp_path):
         _generate_tagged(
@@ -287,7 +288,7 @@ class TestSplitClientStyle:
             transport=httpx.MockTransport(_tagged_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
-            users = await client.users.list()
+            users = await client.users.list_users()
         assert [u.name for u in users] == ['alice']
 
 
@@ -312,10 +313,10 @@ class TestNestedResources:
         mod = _import_fresh(tmp_path, f'nst_{naming}')
         with httpx.Client(transport=httpx.MockTransport(_nested_handler)) as http:
             client = mod.Client(http_client=http)
-            # Two levels of nesting: client.identity.users.<method>
-            users = client.identity.users.list()
-            one = client.identity.users.get(userId=1)
-            invoices = client.billing.invoices.list()
+            # Two levels of nesting: client.identity.users.<function name>
+            users = client.identity.users.identity_users_list()
+            one = client.identity.users.identity_users_get(userId=1)
+            invoices = client.billing.invoices.billing_invoices_list()
         assert [u.name for u in users] == ['alice']
         assert one.id == 1
         assert invoices[0].amount == 4.2
@@ -328,7 +329,7 @@ class TestNestedResources:
             transport=httpx.MockTransport(_nested_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
-            users = await client.identity.users.list()
+            users = await client.identity.users.identity_users_list()
         assert [u.name for u in users] == ['alice']
 
     def test_tag_mode_stays_flat(self, tmp_path):
@@ -366,10 +367,10 @@ class TestResultObjects:
         out = tmp_path / 'out.csv'
         with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
             client = mod.Client(http_client=http)
-            assert [r.id for r in client.items.list().all()] == [1, 2, 3]
-            assert client.items.list().to_pandas().shape == (3, 2)
-            assert [r.id for r in client.items.list().iter()] == [1, 2, 3]
-            assert client.items.list().export(str(out)) == 3
+            assert [r.id for r in client.items.list_items().all()] == [1, 2, 3]
+            assert client.items.list_items().to_pandas().shape == (3, 2)
+            assert [r.id for r in client.items.list_items().iter()] == [1, 2, 3]
+            assert client.items.list_items().export(str(out)) == 3
         assert out.exists()
 
     @pytest.mark.asyncio
@@ -385,8 +386,8 @@ class TestResultObjects:
             transport=httpx.MockTransport(_paginated_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
-            assert [r.id for r in await client.items.list().all()] == [1, 2, 3]
-            assert [r.id async for r in client.items.list().iter()] == [1, 2, 3]
+            assert [r.id for r in await client.items.list_items().all()] == [1, 2, 3]
+            assert [r.id async for r in client.items.list_items().iter()] == [1, 2, 3]
 
     def test_list_returns_query_scalar_stays_plain(self, tmp_path):
         # A list endpoint collapses its variants into a Query; a scalar endpoint
@@ -399,11 +400,11 @@ class TestResultObjects:
         mod = _import_fresh(tmp_path, 'ros')
         with httpx.Client(transport=httpx.MockTransport(_tagged_handler)) as http:
             client = mod.Client(http_client=http)
-            listed = client.users.list()
+            listed = client.users.list_users()
             assert type(listed).__name__ == 'Query'
             assert hasattr(listed, 'to_pandas')
             assert [u.name for u in listed.all()] == ['alice']
-            user = client.users.get(userId=1)
+            user = client.users.get_user(userId=1)
             assert type(user).__name__ == 'User'
         # The separate _df variant method is gone (collapsed into the Query).
         assert not hasattr(mod.Client(base_url='x').users, 'list_df')
@@ -470,7 +471,7 @@ class TestFeatureCombinations:
         mod = _import_fresh(tmp_path, 'sro')
         with httpx.Client(transport=httpx.MockTransport(_paginated_handler)) as http:
             client = mod.Client(http_client=http)
-            q = client.items.list()
+            q = client.items.list_items()
             assert type(q).__name__ == 'Query'
             assert [r.id for r in q.all()] == [1, 2, 3]
 
@@ -490,7 +491,7 @@ class TestFeatureCombinations:
             )
 
         with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-            result = mod.Client(http_client=http).items.list()
+            result = mod.Client(http_client=http).items.list_items()
         assert [i.id for i in result] == [1, 2]
 
     def test_reexport_models_plus_resource(self, tmp_path):
@@ -532,7 +533,9 @@ def _delegated_endpoints(package_dir: Path) -> dict[str, set[str]]:
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
-        side = 'async' if node.name.lstrip('_').startswith('Async') else 'sync'
+        # ``AsyncClient`` / ``_<Path>ResourceAsync`` are the async side.
+        is_async = node.name.startswith('Async') or node.name.endswith('Async')
+        side = 'async' if is_async else 'sync'
         for sub in ast.walk(node):
             if (
                 isinstance(sub, ast.Attribute)
@@ -895,9 +898,9 @@ class TestReviewRegressions:
             transport=httpx.MockTransport(_tagged_handler)
         ) as http:
             client = mod.AsyncClient(async_http_client=http)
-            assert [u.name async for u in client.users.list()] == ['alice']
+            assert [u.name async for u in client.users.list_users()] == ['alice']
 
-    def test_action_leaves_fold_into_parent_resource(self, tmp_path):
+    def test_resources_mirror_paths_and_keep_function_names(self, tmp_path):
         spec = _write_spec(
             tmp_path / 'spec.json',
             {
@@ -923,21 +926,24 @@ class TestReviewRegressions:
             },
         )
         _gen(
-            tmp_path / 'fold',
+            tmp_path / 'nofold',
             spec,
             client_style='resource',
             resource_naming='path',
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'fold')
+        mod = _import_fresh(tmp_path, 'nofold')
         client = mod.Client(base_url='https://example.test')
-        # Action leaves become methods on the parent, named after the segment;
-        # a variant keeps its suffix.
-        pet_methods = _own_public_methods(type(client.pet))
-        assert {'find_by_status', 'find_by_status_df', 'get_by_id'} <= pet_methods
-        assert 'login' in _own_public_methods(type(client.user))
-        # A plural collection leaf keeps its own sub-client.
-        assert 'list' in _own_public_methods(type(client.billing.invoices))
+        # Every path segment is a resource -- single-operation "action"
+        # segments are not folded into their parent -- and every method keeps
+        # its function's name, variants included.
+        assert _own_public_methods(type(client.pet.find_by_status)) == {
+            'find_pets_by_status',
+            'find_pets_by_status_df',
+        }
+        assert 'get_pet_by_id' in _own_public_methods(type(client.pet))
+        assert _own_public_methods(type(client.user.login)) == {'login_user'}
+        assert 'list_invoices' in _own_public_methods(type(client.billing.invoices))
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == '/pet/findByStatus':
@@ -945,7 +951,7 @@ class TestReviewRegressions:
             return httpx.Response(404, json={'detail': 'unknown route'})
 
         with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-            pets = mod.Client(http_client=http).pet.find_by_status()
+            pets = mod.Client(http_client=http).pet.find_by_status.find_pets_by_status()
         assert [p.name for p in pets] == ['rex']
 
     def test_export_wrapper_survives_colliding_parameter(self, tmp_path):
@@ -1222,8 +1228,9 @@ def _path_recorder(seen: list[str]):
 class TestGeneratedIdentifiers:
     """Names derived from the spec must always be valid, distinct Python."""
 
-    def test_token_stripping_never_leaves_a_keyword(self, tmp_path):
-        # ``import_users`` under ``users`` would strip to ``import``.
+    def test_method_names_are_never_shortened(self, tmp_path):
+        # Methods keep the function name even where dropping the resource
+        # word would read shorter (and here would even leave a keyword).
         spec = _write_spec(
             tmp_path / 'spec.json',
             {
@@ -1240,8 +1247,7 @@ class TestGeneratedIdentifiers:
         _gen(tmp_path / 'kw_pkg', spec, client_style='resource')
         mod = _import_fresh(tmp_path, 'kw_pkg')
         users = mod.Client(base_url='https://example.test').users
-        assert callable(users.list)
-        assert callable(users.import_users)  # fell back to the full name
+        assert _own_public_methods(type(users)) == {'import_users', 'list_users'}
 
     def test_path_segments_become_valid_attributes(self, tmp_path):
         # ``/2fa`` starts with a digit and ``import`` is a keyword; both are
@@ -1271,8 +1277,8 @@ class TestGeneratedIdentifiers:
         seen: list[str] = []
         with httpx.Client(transport=httpx.MockTransport(_path_recorder(seen))) as http:
             client = mod.Client(http_client=http)
-            client.n2fa.codes.list()
-            client.repos.import_.list(1)
+            client.n2fa.codes.list_codes()
+            client.repos.import_.list_imports(1)
         assert seen == ['/2fa/codes', '/repos/1/import']
 
     @pytest.mark.parametrize('is_async', [False, True])
@@ -1306,10 +1312,10 @@ class TestGeneratedIdentifiers:
                     transport=httpx.MockTransport(handler)
                 ) as http:
                     client = mod.AsyncClient(async_http_client=http)
-                    await client.user.groups.list_nested()
-                    await client.user_groups.list_flat()
-                    await client.async_jobs.list()
-                    await client.jobs.list()
+                    await client.user.groups.list_nested_groups()
+                    await client.user_groups.list_flat_groups()
+                    await client.async_jobs.list_async_jobs()
+                    await client.jobs.list_jobs()
 
             import asyncio
 
@@ -1317,10 +1323,10 @@ class TestGeneratedIdentifiers:
         else:
             with httpx.Client(transport=httpx.MockTransport(handler)) as http:
                 client = mod.Client(http_client=http)
-                client.user.groups.list_nested()
-                client.user_groups.list_flat()
-                client.async_jobs.list()
-                client.jobs.list()
+                client.user.groups.list_nested_groups()
+                client.user_groups.list_flat_groups()
+                client.async_jobs.list_async_jobs()
+                client.jobs.list_jobs()
         assert seen == ['/user/groups', '/user_groups', '/async_jobs', '/jobs']
 
     def test_class_style_without_endpoints_is_importable(self, tmp_path):
@@ -1364,3 +1370,179 @@ class TestQueryIteration:
         mod = self._query_module(tmp_path)
         q = mod.Query(None, {}, fetch=lambda **_kw: [3, 4])
         assert list(q) == [3, 4]
+
+
+def _class_surface(package_dir: Path) -> dict[tuple[str, str], tuple[str, ...]]:
+    """``{(class, member): (return annotation, *functions it calls)}``.
+
+    Covers every class in _clients.py. Resource accessors are members too
+    (annotated with their resource class), so a renamed resource class shows
+    up as a changed annotation; the called endpoint functions catch a member
+    name that silently moved to a different operation.
+    """
+    tree = ast.parse((package_dir / '_clients.py').read_text())
+    surface: dict[tuple[str, str], tuple[str, ...]] = {}
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for member in cls.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            returns = ast.unparse(member.returns) if member.returns else ''
+            calls = sorted(
+                {
+                    node.attr
+                    for node in ast.walk(member)
+                    if isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id.startswith(('_endpoints', '_ep_'))
+                }
+            )
+            surface[(cls.name, member.name)] = (returns, *calls)
+    return surface
+
+
+def _surface_regressions(
+    before: dict[tuple[str, str], tuple[str, ...]],
+    after: dict[tuple[str, str], tuple[str, ...]],
+) -> dict[tuple[str, str], tuple]:
+    """Members that vanished, changed return type, or lost a delegated call.
+
+    Gaining calls is fine: a ``Query`` method binds a new terminal when its
+    feature is switched on.
+    """
+    regressions: dict[tuple[str, str], tuple] = {}
+    for key, (returns, *calls) in before.items():
+        now = after.get(key)
+        if now is None or now[0] != returns or not set(calls) <= set(now[1:]):
+            regressions[key] = (before[key], now)
+    return regressions
+
+
+_OFFSET_LIMIT = [
+    {'in': 'query', 'name': 'offset', 'schema': {'type': 'integer'}},
+    {'in': 'query', 'name': 'limit', 'schema': {'type': 'integer'}},
+]
+_ID_PARAM = [
+    {'in': 'path', 'name': 'id', 'required': True, 'schema': {'type': 'integer'}}
+]
+
+
+def _tagged(op: dict, tag: str) -> dict:
+    return {**op, 'tags': [tag]}
+
+
+def _stability_paths() -> dict:
+    return {
+        '/users': {
+            'get': _tagged(_list_op('list_users', _OFFSET_LIMIT), 'users'),
+            'post': _tagged(
+                {'operationId': 'create_user', 'responses': _ITEM_RESPONSE}, 'users'
+            ),
+        },
+        '/users/{id}': {
+            'get': _tagged(
+                {
+                    'operationId': 'get_user',
+                    'parameters': _ID_PARAM,
+                    'responses': _ITEM_RESPONSE,
+                },
+                'users',
+            )
+        },
+        '/user_groups': {'get': _tagged(_list_op('list_user_groups'), 'groups')},
+    }
+
+
+def _grown_paths() -> dict:
+    """The same spec plus operations that used to rename existing members.
+
+    Under the old naming rules each addition renamed or reshaped a method that
+    already existed: a shortened-name clash (``list``), a second operation on a
+    folded action segment, a colliding resource class (``/user/groups``).
+    """
+    paths = _stability_paths()
+    paths['/user/groups'] = {
+        'get': _tagged(_list_op('list_group_members'), 'groups'),
+        'post': _tagged(
+            {'operationId': 'add_group_member', 'responses': _ITEM_RESPONSE}, 'groups'
+        ),
+    }
+    paths['/users/search'] = {'get': _tagged(_list_op('search_users'), 'users')}
+    paths['/users/{id}/import'] = {
+        'post': _tagged(
+            {
+                'operationId': 'import_user',
+                'parameters': _ID_PARAM,
+                'responses': _ITEM_RESPONSE,
+            },
+            'users',
+        )
+    }
+    paths['/list'] = {'get': _tagged(_list_op('list'), 'users')}
+    paths['/user_groups']['post'] = _tagged(
+        {'operationId': 'create_user_group', 'responses': _ITEM_RESPONSE}, 'groups'
+    )
+    return paths
+
+
+_LAYOUTS = [('client', 'tag'), ('resource', 'tag'), ('resource', 'path')]
+
+
+class TestSurfaceStability:
+    """Spec growth and feature flags only ever *add* to the class surface.
+
+    Every method name and return annotation generated before an operation is
+    added -- or a feature switched on -- must come out identical afterwards.
+    """
+
+    def _surface(self, target: Path, paths: dict, **overrides):
+        spec = _write_spec(target.parent / f'{target.name}.json', paths)
+        _gen(target, spec, **overrides)
+        return _class_surface(target)
+
+    @pytest.mark.parametrize('result_objects', [False, True])
+    @pytest.mark.parametrize(('style', 'naming'), _LAYOUTS)
+    def test_adding_operations_never_changes_existing_members(
+        self, tmp_path, style, naming, result_objects
+    ):
+        config = dict(
+            client_style=style, resource_naming=naming, result_objects=result_objects
+        )
+        before = self._surface(tmp_path / 'before', _stability_paths(), **config)
+        after = self._surface(tmp_path / 'after', _grown_paths(), **config)
+        assert before
+        assert not _surface_regressions(before, after)
+
+    @pytest.mark.parametrize('result_objects', [False, True])
+    @pytest.mark.parametrize(('style', 'naming'), _LAYOUTS)
+    def test_enabling_features_never_changes_existing_members(
+        self, tmp_path, style, naming, result_objects
+    ):
+        config = dict(
+            client_style=style, resource_naming=naming, result_objects=result_objects
+        )
+        plain = self._surface(tmp_path / 'plain', _stability_paths(), **config)
+        featured = self._surface(
+            tmp_path / 'featured',
+            _stability_paths(),
+            pagination={'enabled': True, 'auto_detect': True},
+            dataframe={'enabled': True, 'pandas': True, 'polars': True},
+            export={'enabled': True, 'formats': ['csv']},
+            **config,
+        )
+        assert plain
+        assert not _surface_regressions(plain, featured)
+
+    def test_list_endpoint_returns_query_without_any_feature(self, tmp_path):
+        # Query-ness follows the return type, not the enabled features: a
+        # list endpoint is a Query even when no terminal beyond .all() exists.
+        surface = self._surface(
+            tmp_path / 'q',
+            _stability_paths(),
+            client_style='client',
+            result_objects=True,
+        )
+        assert surface[('Client', 'list_users')][0] == 'Query[Item]'
+        assert surface[('AsyncClient', 'list_users')][0] == 'AsyncQuery[Item]'
+        assert surface[('Client', 'get_user')][0] == 'Item'
