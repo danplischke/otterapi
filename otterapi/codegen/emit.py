@@ -125,6 +125,37 @@ class EmitConfig:
         return bool(self.export and self.export.enabled)
 
 
+_ENUM_BASES = frozenset({'Enum', 'StrEnum', 'IntEnum'})
+
+
+def _strip_annotated(node: ast.expr) -> ast.expr:
+    """``Annotated[X, ...]`` -> ``X``; anything else unchanged."""
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == 'Annotated'
+        and isinstance(node.slice, ast.Tuple)
+        and node.slice.elts
+    ):
+        return node.slice.elts[0]
+    return node
+
+
+def _union_members(node: ast.expr) -> list[ast.expr]:
+    """The members of ``A | B | C`` / ``Union[A, B]``; ``[node]`` otherwise."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _union_members(node.left) + _union_members(node.right)
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == 'Union'
+    ):
+        if isinstance(node.slice, ast.Tuple):
+            return list(node.slice.elts)
+        return [node.slice]
+    return [node]
+
+
 class TypeResolver:
     """Owns the type-introspection helpers, seeded once with the generated types.
 
@@ -264,6 +295,38 @@ class TypeResolver:
             if isinstance(node, ast.Name) and node.id in available_models:
                 imports.setdefault(MODELS_MODULE, set()).add(node.id)
         return imports
+
+    def pydantic_model_names(self) -> set[str]:
+        """Names of the generated pydantic model classes (enums excluded)."""
+        names: set[str] = set()
+        for name, type_ in self._types.items():
+            impl = type_.implementation_ast
+            if isinstance(impl, ast.ClassDef) and not any(
+                isinstance(base, ast.Name) and base.id in _ENUM_BASES
+                for base in impl.bases
+            ):
+                names.add(name)
+        return names
+
+    def export_model_ast(self, item_type_ast: ast.expr) -> ast.expr | None:
+        """The ``model=`` argument an export wrapper passes for ``item_type_ast``.
+
+        A model class gives ``Dog``; a union of model classes -- a
+        discriminated ``Annotated[Dog | Cat, Field(...)]`` included -- gives
+        the member tuple ``(Dog, Cat)``, which the runtime writers accept. Any
+        other item type (``str``, an enum, a union with a primitive) has no
+        columns to write, so it gets no export variant: ``None``.
+        """
+        members = _union_members(_strip_annotated(strip_optional(item_type_ast)))
+        models = self.pydantic_model_names()
+        if not members or not all(
+            isinstance(member, ast.Name) and member.id in models for member in members
+        ):
+            return None
+        names = [cast(ast.Name, member).id for member in members]
+        if len(names) == 1:
+            return _name(names[0])
+        return ast.Tuple(elts=[_name(n) for n in names], ctx=ast.Load())
 
     def used_model_names(self, endpoints: list[Endpoint]) -> set[str]:
         """Model names actually referenced by the given endpoints' signatures."""
@@ -659,6 +722,9 @@ class ExportFeature(EndpointFeature):
         )
         if item_type_ast is None:
             return False
+        export_model = ctx.resolver.export_model_ast(item_type_ast)
+        if export_model is None:
+            return False
 
         should_generate, formats, _path = cfg.export.should_generate_for_endpoint(
             endpoint_name=ctx.endpoint.sync_fn_name,
@@ -677,7 +743,7 @@ class ExportFeature(EndpointFeature):
                 target_iter_fn_name=f'{base_name}_iter',
                 parameters=ep.parameters,
                 request_body_info=ep.request_body,
-                item_type_ast=item_type_ast,
+                item_type_ast=export_model,
                 item_type_imports=item_type_imports,
                 docs=ep.description,
                 is_async=is_async,
@@ -705,6 +771,9 @@ class ExportFeature(EndpointFeature):
         )
         if item_type_ast is None:
             return False
+        export_model = ctx.resolver.export_model_ast(item_type_ast)
+        if export_model is None:
+            return False
 
         should_generate, formats, _path = cfg.export.should_generate_for_endpoint(
             endpoint_name=ctx.endpoint.sync_fn_name,
@@ -728,7 +797,7 @@ class ExportFeature(EndpointFeature):
                 target_fn_name=base_name,
                 parameters=ep.parameters,
                 request_body_info=ep.request_body,
-                item_type_ast=item_type_ast,
+                item_type_ast=export_model,
                 item_type_imports=item_type_imports,
                 docs=ep.description,
                 is_async=is_async,

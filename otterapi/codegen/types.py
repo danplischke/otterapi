@@ -10,7 +10,7 @@ import ast
 import dataclasses
 import keyword
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -522,6 +522,38 @@ def _schema_constraints_to_field_kwargs(schema: 'Schema') -> list[ast.keyword]:
     return kwargs
 
 
+def _iter_schemas(root: Any) -> Iterator[Schema]:
+    """Yield every ``Schema`` reachable from ``root`` (an OpenAPI document).
+
+    Walks pydantic model fields, dicts and lists; ``$ref``s are left as
+    ``Reference`` objects, so the walk is a finite tree.
+    """
+    stack: list[Any] = [root]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, Schema):
+            yield node
+        if isinstance(node, BaseModel):
+            children: Iterable[Any] = (
+                getattr(node, name, None) for name in type(node).model_fields
+            )
+        elif isinstance(node, dict):
+            children = node.values()
+        elif isinstance(node, (list, tuple)):
+            children = node
+        else:
+            continue
+        stack.extend(
+            child
+            for child in children
+            if isinstance(child, (BaseModel, dict, list, tuple))
+        )
+
+
 def _binop_includes_none(node: ast.expr) -> bool:
     """Return True if a BitOr chain contains ``None`` as one of the operands."""
     if isinstance(node, ast.Constant) and node.value is None:
@@ -553,6 +585,11 @@ class TypeGenerator(OpenAPIProcessor):
     # ``$ref`` path -> registry name its in-progress build is expected to use.
     _refs_in_progress: dict[str, str] = dataclasses.field(
         default_factory=dict, init=False
+    )
+    # id(variant schema) -> {discriminator property: tag values}; built lazily
+    # from the whole document by ``_discriminator_tags_for``.
+    _discriminator_tags: dict[int, dict[str, list[Any]]] | None = dataclasses.field(
+        default=None, init=False
     )
 
     @staticmethod
@@ -811,12 +848,16 @@ class TypeGenerator(OpenAPIProcessor):
         literal_values: list[ast.expr] = [
             ast.Constant(value=v) for v in (schema.enum or [])
         ]
+        # ``Literal['a']`` for one value; a tuple would render ``Literal['a',]``.
+        literal_slice: ast.expr = (
+            literal_values[0]
+            if len(literal_values) == 1
+            else ast.Tuple(elts=literal_values, ctx=ast.Load())
+        )
         type_ = Type(
             None,
             sanitize_identifier(schema.title) if schema.title else None,
-            annotation_ast=_subscript(
-                'Literal', ast.Tuple(elts=literal_values, ctx=ast.Load())
-            ),
+            annotation_ast=_subscript('Literal', literal_slice),
             implementation_ast=None,
             type='primitive',
         )
@@ -1167,6 +1208,39 @@ class TypeGenerator(OpenAPIProcessor):
                 return False
         return True
 
+    def _discriminator_tags_for(self, schema: Schema) -> dict[str, list[Any]]:
+        """``{property: tag values}`` that ``schema`` carries as a union variant.
+
+        A variant of a discriminated union (one ``_build_union_variant_type``
+        emits ``Field(discriminator=...)`` for) must type its tag property as
+        ``Literal['dog']``: pydantic rejects the union otherwise ("needs field
+        'kind' to be of type Literal"), so every response would fail to parse.
+        Variants are often built before the union that references them, so the
+        whole document is scanned once, up front.
+        """
+        if self._discriminator_tags is None:
+            self._discriminator_tags = self._collect_discriminator_tags()
+        return self._discriminator_tags.get(id(schema), {})
+
+    def _collect_discriminator_tags(self) -> dict[int, dict[str, list[Any]]]:
+        tags: dict[int, dict[str, list[Any]]] = {}
+        if self.openapi is None:
+            return tags
+        for union in _iter_schemas(self.openapi):
+            if union.discriminator is None or not (union.oneOf or union.anyOf):
+                continue
+            try:
+                if not self._discriminator_is_literal(union):
+                    continue
+                prop = union.discriminator.propertyName
+                for variant in union.oneOf or union.anyOf or []:
+                    resolved, _ = self._resolve_reference(variant)
+                    disc_prop = cast('Schema', (resolved.properties or {})[prop])
+                    tags.setdefault(id(resolved), {})[prop] = list(disc_prop.enum or [])
+            except (ValueError, KeyError):
+                continue
+        return tags
+
     def _build_union_variant_type(self, schema: Schema, base_name: str | None) -> Type:
         """Build an inline union type for an ``anyOf``/``oneOf`` schema.
 
@@ -1244,7 +1318,22 @@ class TypeGenerator(OpenAPIProcessor):
             and not name.startswith('_')
         )
         taken: set[str] = set()
+        discriminator_tags = self._discriminator_tags_for(schema)
         for property_name, property_schema in properties.items():
+            tag_values = discriminator_tags.get(property_name)
+            if tag_values:
+                field, tag_type = self._discriminator_tag_field(
+                    property_name,
+                    cast('Schema', property_schema),
+                    tag_values,
+                    is_required=property_name in required_fields,
+                    taken=taken,
+                    keep=keep,
+                )
+                body.append(field)
+                field_types.append(tag_type)
+                continue
+
             # Resolve reference to check for nullable
             resolved_schema = cast('Schema', property_schema)
             if hasattr(property_schema, 'ref') and property_schema.ref:
@@ -1271,6 +1360,37 @@ class TypeGenerator(OpenAPIProcessor):
             body.append(field)
             field_types.append(type_)
         return body, field_types
+
+    def _discriminator_tag_field(
+        self,
+        property_name: str,
+        property_schema: Schema,
+        tag_values: list[Any],
+        *,
+        is_required: bool,
+        taken: set[str],
+        keep: frozenset[str],
+    ) -> tuple[ast.AnnAssign, Type]:
+        """A union variant's tag property: ``kind: Literal['dog']``.
+
+        Required when the spec requires it (as OpenAPI mandates for a
+        discriminator). An optional tag defaults to its own value rather than
+        ``None``, since a discriminator can never be ``None``.
+        """
+        tag_type = self._create_literal_type(Schema(enum=tag_values))
+        field_schema = property_schema
+        if not is_required:
+            field_schema = property_schema.model_copy(update={'default': tag_values[0]})
+        field = self._create_pydantic_field(
+            property_name,
+            field_schema,
+            tag_type,
+            is_required,
+            False,
+            taken=taken,
+            keep=keep,
+        )
+        return field, tag_type
 
     def _prepend_model_config_and_docstring(
         self, body: list[ast.stmt], schema: Schema, name: str

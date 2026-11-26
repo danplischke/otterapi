@@ -684,10 +684,15 @@ export:
 
 ### Usage
 
-Every list-returning endpoint gets an `<endpoint>_export` function (and an
-`async_<endpoint>_export` twin) that mirrors the endpoint's own parameters and
-adds `output_path` first, plus keyword-only `format` and `batch_size`. Extra
-keyword arguments are passed through to the file writer.
+Every endpoint returning a list of models gets an `<endpoint>_export` function
+(and an `async_<endpoint>_export` twin) that mirrors the endpoint's own
+parameters and adds `output_path` first, plus keyword-only `format` and
+`batch_size`. Extra keyword arguments are passed through to the file writer.
+A list of a union of models -- such as a `oneOf` with a `discriminator` --
+exports too: the file has every variant's columns, and each row fills its own
+(CSV / TSV cells and Parquet values of the others stay empty; JSONL keeps each
+row's shape). Lists of plain values (`list[str]`) have no columns, so they get
+no export function.
 
 ```python
 from client import list_users_export, async_list_users_export
