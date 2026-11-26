@@ -1,0 +1,17 @@
+openapi: 3.0.0
+info:
+  title: Shadow API
+  version: 1.0.0
+paths:
+  /close/sessions:
+    get:
+      operationId: listSessions
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object

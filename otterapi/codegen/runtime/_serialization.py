@@ -1,6 +1,6 @@
 """Wire-format serialization for request parameters.
 
-httpx renders query parameters with ``str(value)`` and rejects ``None`` header
+httpx2 renders query parameters with ``str(value)`` and rejects ``None`` header
 values outright.  Neither matches the OpenAPI wire format:
 
 * a ``str``-mixin enum stringifies to ``'PetStatus.AVAILABLE'`` instead of
@@ -106,12 +106,16 @@ def _as_mapping(value: Any) -> dict[str, Any] | None:
     """Return a plain dict for anything object-shaped, else ``None``."""
     if isinstance(value, Mapping):
         return dict(value)
+    # ``callable()`` narrows to a callable returning ``object`` under pyright,
+    # so the dump result goes through an ``Any`` before ``dict()`` sees it.
     dump = getattr(value, 'model_dump', None)
     if callable(dump):
-        return dict(dump(mode='json', by_alias=True, exclude_none=True))
+        dumped: Any = dump(mode='json', by_alias=True, exclude_none=True)
+        return dict(dumped)
     dump = getattr(value, 'dict', None)  # Pydantic v1
     if callable(dump):
-        return dict(dump())
+        dumped = dump()
+        return dict(dumped)
     return None
 
 
@@ -166,7 +170,7 @@ def serialize_query_params(
     params: Any,
     styles: Any = None,
 ) -> list[tuple[str, str]] | None:
-    """Flatten query parameters into httpx-ready ``(key, value)`` pairs.
+    """Flatten query parameters into httpx2-ready ``(key, value)`` pairs.
 
     ``None`` and :data:`NOTSET` values are dropped (an unset optional
     parameter is an absent parameter, not an empty one).  A list of pairs
@@ -182,7 +186,7 @@ def serialize_query_params(
             ``('form', True)``.
 
     Returns:
-        The pairs to hand to httpx, or ``None`` when nothing is left to send.
+        The pairs to hand to httpx2, or ``None`` when nothing is left to send.
     """
     if not params:
         return None
@@ -199,7 +203,7 @@ def serialize_query_params(
 def serialize_headers(headers: Any) -> dict[str, str]:
     """Drop unset headers and render the rest as wire strings.
 
-    httpx requires ``str``/``bytes`` header values, so an unset optional header
+    httpx2 requires ``str``/``bytes`` header values, so an unset optional header
     parameter would otherwise raise ``TypeError`` on the default call path.
 
     Args:

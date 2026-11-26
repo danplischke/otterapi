@@ -8,7 +8,7 @@ supports, so they declare their generics the pre-3.12 way::
 
     def paginate_offset(..., extract_items: Callable[[Any], list[T]]) -> list[T]:
 
-That is the only form that runs on Python 3.10/3.11, but projects that target
+That is the only form that runs on Python 3.11, but projects that target
 3.12+ lint it as legacy (ruff's UP047, ``non-pep695-generic-function``).  When
 a document sets ``target_python: "3.12"`` (or newer) the same helpers are
 emitted with type parameters instead::

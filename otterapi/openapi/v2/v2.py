@@ -55,7 +55,7 @@ Features:
 - All OAuth2 flows supported
 """
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import (
@@ -78,7 +78,7 @@ from otterapi.openapi.warnings import WarningCollector
 # ============================================================================
 
 
-class SchemeType(str, Enum):
+class SchemeType(StrEnum):
     """Transfer protocol schemes."""
 
     HTTP = 'http'
@@ -87,7 +87,7 @@ class SchemeType(str, Enum):
     WSS = 'wss'
 
 
-class ParameterLocation(str, Enum):
+class ParameterLocation(StrEnum):
     """Parameter location types."""
 
     QUERY = 'query'
@@ -97,7 +97,7 @@ class ParameterLocation(str, Enum):
     BODY = 'body'
 
 
-class PrimitiveType(str, Enum):
+class PrimitiveType(StrEnum):
     """Primitive types for non-body parameters."""
 
     STRING = 'string'
@@ -108,7 +108,7 @@ class PrimitiveType(str, Enum):
     FILE = 'file'
 
 
-class CollectionFormat(str, Enum):
+class CollectionFormat(StrEnum):
     """Collection format for array parameters."""
 
     CSV = 'csv'
@@ -117,7 +117,7 @@ class CollectionFormat(str, Enum):
     PIPES = 'pipes'
 
 
-class CollectionFormatWithMulti(str, Enum):
+class CollectionFormatWithMulti(StrEnum):
     """Collection format including multi for query/formData parameters."""
 
     CSV = 'csv'
@@ -127,7 +127,7 @@ class CollectionFormatWithMulti(str, Enum):
     MULTI = 'multi'
 
 
-class SecuritySchemeType(str, Enum):
+class SecuritySchemeType(StrEnum):
     """Security scheme types."""
 
     BASIC = 'basic'
@@ -135,7 +135,7 @@ class SecuritySchemeType(str, Enum):
     OAUTH2 = 'oauth2'
 
 
-class OAuth2Flow(str, Enum):
+class OAuth2Flow(StrEnum):
     """OAuth2 flow types."""
 
     IMPLICIT = 'implicit'
@@ -144,7 +144,7 @@ class OAuth2Flow(str, Enum):
     ACCESS_CODE = 'accessCode'
 
 
-class ApiKeyLocation(str, Enum):
+class ApiKeyLocation(StrEnum):
     """API key location."""
 
     HEADER = 'header'

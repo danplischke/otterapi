@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
-import httpx
+import httpx2
 import yaml
 from pydantic import TypeAdapter, ValidationError
 
@@ -66,7 +66,7 @@ class SchemaLoader:
 
     def __init__(
         self,
-        http_client: httpx.Client | None = None,
+        http_client: httpx2.Client | None = None,
         resolve_external_refs: bool = False,
         base_path: str | Path | None = None,
         lenient: bool = False,
@@ -172,7 +172,7 @@ class SchemaLoader:
             if self._http_client:
                 response = self._http_client.get(url)
             else:
-                response = httpx.get(url, follow_redirects=True, timeout=30.0)
+                response = httpx2.get(url, follow_redirects=True, timeout=30.0)
 
             response.raise_for_status()
             content_type = response.headers.get('content-type', '')
@@ -183,7 +183,7 @@ class SchemaLoader:
             else:
                 return json.loads(content)
 
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise SchemaLoadError(url, cause=e)
         except (json.JSONDecodeError, yaml.YAMLError) as e:
             raise SchemaLoadError(url, cause=e)

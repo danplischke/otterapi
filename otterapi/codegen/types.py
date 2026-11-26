@@ -8,6 +8,7 @@ This module provides:
 
 import ast
 import dataclasses
+import keyword
 import logging
 from collections.abc import Iterable
 from datetime import date, datetime, time, timedelta
@@ -53,6 +54,50 @@ _PYTHON_BUILTIN_TYPE_NAMES: frozenset[str] = frozenset(
         'object',
         'None',
         'complex',
+    }
+)
+
+# Attributes/methods pydantic's ``BaseModel`` already defines. A field named
+# after one of these shadows the parent attribute -- pydantic v2 emits a
+# ``UserWarning`` at class-definition time (an error under ``filterwarnings =
+# error``) and type-checkers flag the incompatible override -- so such fields
+# are suffixed with ``_`` and keep the original name as an alias.
+#
+# A fixed list (pydantic 2.12's public ``BaseModel`` names, which include the
+# v1 API) rather than ``dir(BaseModel)`` at import time: generated attribute
+# names must not depend on which pydantic happens to be installed where the
+# generator runs. ``test_reserved_names_cover_installed_pydantic`` flags a
+# pydantic release that adds a name.
+_PYDANTIC_RESERVED_NAMES: frozenset[str] = frozenset(
+    {
+        'construct',
+        'copy',
+        'dict',
+        'from_orm',
+        'json',
+        'model_computed_fields',
+        'model_config',
+        'model_construct',
+        'model_copy',
+        'model_dump',
+        'model_dump_json',
+        'model_extra',
+        'model_fields',
+        'model_fields_set',
+        'model_json_schema',
+        'model_parametrized_name',
+        'model_post_init',
+        'model_rebuild',
+        'model_validate',
+        'model_validate_json',
+        'model_validate_strings',
+        'parse_file',
+        'parse_obj',
+        'parse_raw',
+        'schema',
+        'schema_json',
+        'update_forward_refs',
+        'validate',
     }
 )
 
@@ -230,7 +275,7 @@ class Parameter:
 
     @property
     def uses_default_style(self) -> bool:
-        """True when httpx's own rendering already matches the spec.
+        """True when httpx2's own rendering already matches the spec.
 
         Endpoints only emit a ``param_styles`` entry for parameters that
         deviate, keeping the common case free of generated noise.
@@ -257,7 +302,7 @@ class ResponseInfo:
     def is_error(self) -> bool:
         """Check if this response is one the client raises on.
 
-        The generated client raises on ``response.is_error`` -- httpx's name
+        The generated client raises on ``response.is_error`` -- httpx2's name
         for 4xx and 5xx -- before any parsing happens, so an error response's
         schema never reaches the parser and must not widen the return type.
         """
@@ -363,10 +408,10 @@ class RequestBodyInfo:
 
     @property
     def httpx_param_name(self) -> str:
-        """Get the httpx parameter name for this content type.
+        """Get the httpx2 parameter name for this content type.
 
         Returns:
-            The appropriate httpx parameter name: 'json', 'data', 'files', or 'content'.
+            The appropriate httpx2 parameter name: 'json', 'data', 'files', or 'content'.
         """
         if self.is_json:
             return 'json'
@@ -397,6 +442,7 @@ class Endpoint:
     path: str = ''
     description: str | None = None
     tags: list[str] | None = None  # OpenAPI tags for module splitting
+    operation_id: str | None = None  # raw operationId (for resource_naming)
 
     # Parameters and body
     parameters: list['Parameter'] | None = None
@@ -495,6 +541,19 @@ class TypeGenerator(OpenAPIProcessor):
     _building: list[str] = dataclasses.field(default_factory=list, init=False)
     # Names of models that participate in a reference cycle (need model_rebuild).
     _cyclic: set[str] = dataclasses.field(default_factory=set, init=False)
+    # Names of *union* schemas (anyOf/oneOf) currently being expanded. A named
+    # union is inlined (it has no cached class to break a cycle on), so a variant
+    # that refs back to it would recurse forever; this tracks in-progress unions
+    # so the re-entry can fall back to ``Any`` instead.
+    _building_unions: set[str] = dataclasses.field(default_factory=set, init=False)
+    # ``$ref`` path -> name of the type generated for it (see schema_to_type).
+    _ref_type_names: dict[str, str] = dataclasses.field(
+        default_factory=dict, init=False
+    )
+    # ``$ref`` path -> registry name its in-progress build is expected to use.
+    _refs_in_progress: dict[str, str] = dataclasses.field(
+        default_factory=dict, init=False
+    )
 
     @staticmethod
     def _rename_type(type_: Type, new_name: str) -> None:
@@ -586,12 +645,16 @@ class TypeGenerator(OpenAPIProcessor):
         return 'AutoEnum'
 
     def _find_existing_identical_enum(
-        self, enum_values_key: tuple[str, ...]
+        self, enum_values_key: tuple[tuple[str, str], ...]
     ) -> Type | None:
         """Find a previously-registered Enum class with the same value set.
 
         Reusing an identical enum avoids generating near-duplicates like
         ``Status``/``Status1`` for schemas that share the same value set.
+
+        Values are compared together with their Python type: a string enum
+        ``['1', '2']`` must not reuse an integer enum ``[1, 2]``, or the shared
+        class rejects the string side's default (``Level('2')``) at import.
         """
         for existing_type in self.types.values():
             if existing_type.type != 'model' or not isinstance(
@@ -600,12 +663,12 @@ class TypeGenerator(OpenAPIProcessor):
                 continue
             existing_class = existing_type.implementation_ast
             if not any(
-                isinstance(base, ast.Name) and base.id == 'Enum'
+                isinstance(base, ast.Name) and base.id in ('Enum', 'StrEnum')
                 for base in existing_class.bases
             ):
                 continue
             existing_values = [
-                str(node.value.value)
+                (type(node.value.value).__name__, str(node.value.value))
                 for node in existing_class.body
                 if isinstance(node, ast.Assign)
                 and node.value
@@ -625,7 +688,7 @@ class TypeGenerator(OpenAPIProcessor):
         return f'{name}{counter}'
 
     @staticmethod
-    def _build_enum_member_assignments(schema: Schema) -> list[ast.stmt]:
+    def _build_enum_member_assignments(values: list[Any]) -> list[ast.stmt]:
         """Build ``NAME = 'value'`` assignments for each non-null enum value.
 
         Sanitizes values into valid identifiers and disambiguates collisions
@@ -633,7 +696,7 @@ class TypeGenerator(OpenAPIProcessor):
         """
         enum_body: list[ast.stmt] = []
         seen_member_names: dict[str, int] = {}
-        for value in schema.enum or []:
+        for value in values:
             if value is None:
                 continue
             if isinstance(value, str):
@@ -657,6 +720,20 @@ class TypeGenerator(OpenAPIProcessor):
             )
         return enum_body
 
+    @staticmethod
+    def _enum_type_is_string(t: Any) -> bool:
+        """Whether an enum schema's ``type`` is string (or a nullable string).
+
+        ``schema.type`` may be a list -- a nullable type array such as
+        ``["string", "null"]``.
+        """
+        if isinstance(t, list):
+            return any(
+                (hasattr(item, 'value') and item.value == 'string') or item == 'string'
+                for item in t
+            )
+        return bool(t and hasattr(t, 'value') and t.value == 'string')
+
     def _create_enum_type(
         self,
         schema: Schema,
@@ -677,36 +754,35 @@ class TypeGenerator(OpenAPIProcessor):
         """
         enum_name = self._resolve_enum_name(schema, name, base_name, field_name)
 
-        enum_values_key = tuple(
-            sorted(str(v) for v in (schema.enum or []) if v is not None)
-        )
+        # A ``type: string`` enum is a StrEnum, whose members must be str. YAML
+        # 1.1 reads unquoted ``ON`` / ``OFF`` / ``yes`` as booleans, so coerce
+        # such values with ``str()`` -- what the former ``(str, Enum)`` base did
+        # to them at runtime -- instead of failing at import.
+        is_string_enum = self._enum_type_is_string(schema.type)
+        values = [
+            v if isinstance(v, str) or not is_string_enum else str(v)
+            for v in (schema.enum or [])
+            if v is not None
+        ]
+
+        enum_values_key = tuple(sorted((type(v).__name__, str(v)) for v in values))
         existing = self._find_existing_identical_enum(enum_values_key)
         if existing is not None:
             return existing
 
         enum_name = self._make_unique_enum_name(enum_name)
 
-        enum_body = self._build_enum_member_assignments(schema)
+        enum_body = self._build_enum_member_assignments(values)
         if not enum_body:
             return self._create_literal_type(schema)
 
-        # class EnumName(str, Enum):  # str mixin for string enums
+        # class EnumName(StrEnum):  # string enums; plain Enum otherwise
         #     MEMBER = 'value'
-        # schema.type may be a list (nullable type array like ["string", "null"])
-        def _type_is_string(t) -> bool:
-            if isinstance(t, list):
-                return any(
-                    (hasattr(item, 'value') and item.value == 'string')
-                    or item == 'string'
-                    for item in t
-                )
-            return bool(t and hasattr(t, 'value') and t.value == 'string')
-
-        bases: list[ast.expr] = (
-            [_name('str'), _name('Enum')]
-            if _type_is_string(schema.type)
-            else [_name('Enum')]
-        )
+        # StrEnum (3.11+, the oldest supported target) is what ``(str, Enum)``
+        # is spelled as on 3.11 (ruff UP042), and its ``str()`` / f-string
+        # rendering is the value rather than ``EnumName.MEMBER``.
+        enum_base = 'StrEnum' if is_string_enum else 'Enum'
+        bases: list[ast.expr] = [_name(enum_base)]
 
         enum_class = ast.ClassDef(
             name=enum_name,
@@ -724,7 +800,7 @@ class TypeGenerator(OpenAPIProcessor):
             implementation_ast=enum_class,
             type='model',  # Treat as model so it gets included in models.py
         )
-        type_.add_implementation_import('enum', 'Enum')
+        type_.add_implementation_import('enum', enum_base)
 
         self.types[enum_name] = type_
 
@@ -770,9 +846,24 @@ class TypeGenerator(OpenAPIProcessor):
             return None
         return schema.type
 
+    @staticmethod
+    def _is_none_annotation(node: ast.expr | None) -> bool:
+        """True for a bare ``None`` annotation in either AST form.
+
+        A ``null``-typed schema is emitted as ``ast.Name('None')`` (see
+        ``_PRIMITIVE_TYPE_MAP``); ``ast.Constant(None)`` also occurs. Wrapping
+        either in ``| None`` yields the invalid ``None | None``.
+        """
+        return (isinstance(node, ast.Constant) and node.value is None) or (
+            isinstance(node, ast.Name) and node.id == 'None'
+        )
+
     def _make_nullable_type(self, base_type: Type) -> Type:
         """Wrap a type annotation to make it nullable (T | None)."""
         assert base_type.annotation_ast is not None
+        # A ``null``-typed base is already None; ``None | None`` is invalid.
+        if self._is_none_annotation(base_type.annotation_ast):
+            return base_type
         nullable_ast = _union_expr([base_type.annotation_ast, ast.Constant(value=None)])
 
         type_ = Type(
@@ -896,13 +987,30 @@ class TypeGenerator(OpenAPIProcessor):
         field_type: Type,
         is_required: bool = False,
         is_nullable: bool = False,
+        taken: set[str] | None = None,
+        keep: frozenset[str] = frozenset(),
     ) -> ast.AnnAssign:
+        """Build one model field.
+
+        ``taken`` holds the Python names already used by this model's fields
+        and receives this one's. ``keep`` holds the model's property names that
+        are usable as-is; a *renamed* field (``_id`` -> ``field_id``) steps
+        around both, so it never silently replaces a real ``field_id`` property
+        -- whatever order the properties come in.
+        """
         if hasattr(field_schema, 'ref'):
             field_schema, _ = self._resolve_reference(field_schema)
 
         field_keywords = []
 
         sanitized_field_name = sanitize_parameter_field_name(field_name)
+
+        # pydantic forbids field names with a leading underscore (they are
+        # treated as private attributes and rejected at class creation). A
+        # property like ``_1`` must be renamed to a valid identifier; the
+        # original is preserved as the alias below.
+        if sanitized_field_name.startswith('_'):
+            sanitized_field_name = 'field' + sanitized_field_name
 
         # Detect field-name / type-name clash: if the sanitized field name is
         # the same as a registered type name OR a Python builtin type name,
@@ -914,34 +1022,59 @@ class TypeGenerator(OpenAPIProcessor):
         if (
             sanitized_field_name in self.types
             or sanitized_field_name in _PYTHON_BUILTIN_TYPE_NAMES
+            or sanitized_field_name in _PYDANTIC_RESERVED_NAMES
         ):
             sanitized_field_name = sanitized_field_name + '_'
 
-        # Determine the annotation - wrap in Union with None if nullable
+        # Resolve the default first: an optional (not-required) field with no
+        # explicit default gets ``default=None`` and can therefore hold None at
+        # runtime, which the annotation must admit (see ``defaults_to_none``).
         assert field_type.annotation_ast is not None
         annotation_ast: ast.expr = field_type.annotation_ast
-        if is_nullable and not self._type_already_nullable(field_type):
-            annotation_ast = _union_expr(
-                [field_type.annotation_ast, ast.Constant(value=None)]
-            )
 
         value = None
+        defaults_to_none = False
         if field_schema.default is not None and isinstance(
             field_schema.default, (str, int, float, bool)
         ):
-            field_keywords.append(
-                ast.keyword(arg='default', value=ast.Constant(field_schema.default))
-            )
+            default_ast: ast.expr = ast.Constant(field_schema.default)
+            # An enum-typed field needs its default expressed as the enum, not a
+            # bare scalar: ``mode: Mode = Field(default='ALWAYS')`` is a ``str``
+            # where the annotation wants ``Mode``. Wrap it as ``Mode('ALWAYS')``
+            # so it type-checks (pydantic already coerces at runtime). Guard on
+            # the value being a declared member so a malformed spec default does
+            # not raise at import time -- fall back to the raw constant instead.
+            if (
+                field_schema.enum
+                and field_type.name
+                and field_schema.default in field_schema.enum
+            ):
+                default_ast = _call(
+                    func=_name(field_type.name),
+                    args=[ast.Constant(field_schema.default)],
+                )
+            field_keywords.append(ast.keyword(arg='default', value=default_ast))
         elif field_schema.default is None and not is_required:
             # Only add default=None for optional (not required) fields
             # Nullable but required fields should NOT have a default
             field_keywords.append(ast.keyword(arg='default', value=ast.Constant(None)))
-            # A field that defaults to None can hold None, so the annotation has
-            # to say so.  Without this the model advertises `id: int` while
-            # `Model().id` is None -- a lie to both the reader and the type
-            # checker.
-            if not self._annotation_includes_none(annotation_ast):
-                annotation_ast = _union_expr([annotation_ast, ast.Constant(value=None)])
+            defaults_to_none = True
+
+        # Wrap the annotation in ``| None`` when the schema is nullable OR when
+        # the field defaults to None: an omitted optional field is ``None`` at
+        # runtime, so a bare ``T`` annotation is a lie the type-checker rejects.
+        if (is_nullable or defaults_to_none) and not self._type_already_nullable(
+            field_type
+        ):
+            annotation_ast = _union_expr(
+                [field_type.annotation_ast, ast.Constant(value=None)]
+            )
+
+        if taken is not None:
+            avoid = taken if sanitized_field_name == field_name else taken | keep
+            while sanitized_field_name in avoid:
+                sanitized_field_name += '_'
+            taken.add(sanitized_field_name)
 
         if sanitized_field_name != field_name:
             field_keywords.append(
@@ -982,6 +1115,11 @@ class TypeGenerator(OpenAPIProcessor):
         Handles both the ``Union[X, None]`` (Subscript) form and the
         ``X | None`` (BinOp chain) form generated by ``_union_expr``.
         """
+        # A bare ``None`` annotation (from a ``null``-typed schema) is already
+        # None -- wrapping it would produce the invalid ``None | None``, which
+        # raises ``TypeError`` when pydantic evaluates the annotation.
+        if TypeGenerator._is_none_annotation(annotation):
+            return True
         # Union[..., None] form
         if isinstance(annotation, ast.Subscript):
             if (
@@ -1096,7 +1234,17 @@ class TypeGenerator(OpenAPIProcessor):
         body: list[ast.stmt] = []
         field_types: list[Type] = []
         required_fields = set(schema.required or [])
-        for property_name, property_schema in (schema.properties or {}).items():
+        properties = schema.properties or {}
+        # Property names usable verbatim keep them; renamed ones step around.
+        keep = frozenset(
+            name
+            for name in properties
+            if name.isidentifier()
+            and not keyword.iskeyword(name)
+            and not name.startswith('_')
+        )
+        taken: set[str] = set()
+        for property_name, property_schema in properties.items():
             # Resolve reference to check for nullable
             resolved_schema = cast('Schema', property_schema)
             if hasattr(property_schema, 'ref') and property_schema.ref:
@@ -1116,6 +1264,8 @@ class TypeGenerator(OpenAPIProcessor):
                 type_,
                 is_required,
                 is_nullable,
+                taken=taken,
+                keep=keep,
             )
 
             body.append(field)
@@ -1236,6 +1386,18 @@ class TypeGenerator(OpenAPIProcessor):
             if own_placeholder and stable_name is not None:
                 self._building.remove(stable_name)
                 del self.types[stable_name]
+            # Recursive-union guard: an inlined union has no cached class for the
+            # $ref cycle guard to break on, so a variant that (transitively) refs
+            # back to this same union recurses forever. Track in-progress union
+            # names and fall back to ``Any`` for the self-referential arm.
+            if stable_name is not None:
+                if stable_name in self._building_unions:
+                    return self._make_any_type()
+                self._building_unions.add(stable_name)
+                try:
+                    return self._build_union_variant_type(schema, base_name)
+                finally:
+                    self._building_unions.discard(stable_name)
             return self._build_union_variant_type(schema, base_name)
 
         name = stable_name or 'UnnamedModel'
@@ -1394,23 +1556,74 @@ class TypeGenerator(OpenAPIProcessor):
             schema, schema_name or name, base_name=base_name
         )
 
+    def _referenced_type_name(self, ref: Reference) -> str | None:
+        """Registry name a ``$ref``-ed schema is stored under.
+
+        ``_create_object_type`` prefers a schema's ``title`` over its ``$ref``
+        key when naming the generated model, so the two can differ (Stripe:
+        key ``charge``, title ``Charge``). The cycle guard must know that
+        title name or it misses the cache and rebuilds recursive schemas
+        forever. Returns ``None`` for refs that cannot be resolved.
+        """
+        try:
+            resolved, ref_based = self._resolve_reference(ref)
+        except ValueError:
+            return None
+        title = getattr(resolved, 'title', None)
+        return sanitize_identifier(title) if title else ref_based
+
     def schema_to_type(
         self,
         schema: Schema | Reference,
         base_name: str | None = None,
         field_name: str | None = None,
     ) -> Type:
-        if isinstance(schema, Reference):
-            ref_name = schema.ref.split('/')[-1]
-            sanitized_ref_name = sanitize_identifier(ref_name)
-            if sanitized_ref_name in self.types:
-                # If the cached type is still being built, this is a cycle.
-                if sanitized_ref_name in self._building:
-                    # Mark the whole in-progress chain — every model on the
-                    # stack is part of the cycle that just closed.
-                    self._cyclic.update(self._building)
-                return self.types[sanitized_ref_name]
+        if not isinstance(schema, Reference):
+            return self._schema_to_type_uncached(schema, base_name, field_name)
 
+        # A ``$ref`` is cached by its own path: the generated model can be named
+        # after the schema's ``title`` rather than its component key (Stripe:
+        # key ``charge``, title ``Charge``), and titles are not unique -- two
+        # schemas titled ``Address`` are different models -- so neither name is
+        # a safe cache key on its own.
+        ref = schema.ref
+        known = self._ref_type_names.get(ref)
+        if known is not None and known in self.types:
+            if known in self._building:
+                self._cyclic.update(self._building)
+            return self.types[known]
+
+        sanitized_ref_name = sanitize_identifier(ref.split('/')[-1])
+        if sanitized_ref_name in self.types:
+            # If the cached type is still being built, this is a cycle;
+            # mark the whole in-progress chain that just closed.
+            if sanitized_ref_name in self._building:
+                self._cyclic.update(self._building)
+            return self.types[sanitized_ref_name]
+
+        # Re-entry while this very ref is still being built (a recursive
+        # schema): break on its own placeholder, registered under the name the
+        # build is using -- which may be the title-derived one.
+        in_progress = self._refs_in_progress.get(ref)
+        if in_progress is not None and in_progress in self._building:
+            self._cyclic.update(self._building)
+            return self.types[in_progress]
+
+        self._refs_in_progress[ref] = self._referenced_type_name(schema) or ''
+        try:
+            type_ = self._schema_to_type_uncached(schema, base_name, field_name)
+        finally:
+            self._refs_in_progress.pop(ref, None)
+        if type_.name and type_.name in self.types:
+            self._ref_type_names[ref] = type_.name
+        return type_
+
+    def _schema_to_type_uncached(
+        self,
+        schema: Schema | Reference,
+        base_name: str | None = None,
+        field_name: str | None = None,
+    ) -> Type:
         schema, schema_name = self._resolve_reference(schema)
 
         # Use schema_name (from $ref) as base_name for nested types if available

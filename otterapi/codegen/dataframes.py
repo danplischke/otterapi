@@ -90,6 +90,7 @@ def annotation_ast_returns_list(annotation_ast: 'ast.expr | None') -> bool:
 
     Returns:
         True if the annotation is a ``list[...]`` subscript, False otherwise.
+
         ``list[...] | None`` also counts: an optional envelope field still
         yields a list when it is present, and classifying it as non-list would
         silently drop the endpoint's DataFrame and export variants.
@@ -97,6 +98,8 @@ def annotation_ast_returns_list(annotation_ast: 'ast.expr | None') -> bool:
     # Kept in step with _extract_list_item_type: if this says "list" but the
     # item-type extraction disagrees, the endpoint gets an export wrapper with
     # no model to hand it.
+    if annotation_ast is None:
+        return False
     annotation_ast = strip_optional(annotation_ast)
 
     if isinstance(annotation_ast, ast.Subscript):

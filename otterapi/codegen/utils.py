@@ -23,8 +23,28 @@ __all__ = ('is_url', 'sanitize_identifier', 'to_snake_case')
 # Names that conflict with Pydantic/typing imports used in the generated
 # models.py.  Schemas whose sanitized name would collide get a trailing ``_``
 # (e.g. a schema named "Field" becomes the class ``Field_``).
+# Error classes every generated client defines in ``_client.py`` and
+# re-exports from the package (``from my_pkg import NotFoundError``).
+EXPORTED_ERROR_NAMES: tuple[str, ...] = (
+    'BaseAPIError',
+    'ClientError',
+    'ServerError',
+    'BadRequestError',
+    'UnauthorizedError',
+    'ForbiddenError',
+    'NotFoundError',
+    'ConflictError',
+    'UnprocessableEntityError',
+    'RateLimitError',
+    'InternalServerError',
+    'BadGatewayError',
+    'ServiceUnavailableError',
+    'GatewayTimeoutError',
+)
+
 _RESERVED_GENERATED_CLASS_NAMES: frozenset[str] = frozenset(
     {
+        # Names imported into models.py.
         'Field',
         'BaseModel',
         'Annotated',
@@ -33,6 +53,16 @@ _RESERVED_GENERATED_CLASS_NAMES: frozenset[str] = frozenset(
         'Optional',
         'Literal',
         'Enum',
+        'StrEnum',
+        # Classes the generated package defines and imports next to the models:
+        # a schema of the same name would shadow them -- ``client or Client()``
+        # in endpoints.py would build the model, ``from pkg import Client``
+        # would return it, and ``except pkg.NotFoundError`` would raise.
+        'Client',
+        'AsyncClient',
+        'Query',
+        'AsyncQuery',
+        *EXPORTED_ERROR_NAMES,
     }
 )
 
@@ -108,6 +138,20 @@ def to_snake_case(name: str) -> str:
     result = re.sub(r'_+', '_', result).strip('_')
 
     return sanitize_name_python_keywords(result)
+
+
+def to_attribute_name(name: str) -> str:
+    """Convert ``name`` into a snake_case Python attribute name.
+
+    Like :func:`to_snake_case` (which already escapes keywords: ``import`` ->
+    ``import_``), but also guarantees a valid identifier when the name starts
+    with a digit: ``2fa`` -> ``n2fa``. Returns ``''`` when nothing usable
+    remains, so callers can drop the name. Idempotent.
+    """
+    result = to_snake_case(name)
+    if result and result[0].isdigit():
+        result = 'n' + result
+    return result
 
 
 def sanitize_identifier(name: str) -> str:

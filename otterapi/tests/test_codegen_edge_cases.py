@@ -165,6 +165,6 @@ def test_nullable_string_enum_type_array_generates_str_enum_base():
     enum_source = _unparse(enum_type.implementation_ast)
 
     # The generator suffixes enum class names with "Enum"; the behavior under
-    # test is the `str, Enum` base emitted for a nullable (type-array) string
+    # test is the `StrEnum` base emitted for a nullable (type-array) string
     # enum, so assert on the base list rather than the exact class name.
-    assert 'class NullableStatusEnum(str, Enum):' in enum_source
+    assert 'class NullableStatusEnum(StrEnum):' in enum_source

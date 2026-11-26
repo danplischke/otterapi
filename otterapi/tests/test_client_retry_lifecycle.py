@@ -15,7 +15,7 @@ from types import TracebackType
 from typing import get_type_hints
 from unittest.mock import patch
 
-import httpx
+import httpx2
 import pytest
 
 from otterapi.codegen.codegen import Codegen
@@ -55,9 +55,9 @@ class TestRetryBehavior:
         """Returns a transport handler that cycles through a list of (status, body) pairs."""
         it = iter(responses)
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             status, body = next(it)
-            return httpx.Response(status, json={'detail': body})
+            return httpx2.Response(status, json={'detail': body})
 
         return handler
 
@@ -68,9 +68,9 @@ class TestRetryBehavior:
         def handler(request):
             nonlocal calls
             calls += 1
-            return httpx.Response(503, json={'detail': 'unavailable'})
+            return httpx2.Response(503, json={'detail': 'unavailable'})
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = Client(http_client=http, max_retries=0)
             with patch.object(retry_pkg._client, '_backoff_sleep'):
                 with pytest.raises(Exception):
@@ -85,10 +85,10 @@ class TestRetryBehavior:
             nonlocal calls
             calls += 1
             if calls < 3:
-                return httpx.Response(503, json={'detail': 'unavailable'})
-            return httpx.Response(200, json=[])
+                return httpx2.Response(503, json={'detail': 'unavailable'})
+            return httpx2.Response(200, json=[])
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = Client(http_client=http, max_retries=3)
             with patch.object(retry_pkg._client, '_backoff_sleep'):
                 retry_pkg.list_users(client=client)
@@ -101,9 +101,9 @@ class TestRetryBehavior:
         def handler(request):
             nonlocal calls
             calls += 1
-            return httpx.Response(503, json={'detail': 'always down'})
+            return httpx2.Response(503, json={'detail': 'always down'})
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = Client(http_client=http, max_retries=2)
             with patch.object(retry_pkg._client, '_backoff_sleep'):
                 with pytest.raises(Exception):
@@ -118,9 +118,9 @@ class TestRetryBehavior:
         def handler(request):
             nonlocal calls
             calls += 1
-            return httpx.Response(404, json={'detail': 'not found'})
+            return httpx2.Response(404, json={'detail': 'not found'})
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = Client(http_client=http, max_retries=3)
             with pytest.raises(Exception):
                 retry_pkg.list_users(client=client)
@@ -133,9 +133,9 @@ class TestRetryBehavior:
         def handler(request):
             nonlocal calls
             calls += 1
-            return httpx.Response(404, json={'detail': 'nope'})
+            return httpx2.Response(404, json={'detail': 'nope'})
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = Client(
                 http_client=http, max_retries=2, retry_statuses=frozenset({404})
             )
@@ -156,7 +156,7 @@ class TestLifecycle:
 
     def test_close_no_op_for_external_client(self, retry_pkg):
         Client = retry_pkg.Client
-        http = httpx.Client()
+        http = httpx2.Client()
         client = Client(http_client=http)
         client.close()
         assert not http.is_closed
@@ -177,7 +177,7 @@ class TestLifecycle:
     @pytest.mark.asyncio
     async def test_aclose_closes_external_async_client(self, retry_pkg):
         Client = retry_pkg.Client
-        async_http = httpx.AsyncClient()
+        async_http = httpx2.AsyncClient()
         client = Client(async_http_client=async_http)
         await client.aclose()
         assert async_http.is_closed
@@ -220,14 +220,14 @@ class TestBeforeRequestHook:
 
         def handler(request):
             seen['auth'] = request.headers.get('authorization')
-            return httpx.Response(200, json=[])
+            return httpx2.Response(200, json=[])
 
         class CustomClient(retry_pkg.Client):
             def _before_request(self, request):
                 request['headers']['Authorization'] = 'Bearer test-token'
                 return request
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = CustomClient(http_client=http, max_retries=0)
             retry_pkg.list_users(client=client)
         assert seen['auth'] == 'Bearer test-token'
@@ -239,8 +239,8 @@ class TestBeforeRequestHook:
             nonlocal calls
             calls += 1
             if calls < 3:
-                return httpx.Response(503, json={'detail': 'unavailable'})
-            return httpx.Response(200, json=[])
+                return httpx2.Response(503, json={'detail': 'unavailable'})
+            return httpx2.Response(200, json=[])
 
         hook_calls = 0
 
@@ -250,7 +250,7 @@ class TestBeforeRequestHook:
                 hook_calls += 1
                 return request
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = CountingClient(http_client=http, max_retries=3)
             with patch.object(retry_pkg._client, '_backoff_sleep'):
                 retry_pkg.list_users(client=client)
@@ -261,14 +261,14 @@ class TestBeforeRequestHook:
 
         def handler(request):
             seen['auth'] = request.headers.get('authorization')
-            return httpx.Response(200, json=[])
+            return httpx2.Response(200, json=[])
 
         class NoneReturningClient(retry_pkg.Client):
             def _before_request(self, request):
                 request['headers']['Authorization'] = 'Bearer via-none'
                 # Intentionally return None to exercise the ``or request`` path.
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as http:
             client = NoneReturningClient(http_client=http, max_retries=0)
             retry_pkg.list_users(client=client)
         assert seen['auth'] == 'Bearer via-none'
@@ -288,14 +288,14 @@ class TestBeforeRequestHook:
 
         def handler(request):
             seen['auth'] = request.headers.get('authorization')
-            return httpx.Response(200, json=[])
+            return httpx2.Response(200, json=[])
 
         class SyncOnlyClient(retry_pkg.Client):
             def _before_request(self, request):
                 request['headers']['Authorization'] = 'Bearer sync-hook'
                 return request
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
             client = SyncOnlyClient(async_http_client=http, max_retries=0)
             await retry_pkg.async_list_users(client=client)
         assert seen['auth'] == 'Bearer sync-hook'
@@ -306,7 +306,7 @@ class TestBeforeRequestHook:
 
         def handler(request):
             seen['auth'] = request.headers.get('authorization')
-            return httpx.Response(200, json=[])
+            return httpx2.Response(200, json=[])
 
         class AsyncHookClient(retry_pkg.Client):
             async def _async_before_request(self, request):
@@ -314,7 +314,7 @@ class TestBeforeRequestHook:
                 request['headers']['Authorization'] = 'Bearer async-hook'
                 return request
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
             client = AsyncHookClient(async_http_client=http, max_retries=0)
             await retry_pkg.async_list_users(client=client)
         assert seen['auth'] == 'Bearer async-hook'
@@ -327,8 +327,8 @@ class TestBeforeRequestHook:
             nonlocal calls
             calls += 1
             if calls < 3:
-                return httpx.Response(503, json={'detail': 'unavailable'})
-            return httpx.Response(200, json=[])
+                return httpx2.Response(503, json={'detail': 'unavailable'})
+            return httpx2.Response(200, json=[])
 
         hook_calls = 0
 
@@ -338,7 +338,7 @@ class TestBeforeRequestHook:
                 hook_calls += 1
                 return request
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
             client = CountingAsyncClient(async_http_client=http, max_retries=3)
             with patch.object(retry_pkg._client, '_backoff_sleep_async'):
                 await retry_pkg.async_list_users(client=client)

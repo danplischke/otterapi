@@ -335,8 +335,8 @@ class TestDataFrameDelegatingFunction:
         assert isinstance(fn_ast, ast.FunctionDef)
         assert fn_ast.name == 'get_users_df'
         # Return type should be string annotation
-        assert isinstance(fn_ast.returns, ast.Constant)
-        assert fn_ast.returns.value == 'pd.DataFrame'
+        assert isinstance(fn_ast.returns, ast.Attribute)
+        assert ast.unparse(fn_ast.returns) == 'pd.DataFrame'
 
     def test_build_delegating_dataframe_fn_polars(self):
         """Test building a polars DataFrame delegating function."""
@@ -355,8 +355,8 @@ class TestDataFrameDelegatingFunction:
 
         assert isinstance(fn_ast, ast.FunctionDef)
         assert fn_ast.name == 'get_users_pl'
-        assert isinstance(fn_ast.returns, ast.Constant)
-        assert fn_ast.returns.value == 'pl.DataFrame'
+        assert isinstance(fn_ast.returns, ast.Attribute)
+        assert ast.unparse(fn_ast.returns) == 'pl.DataFrame'
 
     def test_build_delegating_dataframe_fn_async(self):
         """Test building an async DataFrame delegating function."""

@@ -11,7 +11,7 @@ import importlib
 import sys
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from otterapi.codegen.codegen import Codegen
@@ -67,16 +67,16 @@ def generated_client_module(tmp_path_factory):
     return _import_generated(parent, package_name)
 
 
-def _mock_handler(request: httpx.Request) -> httpx.Response:
+def _mock_handler(request: httpx2.Request) -> httpx2.Response:
     if request.url.path == '/users' and request.method == 'GET':
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json=[
                 {'id': 1, 'username': 'alice', 'age': 30, 'tags': ['admin']},
                 {'id': 2, 'username': 'bob_2', 'age': 28, 'tags': []},
             ],
         )
-    return httpx.Response(404, json={'detail': 'unknown route'})
+    return httpx2.Response(404, json={'detail': 'unknown route'})
 
 
 class TestSyncGeneratedClient:
@@ -85,7 +85,7 @@ class TestSyncGeneratedClient:
         list_users = generated_client_module.list_users
         User = generated_client_module.User
 
-        with httpx.Client(transport=httpx.MockTransport(_mock_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(_mock_handler)) as http:
             client = Client(http_client=http)
             users = list_users(client=client)
 
@@ -128,10 +128,10 @@ class TestSyncGeneratedClient:
         # ``_client`` submodule.
         BaseAPIError = generated_client_module.BaseAPIError
 
-        def fail_handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={'detail': 'no users for you'})
+        def fail_handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(404, json={'detail': 'no users for you'})
 
-        with httpx.Client(transport=httpx.MockTransport(fail_handler)) as http:
+        with httpx2.Client(transport=httpx2.MockTransport(fail_handler)) as http:
             client = Client(http_client=http)
             with pytest.raises(BaseAPIError) as exc_info:
                 list_users(client=client)
@@ -146,8 +146,8 @@ class TestAsyncGeneratedClient:
         async_list_users = generated_client_module.async_list_users
         User = generated_client_module.User
 
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_mock_handler)
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_mock_handler)
         ) as http:
             client = Client(async_http_client=http)
             users = await async_list_users(client=client)
