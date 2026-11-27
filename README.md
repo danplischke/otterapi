@@ -30,7 +30,9 @@ Generated clients use [httpx2](https://github.com/pydantic/httpx2), pydantic's
 maintained fork of httpx (same API, package renamed), installed alongside
 otterapi. A custom `http_client` / `async_http_client` you pass in must be an
 `httpx2.Client` / `httpx2.AsyncClient`. Note that httpx2 verifies TLS against
-the operating system's trust store (`truststore`) rather than `certifi`.
+the operating system's trust store (`truststore`) rather than `certifi`. To
+generate clients that use the original `httpx` package instead, set
+`http_library: httpx` (see [Document Options](#document-options)).
 
 ### Basic Usage
 
@@ -156,6 +158,7 @@ Each entry under `documents:` supports these fields:
 | `include_paths` | list | `null` | Glob patterns — only matching paths are generated |
 | `exclude_paths` | list | `null` | Glob patterns — matching paths are skipped (applied after `include_paths`) |
 | `target_python` | `3.11` … `3.14` | `3.11` | Oldest Python the generated code has to run on. `3.12`+ emits PEP 695 type parameters in the runtime helpers |
+| `http_library` | `httpx2` \| `httpx` | `httpx2` | HTTP library the generated client imports. Use `httpx` if your project already depends on the original package (install it yourself; otterapi only ships `httpx2`) |
 | `pydantic_version` | `1` \| `2` | `2` | Target Pydantic version for generated models and helpers |
 
 #### Function Naming

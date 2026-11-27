@@ -1212,6 +1212,7 @@ class Codegen(OpenAPIProcessor):
             path,
             format_code=self.format_output,
             validate_code=self.validate_output,
+            http_module=self.config.http_library,
         )
         return set(names)
 
@@ -1290,6 +1291,7 @@ class Codegen(OpenAPIProcessor):
             directory / '_clients.py',
             format_code=self.format_output,
             validate_code=self.validate_output,
+            http_module=self.config.http_library,
         )
 
     def _resource_path_of(
@@ -1549,6 +1551,7 @@ class Codegen(OpenAPIProcessor):
             path,
             format_code=self.format_output,
             validate_code=self.validate_output,
+            http_module=self.config.http_library,
         )
 
     def generate(self):
@@ -1811,6 +1814,7 @@ class Codegen(OpenAPIProcessor):
             init_path,
             format_code=self.format_output,
             validate_code=self.validate_output,
+            http_module=self.config.http_library,
         )
 
     def _generate_split_endpoints(
@@ -1872,6 +1876,7 @@ class Codegen(OpenAPIProcessor):
             root_reexport_names=root_reexport_names,
             format_output=self.format_output,
             validate_output=self.validate_output,
+            http_module=self.config.http_library,
         )
 
         assert self.typegen is not None
@@ -1980,6 +1985,7 @@ class Codegen(OpenAPIProcessor):
             client_file,
             format_code=self.format_output,
             validate_code=self.validate_output,
+            http_module=self.config.http_library,
         )
         generated_files.append(f'{output_name}/_client.py')
 

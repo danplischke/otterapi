@@ -14,6 +14,7 @@ Python-mode ``model_dump()`` on request bodies.
 
 from __future__ import annotations
 
+import ast
 import datetime
 import importlib
 import json
@@ -752,3 +753,51 @@ class TestExcludeUnsetConfig:
         )
         assert '"shipDate":"2024-01-02T03:04:05"' in rec.body
 
+
+# ---------------------------------------------------------------------------
+# HTTP library
+# ---------------------------------------------------------------------------
+
+
+def _imported_modules(package_dir: Path) -> set[str]:
+    modules: set[str] = set()
+    for path in package_dir.rglob('*.py'):
+        for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules.add(node.module.split('.')[0])
+            elif isinstance(node, ast.Import):
+                modules.update(alias.name.split('.')[0] for alias in node.names)
+    return modules
+
+
+class TestHttpLibrary:
+    @pytest.mark.parametrize('split', [False, True], ids=['single', 'split'])
+    def test_httpx_replaces_every_httpx2_import(self, tmp_path: Path, split: bool):
+        from otterapi.config import ModuleSplitConfig
+
+        _generate(
+            tmp_path,
+            _body_spec(required=True),
+            'wire_httpx_imports',
+            http_library='httpx',
+            module_split=ModuleSplitConfig(enabled=split),
+        )
+        imported = _imported_modules(tmp_path / 'wire_httpx_imports')
+        assert 'httpx' in imported
+        assert 'httpx2' not in imported
+
+    def test_httpx_client_sends_requests(self, tmp_path: Path):
+        httpx = pytest.importorskip('httpx')
+        mod = _generate(
+            tmp_path, _body_spec(required=True), 'wire_httpx', http_library='httpx'
+        )
+        sent: list[Any] = []
+
+        def handler(request: Any) -> Any:
+            sent.append(request)
+            return httpx.Response(200, json={})
+
+        client = mod.Client()
+        client._sync_client = httpx.Client(transport=httpx.MockTransport(handler))
+        mod.place_order(mod.models.Order(id=7), client=client)
+        assert sent[0].content == b'{"id":7}'
