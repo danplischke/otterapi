@@ -775,13 +775,17 @@ class TestHttpLibrary:
     def test_httpx_replaces_every_httpx2_import(self, tmp_path: Path, split: bool):
         from otterapi.config import ModuleSplitConfig
 
-        _generate(
-            tmp_path,
-            _body_spec(required=True),
-            'wire_httpx_imports',
-            http_library='httpx',
-            module_split=ModuleSplitConfig(enabled=split),
-        )
+        # Generate without importing: httpx itself may not be installed.
+        spec_file = tmp_path / 'openapi.yaml'
+        spec_file.write_text(yaml.safe_dump(_body_spec(required=True)), 'utf-8')
+        Codegen(
+            DocumentConfig(
+                source=str(spec_file),
+                output=str(tmp_path / 'wire_httpx_imports'),
+                http_library='httpx',
+                module_split=ModuleSplitConfig(enabled=split),
+            )
+        ).generate()
         imported = _imported_modules(tmp_path / 'wire_httpx_imports')
         assert 'httpx' in imported
         assert 'httpx2' not in imported
