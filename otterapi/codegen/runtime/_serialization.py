@@ -19,16 +19,19 @@ header, and path -- puts the same bytes on the wire, including the
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import date, time
 from decimal import Decimal
 from enum import Enum
 from typing import Any
 from urllib.parse import quote
+from uuid import UUID
 
 __all__ = [
     'NOTSET',
     'NotSet',
+    'build_multipart_body',
     'build_request_body',
     'format_path_param',
     'serialize_headers',
@@ -256,6 +259,80 @@ def build_request_body(
     return model.model_validate(supplied).model_dump(
         mode='json', by_alias=True, exclude_unset=exclude_unset
     )
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    if isinstance(value, (Decimal, UUID)):
+        return str(value)
+    raise TypeError(f'{type(value).__name__} is not JSON serializable')
+
+
+def _is_file(value: Any) -> bool:
+    """True for values httpx should send as file content."""
+    return isinstance(value, (bytes, bytearray, tuple)) or callable(
+        getattr(value, 'read', None)
+    )
+
+
+def _multipart_part(value: Any) -> Any:
+    """Render one non-array property value as an httpx ``files=`` entry."""
+    if _is_file(value):
+        return value
+    if isinstance(value, Mapping):
+        # Object-valued parts default to ``application/json``.
+        return (
+            None,
+            json.dumps(value, default=_json_default),
+            'application/json',
+        )
+    # A ``None`` file name makes httpx send a plain form field, not an upload.
+    return (None, _scalar(value))
+
+
+def build_multipart_body(
+    body: Any, *, exclude_unset: bool = True
+) -> list[tuple[str, Any]] | None:
+    """Turn a ``multipart/form-data`` body into httpx ``files=`` entries.
+
+    Every property goes through ``files=`` -- text fields with no file name --
+    so the request is multipart even when it carries no file.  Array
+    properties become one part per item under the same name, as the OpenAPI
+    Encoding Object requires.  ``None`` values are omitted: multipart has no
+    way to express null.
+
+    Args:
+        body: A generated model or a mapping of property name to value.
+            Anything else is assumed to be httpx-ready and passed through.
+        exclude_unset: Drop model fields the caller never set.
+
+    Returns:
+        A list of ``(name, value)`` pairs, or None when *body* is None.
+    """
+    if body is None:
+        return None
+    fields: Any
+    if isinstance(body, Mapping):
+        fields = body
+    elif callable(getattr(body, 'model_dump', None)):
+        # Python mode keeps ``bytes`` intact for file fields.
+        fields = body.model_dump(by_alias=True, exclude_unset=exclude_unset)
+    elif callable(getattr(body, 'dict', None)):  # Pydantic v1
+        fields = body.dict(by_alias=True, exclude_unset=exclude_unset)
+    else:
+        return body
+    parts: list[tuple[str, Any]] = []
+    for name, value in fields.items():
+        if value is None:
+            continue
+        items = value if _is_sequence(value) and not _is_file(value) else [value]
+        parts.extend(
+            (name, _multipart_part(item)) for item in items if item is not None
+        )
+    return parts
 
 
 def format_path_param(

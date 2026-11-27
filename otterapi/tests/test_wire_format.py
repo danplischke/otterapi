@@ -543,6 +543,92 @@ class TestRequestBody:
         assert rec.body == '{"id":3}'
 
 
+def _multipart_spec() -> dict:
+    return _spec(
+        {
+            '/uploads': {
+                'post': {
+                    'operationId': 'upload',
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'multipart/form-data': {
+                                'schema': {'$ref': '#/components/schemas/Upload'}
+                            }
+                        },
+                    },
+                    'responses': _OK,
+                }
+            }
+        },
+        {
+            'Upload': {
+                'type': 'object',
+                'properties': {
+                    'name': {'type': 'string'},
+                    'tags': {'type': 'array', 'items': {'type': 'string'}},
+                    'meta': {
+                        'type': 'object',
+                        'properties': {'n': {'type': 'integer'}},
+                    },
+                    'file': {'type': 'string', 'format': 'binary'},
+                },
+            }
+        },
+    )
+
+
+def _multipart_parts(request: httpx2.Request) -> list[tuple[str, str]]:
+    """``(Content-Disposition + Content-Type headers, payload)`` per part."""
+    content_type = request.headers['content-type']
+    assert content_type.startswith('multipart/form-data; boundary=')
+    boundary = content_type.split('boundary=', 1)[1]
+    raw = request.content.decode()
+    parts = []
+    for chunk in raw.split(f'--{boundary}')[1:-1]:
+        headers, _, payload = chunk.strip('\r\n').partition('\r\n\r\n')
+        parts.append((headers, payload))
+    return parts
+
+
+class TestMultipartBody:
+    def test_model_is_encoded_per_property(self, tmp_path: Path):
+        """Arrays send one part per item; objects are JSON; text has no filename."""
+        mod = _generate(tmp_path, _multipart_spec(), 'wire_multipart')
+        rec = Recorder()
+        mod.upload(
+            mod.models.Upload(
+                name='a', tags=['x', 'y'], meta={'n': 1}, file=b'payload'
+            ),
+            client=rec.bind(mod.Client()),
+        )
+        # The harness's yaml.safe_dump sorts keys, so fields are alphabetical.
+        assert _multipart_parts(rec.request) == [
+            (
+                'Content-Disposition: form-data; name="file"; filename="upload"\r\n'
+                'Content-Type: application/octet-stream',
+                'payload',
+            ),
+            (
+                'Content-Disposition: form-data; name="meta"\r\n'
+                'Content-Type: application/json',
+                '{"n": 1}',
+            ),
+            ('Content-Disposition: form-data; name="name"', 'a'),
+            ('Content-Disposition: form-data; name="tags"', 'x'),
+            ('Content-Disposition: form-data; name="tags"', 'y'),
+        ]
+
+    def test_text_only_body_is_still_multipart(self, tmp_path: Path):
+        """Unset fields are dropped, and no file must not fall back to urlencoded."""
+        mod = _generate(tmp_path, _multipart_spec(), 'wire_multipart_text')
+        rec = Recorder()
+        mod.upload(mod.models.Upload(name='a'), client=rec.bind(mod.Client()))
+        assert _multipart_parts(rec.request) == [
+            ('Content-Disposition: form-data; name="name"', 'a'),
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Model annotations
 # ---------------------------------------------------------------------------
@@ -665,3 +751,4 @@ class TestExcludeUnsetConfig:
             client=rec.bind(mod.Client()),
         )
         assert '"shipDate":"2024-01-02T03:04:05"' in rec.body
+

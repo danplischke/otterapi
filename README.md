@@ -1136,6 +1136,19 @@ documents:
 place_order(body=Order(id=7))     # -> {"id": 7, "shipDate": null, "note": null}
 ```
 
+### Multipart bodies
+
+A `multipart/form-data` body is sent one part per property, following the
+OpenAPI Encoding Object defaults: `bytes` or file-like values become file
+uploads, arrays become one part per item under the same name, objects are sent
+as `application/json` parts, and everything else is sent as a plain text
+field. `None` values are left out, since multipart cannot express null.
+
+```python
+upload(body=Upload(name='a', tags=['x', 'y'], file=b'...'))
+# -> parts: name=a, tags=x, tags=y, file (upload)
+```
+
 ### Flattening the body into parameters
 
 By default a POST/PUT/PATCH takes the body as one model:
