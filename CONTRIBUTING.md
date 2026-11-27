@@ -98,15 +98,19 @@ otterapi/
   config.py         # otter.yml / CodegenConfig schema
   codegen/          # the code generator (AST builders, templates, runtime/)
   openapi/          # OpenAPI 2.0 / 3.0 / 3.1 / 3.2 spec models
-  tests/            # pytest suite (+ golden fixtures)
-scripts/            # maintenance scripts
+  tests/            # pytest suite (+ fixture specs)
 ```
 
-Two areas worth knowing:
+Worth knowing:
 
-- **`otterapi/tests/fixtures/golden/`** — byte-exact expected codegen output.
-  These files are intentionally excluded from linting/formatting; if a change
-  alters generated code, update the golden fixtures in the same PR.
+- **`otterapi/tests/fixtures/golden/<case>/`** — input OpenAPI specs
+  (`spec.yaml` / `spec.json`, plus an optional `config.yaml` of
+  `DocumentConfig` overrides), not expected output. Tests generate a client
+  from them into a temporary directory and assert on the parsed AST, so
+  formatting changes in generated code don't break them. To cover a new
+  scenario, add a case directory and a structural test (see
+  `test_codegen_structure.py`). The directory is excluded from
+  linting/formatting.
 
 ## Making a change
 
