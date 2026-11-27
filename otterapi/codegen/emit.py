@@ -895,10 +895,16 @@ def finalize_file_imports(
     """
     sink.imports.add_imports({'.client': {'Client'}})
     # Registered optimistically: pruned away for modules that use
-    # neither path parameters nor a flattened request body (see
+    # neither path parameters nor a flattened or multipart request body (see
     # write_mod's import pruning).
     sink.imports.add_imports(
-        {'._serialization': {'format_path_param', 'build_request_body'}}
+        {
+            '._serialization': {
+                'format_path_param',
+                'build_request_body',
+                'build_multipart_body',
+            }
+        }
     )
     for name in resolver.used_model_names(endpoints):
         sink.imports.add_imports({MODELS_MODULE: {name}})

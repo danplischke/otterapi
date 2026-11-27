@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from upath import UPath
 
 from otterapi.codegen.ast_utils import (
+    HTTP_MODULE,
     IMPORT_SECTION_SEPARATOR,
     find_unresolved_names,
     prune_unused_imports,
@@ -294,12 +295,51 @@ def format_source(source: str) -> str:
     return _add_blank_lines(source)
 
 
+_HTTP_MODULE_WORD = re.compile(rf'\b{re.escape(HTTP_MODULE)}\b')
+
+
+def _retarget_module_name(name: str, module: str) -> str:
+    if name == HTTP_MODULE or name.startswith(f'{HTTP_MODULE}.'):
+        return module + name[len(HTTP_MODULE) :]
+    return name
+
+
+def retarget_http_module(body: list[ast.stmt], module: str) -> None:
+    """Point generated code at *module* instead of :data:`HTTP_MODULE`.
+
+    httpx2 is a renamed fork of httpx with the same public API, so switching
+    between them only touches import statements -- plus the docstrings that
+    name the library, so the generated documentation stays accurate.
+    """
+    if module == HTTP_MODULE:
+        return
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            node.module = _retarget_module_name(node.module, module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                alias.name = _retarget_module_name(alias.name, module)
+        elif isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            docstring = node.body[0] if node.body else None
+            if (
+                isinstance(docstring, ast.Expr)
+                and isinstance(docstring.value, ast.Constant)
+                and isinstance(docstring.value.value, str)
+            ):
+                docstring.value.value = _HTTP_MODULE_WORD.sub(
+                    module, docstring.value.value
+                )
+
+
 def write_mod(
     body: list[ast.stmt],
     path: UPath | Path | str,
     format_code: bool = True,
     validate_code: bool = True,
     prune_imports: bool = True,
+    http_module: str = HTTP_MODULE,
 ) -> None:
     """Write a list of AST statements to a Python file.
 
@@ -328,6 +368,8 @@ def write_mod(
         format_code: Whether to format the code with ruff/black. Defaults to True.
         validate_code: Whether to validate the generated code. Defaults to True.
         prune_imports: Whether to drop unreferenced imports. Defaults to True.
+        http_module: HTTP library the generated code imports (``httpx2`` or
+            ``httpx``). Defaults to :data:`HTTP_MODULE`.
 
     Raises:
         SyntaxError: If the generated code is not valid Python (when validate_code=True).
@@ -340,6 +382,8 @@ def write_mod(
 
     if prune_imports:
         body = prune_unused_imports(body)
+
+    retarget_http_module(body, http_module)
 
     # Ordering is part of generation, not formatting: the generated package is
     # linted by the user's ruff, not this repo's, and an import block in

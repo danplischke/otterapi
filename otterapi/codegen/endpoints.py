@@ -731,7 +731,16 @@ class ParameterASTBuilder:
         if body.is_json and body.type and body.type.type in ('model', 'root'):
             body_expr = _body_value()
         elif body.is_multipart:
-            body_expr = _name(body_name)
+            keywords: list[ast.keyword] = []
+            if not body.exclude_unset:
+                keywords.append(
+                    ast.keyword(arg='exclude_unset', value=ast.Constant(value=False))
+                )
+            body_expr = _call(
+                func=_name('build_multipart_body'),
+                args=[_name(body_name)],
+                keywords=keywords,
+            )
         elif body.is_form:
             if body.type and body.type.type in ('model', 'root'):
                 body_expr = _body_value()

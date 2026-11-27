@@ -1266,6 +1266,16 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    http_library: Literal['httpx2', 'httpx'] = Field(
+        default='httpx2',
+        description=(
+            'HTTP library the generated client imports. "httpx2" is pydantic\'s '
+            'maintained fork of httpx 0.28.1 with the same API; choose "httpx" '
+            'for projects that already depend on the original package. The '
+            'generated package needs the chosen library installed.'
+        ),
+    )
+
     pydantic_version: Literal[1, 2] = Field(
         default=2,
         description=(

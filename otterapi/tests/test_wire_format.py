@@ -14,6 +14,7 @@ Python-mode ``model_dump()`` on request bodies.
 
 from __future__ import annotations
 
+import ast
 import datetime
 import importlib
 import json
@@ -543,6 +544,92 @@ class TestRequestBody:
         assert rec.body == '{"id":3}'
 
 
+def _multipart_spec() -> dict:
+    return _spec(
+        {
+            '/uploads': {
+                'post': {
+                    'operationId': 'upload',
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'multipart/form-data': {
+                                'schema': {'$ref': '#/components/schemas/Upload'}
+                            }
+                        },
+                    },
+                    'responses': _OK,
+                }
+            }
+        },
+        {
+            'Upload': {
+                'type': 'object',
+                'properties': {
+                    'name': {'type': 'string'},
+                    'tags': {'type': 'array', 'items': {'type': 'string'}},
+                    'meta': {
+                        'type': 'object',
+                        'properties': {'n': {'type': 'integer'}},
+                    },
+                    'file': {'type': 'string', 'format': 'binary'},
+                },
+            }
+        },
+    )
+
+
+def _multipart_parts(request: httpx2.Request) -> list[tuple[str, str]]:
+    """``(Content-Disposition + Content-Type headers, payload)`` per part."""
+    content_type = request.headers['content-type']
+    assert content_type.startswith('multipart/form-data; boundary=')
+    boundary = content_type.split('boundary=', 1)[1]
+    raw = request.content.decode()
+    parts = []
+    for chunk in raw.split(f'--{boundary}')[1:-1]:
+        headers, _, payload = chunk.strip('\r\n').partition('\r\n\r\n')
+        parts.append((headers, payload))
+    return parts
+
+
+class TestMultipartBody:
+    def test_model_is_encoded_per_property(self, tmp_path: Path):
+        """Arrays send one part per item; objects are JSON; text has no filename."""
+        mod = _generate(tmp_path, _multipart_spec(), 'wire_multipart')
+        rec = Recorder()
+        mod.upload(
+            mod.models.Upload(
+                name='a', tags=['x', 'y'], meta={'n': 1}, file=b'payload'
+            ),
+            client=rec.bind(mod.Client()),
+        )
+        # The harness's yaml.safe_dump sorts keys, so fields are alphabetical.
+        assert _multipart_parts(rec.request) == [
+            (
+                'Content-Disposition: form-data; name="file"; filename="upload"\r\n'
+                'Content-Type: application/octet-stream',
+                'payload',
+            ),
+            (
+                'Content-Disposition: form-data; name="meta"\r\n'
+                'Content-Type: application/json',
+                '{"n": 1}',
+            ),
+            ('Content-Disposition: form-data; name="name"', 'a'),
+            ('Content-Disposition: form-data; name="tags"', 'x'),
+            ('Content-Disposition: form-data; name="tags"', 'y'),
+        ]
+
+    def test_text_only_body_is_still_multipart(self, tmp_path: Path):
+        """Unset fields are dropped, and no file must not fall back to urlencoded."""
+        mod = _generate(tmp_path, _multipart_spec(), 'wire_multipart_text')
+        rec = Recorder()
+        mod.upload(mod.models.Upload(name='a'), client=rec.bind(mod.Client()))
+        assert _multipart_parts(rec.request) == [
+            ('Content-Disposition: form-data; name="name"', 'a'),
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Model annotations
 # ---------------------------------------------------------------------------
@@ -665,3 +752,56 @@ class TestExcludeUnsetConfig:
             client=rec.bind(mod.Client()),
         )
         assert '"shipDate":"2024-01-02T03:04:05"' in rec.body
+
+
+# ---------------------------------------------------------------------------
+# HTTP library
+# ---------------------------------------------------------------------------
+
+
+def _imported_modules(package_dir: Path) -> set[str]:
+    modules: set[str] = set()
+    for path in package_dir.rglob('*.py'):
+        for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules.add(node.module.split('.')[0])
+            elif isinstance(node, ast.Import):
+                modules.update(alias.name.split('.')[0] for alias in node.names)
+    return modules
+
+
+class TestHttpLibrary:
+    @pytest.mark.parametrize('split', [False, True], ids=['single', 'split'])
+    def test_httpx_replaces_every_httpx2_import(self, tmp_path: Path, split: bool):
+        from otterapi.config import ModuleSplitConfig
+
+        # Generate without importing: httpx itself may not be installed.
+        spec_file = tmp_path / 'openapi.yaml'
+        spec_file.write_text(yaml.safe_dump(_body_spec(required=True)), 'utf-8')
+        Codegen(
+            DocumentConfig(
+                source=str(spec_file),
+                output=str(tmp_path / 'wire_httpx_imports'),
+                http_library='httpx',
+                module_split=ModuleSplitConfig(enabled=split),
+            )
+        ).generate()
+        imported = _imported_modules(tmp_path / 'wire_httpx_imports')
+        assert 'httpx' in imported
+        assert 'httpx2' not in imported
+
+    def test_httpx_client_sends_requests(self, tmp_path: Path):
+        httpx = pytest.importorskip('httpx')
+        mod = _generate(
+            tmp_path, _body_spec(required=True), 'wire_httpx', http_library='httpx'
+        )
+        sent: list[Any] = []
+
+        def handler(request: Any) -> Any:
+            sent.append(request)
+            return httpx.Response(200, json={})
+
+        client = mod.Client()
+        client._sync_client = httpx.Client(transport=httpx.MockTransport(handler))
+        mod.place_order(mod.models.Order(id=7), client=client)
+        assert sent[0].content == b'{"id":7}'

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, cast
 
 from upath import UPath
 
-from otterapi.codegen.ast_utils import _all
+from otterapi.codegen.ast_utils import HTTP_MODULE, _all
 from otterapi.codegen.emit import (
     EmitConfig,
     EmitSink,
@@ -632,6 +632,7 @@ class SplitModuleEmitter:
         root_reexport_names: list[str] | None = None,
         format_output: bool = True,
         validate_output: bool = True,
+        http_module: str = HTTP_MODULE,
     ):
         """Initialize the split module emitter.
 
@@ -662,6 +663,7 @@ class SplitModuleEmitter:
                 ``__all__``.
             format_output: Whether to format generated code with ruff/black.
             validate_output: Whether to validate generated code syntax.
+            http_module: HTTP library the generated modules import.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -687,6 +689,7 @@ class SplitModuleEmitter:
         self.root_reexport_names: list[str] = list(root_reexport_names or [])
         self.format_output = format_output
         self.validate_output = validate_output
+        self.http_module = http_module
         self._emitted_modules: list[EmittedModule] = []
         self._typegen_types: dict[str, Type] = {}
 
@@ -833,6 +836,7 @@ class SplitModuleEmitter:
             file_path,
             format_code=self.format_output,
             validate_code=self.validate_output,
+            http_module=self.http_module,
         )
 
         return endpoint_names
@@ -906,6 +910,7 @@ class SplitModuleEmitter:
                 init_path,
                 format_code=self.format_output,
                 validate_code=self.validate_output,
+                http_module=self.http_module,
             )
         else:
             init_path.touch()
@@ -1045,6 +1050,7 @@ class SplitModuleEmitter:
                 init_path,
                 format_code=self.format_output,
                 validate_code=self.validate_output,
+                http_module=self.http_module,
             )
 
     def _get_model_names(self) -> list[str]:
