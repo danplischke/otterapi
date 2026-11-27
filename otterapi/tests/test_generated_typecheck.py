@@ -48,14 +48,6 @@ _ALL_FEATURES = {
     'export': {'enabled': True, 'formats': ['csv', 'jsonl', 'parquet']},
     'pagination': {'enabled': True, 'auto_detect': True},
 }
-# Discriminated-union item types + export is a known pre-existing base-codegen
-# issue (the union is passed as ``model=`` to export, which wants a BaseModel);
-# it is style-independent, so the discriminator case exercises client styles
-# without export.
-_NO_EXPORT = {
-    'dataframe': {'enabled': True, 'pandas': True, 'polars': True},
-    'pagination': {'enabled': True, 'auto_detect': True},
-}
 
 # name -> (spec fixture, config overrides). Spans styles x split x result_objects
 # x nesting x pydantic version x discriminated unions.
@@ -93,9 +85,12 @@ MATRIX: dict[str, tuple[str, dict]] = {
             'module_split': {'enabled': True, 'strategy': 'tag'},
         },
     ),
-    'discriminated_union': (
+    # A discriminated-union list: the export wrappers pass the member tuple
+    # ``model=(Dog, Cat)``.
+    'discriminated_union': ('discriminator', _ALL_FEATURES),
+    'discriminated_union_resource': (
         'discriminator',
-        {**_NO_EXPORT, 'client_style': 'resource'},
+        {**_ALL_FEATURES, 'client_style': 'resource', 'result_objects': True},
     ),
     # Real-world specs. These are far messier than the hand-crafted fixtures
     # (optional fields, scalar responses, optional bodies, allOf/enum models,

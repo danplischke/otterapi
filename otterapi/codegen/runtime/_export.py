@@ -5,6 +5,11 @@ dicts and write them to a file path in the chosen format. Schemas are
 derived from the provided Pydantic model class so that Parquet column
 types stay correct even with empty or null-heavy batches.
 
+``model`` is one Pydantic model class, or a tuple of them for an endpoint whose
+items are a union (``Dog | Cat``): the output then has the union of the
+members' fields -- a row leaves the others empty -- and dict rows are
+validated against the union.
+
 Paths may be local strings / ``pathlib.Path`` / ``upath.UPath`` -- cloud
 URIs like ``s3://bucket/key.parquet`` work out of the box when the
 matching fsspec backend is installed.
@@ -16,6 +21,7 @@ requires ``pyarrow`` (install via ``pip install otterapi[parquet]``).
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import types
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Iterator
@@ -34,7 +40,7 @@ from typing import (
 )
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from upath import UPath
 
 if TYPE_CHECKING:
@@ -45,6 +51,8 @@ if TYPE_CHECKING:
 # in the user's project ("Variable ... is not valid as a type").
 Row: TypeAlias = BaseModel | dict
 PathLike: TypeAlias = str | Path | UPath
+#: The row model: one class, or the member classes of a union item type.
+ModelSpec: TypeAlias = type[BaseModel] | tuple[type[BaseModel], ...]
 
 
 # -----------------------------------------------------------------------------
@@ -56,18 +64,39 @@ def _as_path(path: PathLike) -> UPath:
     return UPath(path)
 
 
-def _model_fields(model: type[BaseModel]) -> list[str]:
-    """Return field names in declaration order."""
-    return list(model.model_fields.keys())
+def _members(model: ModelSpec) -> tuple[type[BaseModel], ...]:
+    """The model classes a :data:`ModelSpec` stands for."""
+    return model if isinstance(model, tuple) else (model,)
 
 
-def _as_model_instance(row: Row, model: type[BaseModel]) -> BaseModel:
-    if isinstance(row, model):
+def _model_fields(model: ModelSpec) -> list[str]:
+    """Return field names in declaration order (a union's, member by member)."""
+    names: dict[str, None] = {}
+    for member in _members(model):
+        for name in member.model_fields:
+            names.setdefault(name)
+    return list(names)
+
+
+@functools.cache
+def _union_adapter(members: tuple[type[BaseModel], ...]) -> TypeAdapter[Any]:
+    """Validator for a dict row of a union item type (built once per union)."""
+    union: Any = members[0]
+    for member in members[1:]:
+        union = union | member
+    return TypeAdapter(union)
+
+
+def _as_model_instance(row: Row, model: ModelSpec) -> BaseModel:
+    members = _members(model)
+    if isinstance(row, members):
         return row
-    return model.model_validate(row)
+    if len(members) == 1:
+        return members[0].model_validate(row)
+    return _union_adapter(members).validate_python(row)
 
 
-def _row_to_dict(row: Row, model: type[BaseModel]) -> dict[str, Any]:
+def _row_to_dict(row: Row, model: ModelSpec) -> dict[str, Any]:
     """Normalize a row to a JSON-ready dict via the given Pydantic model.
 
     Datetimes / UUIDs / enums are rendered in their JSON-safe form,
@@ -99,7 +128,7 @@ def _arrow_sanitize(value: Any) -> Any:
 
 def _row_to_arrow_dict(
     row: Row,
-    model: type[BaseModel],
+    model: ModelSpec,
     *,
     _string_fields: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
@@ -158,7 +187,7 @@ def to_csv(
     rows: Iterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     delimiter: str = ',',
     header: bool = True,
     batch_size: int = 1000,
@@ -194,7 +223,7 @@ def to_tsv(
     rows: Iterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     header: bool = True,
     batch_size: int = 1000,
 ) -> int:
@@ -213,7 +242,7 @@ async def to_csv_async(
     rows: AsyncIterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     delimiter: str = ',',
     header: bool = True,
     batch_size: int = 1000,
@@ -246,7 +275,7 @@ async def to_tsv_async(
     rows: AsyncIterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     header: bool = True,
     batch_size: int = 1000,
 ) -> int:
@@ -270,7 +299,7 @@ def to_jsonl(
     rows: Iterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     batch_size: int = 1000,
 ) -> int:
     """Stream ``rows`` to a JSON Lines file.
@@ -283,10 +312,7 @@ def to_jsonl(
     with target.open('w', encoding='utf-8') as fh:
         for batch in _chunks(rows, batch_size):
             for row in batch:
-                if isinstance(row, model):
-                    line = row.model_dump_json()
-                else:
-                    line = model.model_validate(row).model_dump_json()
+                line = _as_model_instance(row, model).model_dump_json()
                 fh.write(line)
                 fh.write('\n')
                 written += 1
@@ -297,7 +323,7 @@ async def to_jsonl_async(
     rows: AsyncIterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     batch_size: int = 1000,
 ) -> int:
     """Async variant of :func:`to_jsonl`."""
@@ -307,10 +333,7 @@ async def to_jsonl_async(
     with target.open('w', encoding='utf-8') as fh:
         async for batch in _achunks(rows, batch_size):
             for row in batch:
-                if isinstance(row, model):
-                    line = row.model_dump_json()
-                else:
-                    line = model.model_validate(row).model_dump_json()
+                line = _as_model_instance(row, model).model_dump_json()
                 fh.write(line)
                 fh.write('\n')
                 written += 1
@@ -490,22 +513,39 @@ def _is_nullable(annotation: Any) -> bool:
     return nullable
 
 
-def pydantic_to_arrow_schema(model: type[BaseModel]) -> pa.Schema:
-    """Derive a pyarrow schema from a Pydantic model class.
+def pydantic_to_arrow_schema(model: ModelSpec) -> pa.Schema:
+    """Derive a pyarrow schema from a Pydantic model class (or a union's).
 
     Field order matches declaration order. Optional fields are marked
-    nullable. Unknown/opaque types fall back to string.
+    nullable. Unknown/opaque types fall back to string. For a union the
+    members' fields are merged: a field some member lacks is nullable, and one
+    whose type differs between members falls back to string.
     """
     pa, _pq = _require_pyarrow()
-    fields = [
-        pa.field(
-            name,
-            _python_type_to_arrow(field.annotation, pa),
-            nullable=_is_nullable(field.annotation),
-        )
-        for name, field in model.model_fields.items()
-    ]
-    return pa.schema(fields)
+    members = _members(model)
+    merged: dict[str, tuple[Any, bool]] = {}
+    present_in: dict[str, int] = {}
+    for member in members:
+        for name, field in member.model_fields.items():
+            arrow_type = _python_type_to_arrow(field.annotation, pa)
+            nullable = _is_nullable(field.annotation)
+            if name in merged:
+                seen_type, seen_nullable = merged[name]
+                if seen_type != arrow_type:
+                    arrow_type = pa.string()
+                nullable = nullable or seen_nullable
+            merged[name] = (arrow_type, nullable)
+            present_in[name] = present_in.get(name, 0) + 1
+    return pa.schema(
+        [
+            pa.field(
+                name,
+                arrow_type,
+                nullable=nullable or present_in[name] < len(members),
+            )
+            for name, (arrow_type, nullable) in merged.items()
+        ]
+    )
 
 
 def _parquet_sink(target: UPath):
@@ -531,7 +571,7 @@ def to_parquet(
     rows: Iterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     compression: str | None = 'snappy',
     batch_size: int = 1000,
 ) -> int:
@@ -572,7 +612,7 @@ async def to_parquet_async(
     rows: AsyncIterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     compression: str | None = 'snappy',
     batch_size: int = 1000,
 ) -> int:
@@ -628,7 +668,7 @@ def export(
     rows: Iterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     format: str,
     batch_size: int = 1000,
     **kwargs: Any,
@@ -647,7 +687,7 @@ async def export_async(
     rows: AsyncIterable[Row],
     path: PathLike,
     *,
-    model: type[BaseModel],
+    model: ModelSpec,
     format: str,
     batch_size: int = 1000,
     **kwargs: Any,
