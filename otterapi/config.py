@@ -958,6 +958,17 @@ class ResponseUnwrapConfig(BaseModel):
         # Use defaults
         return True, self.data_path
 
+    def has_explicit_path(self, endpoint_name: str) -> bool:
+        """Whether ``endpoint_name`` names its own ``data_path`` override.
+
+        An explicit per-endpoint path is a promise about that endpoint's
+        response, so code generation treats a missing field as an error rather
+        than silently skipping the unwrap (which it does for the document-wide
+        default, since that one applies to every endpoint).
+        """
+        endpoint_config = self.endpoints.get(endpoint_name)
+        return endpoint_config is not None and endpoint_config.data_path is not None
+
 
 class ModuleDefinition(BaseModel):
     """Definition for a single module or module group.
