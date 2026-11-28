@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from functools import partial
 from typing import Any, Generic, TypeVar
 
@@ -13,36 +12,6 @@ T = TypeVar('T')
 E = TypeVar('E')
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class OffsetPaginationConfig:
-    """Configuration for offset-based pagination."""
-
-    offset_param: str = 'offset'
-    limit_param: str = 'limit'
-    data_path: str | None = None
-    total_path: str | None = None
-
-
-@dataclass
-class CursorPaginationConfig:
-    """Configuration for cursor-based pagination."""
-
-    cursor_param: str = 'cursor'
-    limit_param: str = 'limit'
-    data_path: str | None = None
-    next_cursor_path: str | None = None
-
-
-@dataclass
-class PagePaginationConfig:
-    """Configuration for page-based pagination."""
-
-    page_param: str = 'page'
-    per_page_param: str = 'per_page'
-    data_path: str | None = None
-    total_pages_path: str | None = None
 
 
 def extract_path(data: dict | list, path: str | None) -> Any:

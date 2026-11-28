@@ -67,7 +67,6 @@ NOTSET = NotSet.NOTSET
 # Callers pass the *resolved* pair; the spec's per-style defaults for
 # ``explode`` are applied at generation time, not here.
 DEFAULT_QUERY_STYLE = ('form', True)
-DEFAULT_PATH_STYLE = ('simple', False)
 
 # Separators for the non-exploded array styles.
 _ARRAY_DELIMITERS = {
