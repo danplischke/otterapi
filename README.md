@@ -11,7 +11,7 @@
 - **OpenAPI 3.x Support** - Full support for OpenAPI 3.0, 3.1, and 3.2 specifications
 - **Strict or Lenient Validation** - Fail fast on malformed specs, or drop stray fields with `--lenient` (vendor `x-*` extensions always preserved)
 - **Module Splitting** - Organize large APIs into multiple organized files
-- **Pagination** - Auto-detect or configure offset, cursor, page, and link-header pagination
+- **Pagination** - Auto-detect or configure offset, cursor and page pagination, in the query string or the request body
 - **DataFrame Conversion** - Generate pandas/polars DataFrame methods for list endpoints
 - **File Export** - Generate CSV, TSV, JSONL, and Parquet streaming helpers
 - **Response Unwrapping** - Transparently unwrap envelope-style responses
@@ -544,7 +544,6 @@ pagination:
 | `offset` | `offset` + `limit` | Offset/limit (e.g. `?offset=0&limit=100`) |
 | `cursor` | `cursor` + `limit` | Cursor-based (e.g. `?cursor=abc&limit=100`) |
 | `page` | `page` + `per_page` | Page number (e.g. `?page=2&per_page=50`) |
-| `link` | — | RFC 5988 `Link` header |
 
 ### Global Pagination Options
 
@@ -585,7 +584,7 @@ pagination:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool\|null | inherits | Override whether to generate pagination |
-| `style` | string | inherits | `offset`, `cursor`, `page`, `link` |
+| `style` | string | inherits | `offset`, `cursor`, `page` |
 | `offset_param` | string | inherits | Name of offset parameter |
 | `limit_param` | string | inherits | Name of limit parameter |
 | `cursor_param` | string | inherits | Name of cursor parameter |
