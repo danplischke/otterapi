@@ -154,7 +154,8 @@ class PaginationFeature(FeatureModule):
     module_filename = '_pagination.py'
 
     def is_enabled(self, config: DocumentConfig) -> bool:
-        return bool(config.pagination.enabled)
+        # ``_query.py`` names the page types in its terminals' signatures.
+        return bool(config.pagination.enabled) or QueryFeature().is_enabled(config)
 
 
 class DataFrameFeature(FeatureModule):

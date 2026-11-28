@@ -365,6 +365,15 @@ class PaginationConfig(BaseModel):
         ),
     )
 
+    page_variants: bool = Field(
+        default=True,
+        description=(
+            'Also generate <name>_page (one page object: items, total, next '
+            'cursor/offset/page and the response envelope) and <name>_pages '
+            '(an iterator of page objects) for every paginated endpoint.'
+        ),
+    )
+
     # Per-endpoint configuration
     endpoints: dict[str, EndpointPaginationConfig] = Field(
         default_factory=dict,

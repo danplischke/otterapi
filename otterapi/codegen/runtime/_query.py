@@ -9,6 +9,8 @@ method then executes:
     df   = q.to_pandas()      # pandas DataFrame
     for u in q.iter(): ...    # streamed, page by page
     q.export("users.csv")     # write to a file
+    page = q.page()           # the first page object (total, next cursor, ...)
+    for p in q.pages(): ...   # every page object
 
 Absent terminals (a feature not enabled at generation time) raise a clear error.
 """
@@ -22,6 +24,8 @@ if TYPE_CHECKING:
 
     import pandas as pd
     import polars as pl
+
+    from ._pagination import AsyncPage, Page
 
 T = TypeVar('T')
 
@@ -65,6 +69,8 @@ class Query(Generic[T]):
         to_polars: Callable[..., Any] | None = None,
         iterate: Callable[..., Iterator[T]] | None = None,
         export: Callable[..., int] | None = None,
+        page: Callable[..., Page[T, Any]] | None = None,
+        pages: Callable[..., Iterator[Page[T, Any]]] | None = None,
     ) -> None:
         self._client = client
         self._params = params
@@ -73,6 +79,8 @@ class Query(Generic[T]):
         self._to_polars = to_polars
         self._iterate = iterate
         self._export = export
+        self._page = page
+        self._pages = pages
 
     def all(self) -> list[T]:
         """Fetch and return the full list.
@@ -118,6 +126,20 @@ class Query(Generic[T]):
             **format_kwargs,
         )
 
+    def page(self) -> Page[T, Any]:
+        """Fetch the first page object (items, total, next position, envelope)."""
+        return _require('page', self._page)(client=self._client, **self._page_params())
+
+    def pages(self) -> Iterator[Page[T, Any]]:
+        """Stream page objects, fetching each on demand."""
+        return _require('pages', self._pages)(
+            client=self._client, **self._page_params()
+        )
+
+    def _page_params(self) -> dict[str, Any]:
+        # ``max_items`` caps the item-level terminals only.
+        return {k: v for k, v in self._params.items() if k != 'max_items'}
+
 
 class AsyncQuery(Generic[T]):
     """A deferred asynchronous list-endpoint result (see :class:`Query`)."""
@@ -132,6 +154,8 @@ class AsyncQuery(Generic[T]):
         to_polars: Callable[..., Any] | None = None,
         iterate: Callable[..., AsyncIterator[T]] | None = None,
         export: Callable[..., Any] | None = None,
+        page: Callable[..., Any] | None = None,
+        pages: Callable[..., AsyncIterator[AsyncPage[T, Any]]] | None = None,
     ) -> None:
         self._client = client
         self._params = params
@@ -140,6 +164,8 @@ class AsyncQuery(Generic[T]):
         self._to_polars = to_polars
         self._iterate = iterate
         self._export = export
+        self._page = page
+        self._pages = pages
 
     async def all(self) -> list[T]:
         """Fetch and return the full list (``None`` reads as empty, see ``Query``)."""
@@ -183,3 +209,18 @@ class AsyncQuery(Generic[T]):
             **_export_params(self._params),
             **format_kwargs,
         )
+
+    async def page(self) -> AsyncPage[T, Any]:
+        """Fetch the first page object (see ``Query.page``)."""
+        return await _require('page', self._page)(
+            client=self._client, **self._page_params()
+        )
+
+    def pages(self) -> AsyncIterator[AsyncPage[T, Any]]:
+        """Stream page objects (consume with ``async for``)."""
+        return _require('pages', self._pages)(
+            client=self._client, **self._page_params()
+        )
+
+    def _page_params(self) -> dict[str, Any]:
+        return {k: v for k, v in self._params.items() if k != 'max_items'}

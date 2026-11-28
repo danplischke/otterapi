@@ -155,6 +155,32 @@ class TestModernizeTypeParams:
         assert '\n\n\n\n' not in modernize_type_params(source)
 
 
+class TestModernizeGenericClasses:
+    def test_plain_generic_class_gets_type_parameters(self):
+        source = dedent("""\
+            from typing import Any, Generic, TypeVar
+
+            T = TypeVar('T')
+            E = TypeVar('E')
+
+
+            class Page(Generic[T, E]):
+                items: list[T]
+                data: E
+
+
+            def first(page: Page[T, Any]) -> T:
+                return page.items[0]
+            """)
+        result = modernize_type_params(source)
+        assert 'TypeVar' not in result and 'Generic' not in result
+        assert 'class Page[T, E]:' in result
+        assert 'def first[T](page: Page[T, Any]) -> T:' in result
+        assert 'from typing import Any' in result
+        if sys.version_info >= (3, 12):
+            compile(result, '<test>', 'exec')
+
+
 class TestModernizeBailsOut:
     """Anything the rewrite does not fully understand is left untouched.
 
@@ -178,15 +204,28 @@ class TestModernizeBailsOut:
             """)
         assert modernize_type_params(source) == source
 
-    def test_typevar_used_by_a_generic_class(self):
+    def test_generic_class_with_extra_bases(self):
         source = dedent("""\
             from typing import Generic, TypeVar
 
             T = TypeVar('T')
 
 
-            class Box(Generic[T]):
+            class Box(Base, Generic[T]):
                 value: T
+            """)
+        assert modernize_type_params(source) == source
+
+    def test_typevar_used_by_a_non_generic_class(self):
+        source = dedent("""\
+            from typing import TypeVar
+
+            T = TypeVar('T')
+
+
+            class Holder:
+                def get(self, value: T) -> T:
+                    return value
             """)
         assert modernize_type_params(source) == source
 

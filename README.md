@@ -596,6 +596,42 @@ async for user in async_list_users_iter():
     print(user.name)
 ```
 
+### Page Objects
+
+Every paginated endpoint also gets `<name>_page` (one page) and `<name>_pages`
+(an iterator of pages). A page keeps what the item-level helpers discard:
+
+```python
+from client import list_users_page, list_users_pages
+
+for page in list_users_pages(page_size=100):
+    print(page.total, page.next_cursor)   # or next_offset / next_page
+    print(page.data.rate_limit)           # the validated response envelope
+    for user in page.items:
+        ...
+
+# Checkpoint a long iteration and resume it later
+page = list_users_page(cursor=saved_cursor)
+if page.has_next_page():
+    page = page.get_next_page()
+```
+
+| Attribute | Description |
+|-----------|-------------|
+| `items` | The items on the page (`Page` also iterates over them and has a `len`) |
+| `data` | The parsed response envelope, typed as the endpoint's response model |
+| `total` | The total item count (`total_path`), or `None` |
+| `total_pages` | The total page count (`total_pages_path`, page style), or `None` |
+| `next_cursor` / `next_offset` / `next_page` | Where the next page starts, or `None` on the last page |
+| `has_next_page()` / `get_next_page()` | Whether another page follows / fetch it |
+| `iter_pages(max_pages=None)` | This page and every page after it |
+
+The async variants (`async_list_users_page`, `async_list_users_pages`) return
+`AsyncPage` objects, whose `get_next_page()` is awaited and whose
+`iter_pages()` is consumed with `async for`. With `result_objects: true`,
+`Query.page()` and `Query.pages()` do the same. Turn the variants off with
+`pagination.page_variants: false`.
+
 ---
 
 ## 📊 DataFrame Conversion

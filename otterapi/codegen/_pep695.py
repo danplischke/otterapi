@@ -100,35 +100,138 @@ def _signature_type_params(
     return ordered
 
 
-def _strip_typevar_import(line: str) -> str | None:
-    """Drop ``TypeVar`` from a single-line ``from typing import ...``.
+def _strip_typevar_import(
+    line: str, drop: frozenset[str] = frozenset({'TypeVar'})
+) -> str | None:
+    """Drop ``TypeVar`` (and any other ``drop`` names) from a one-line import.
 
     Returns the rewritten line, or ``None`` when the whole import goes away
-    because ``TypeVar`` was the only name it bound.
+    because it bound nothing else.
     """
     match = re.match(r'^(\s*from\s+[\w.]+\s+import\s+)(.*)$', line)
     if match is None:
         return line
     prefix, names_part = match.groups()
     names = [name.strip() for name in names_part.split(',')]
-    kept = [name for name in names if name and name != 'TypeVar']
+    kept = [name for name in names if name and name not in drop]
     if not kept:
         return None
     return f'{prefix}{", ".join(kept)}'
 
 
-def modernize_type_params(source: str) -> str:
-    """Return *source* with module-level generic functions using PEP 695 syntax.
+def _generic_class_params(node: ast.ClassDef, typevars: set[str]) -> list[str] | None:
+    """``[T, E]`` for ``class X(Generic[T, E])``; ``[]`` if not generic; None to bail.
 
-    Rewrites ``def f(x: T) -> T`` into ``def f[T](x: T) -> T``, then removes the
-    now-redundant ``TypeVar`` declarations and imports.  Functions nested inside
-    another function are left alone: they keep referring to the type parameter
-    of the enclosing function, which PEP 695 scoping already makes visible.
+    Only the plain form is understood: ``Generic[...]`` as the one and only
+    base, every argument a module-level ``TypeVar``. Anything else (extra
+    bases, keywords, ``Generic`` mixed with ``Protocol``) bails out.
+    """
+    generic = [
+        base
+        for base in node.bases
+        if isinstance(base, ast.Subscript)
+        and isinstance(base.value, ast.Name)
+        and base.value.id == 'Generic'
+    ]
+    if not generic:
+        # A non-generic class naming a TypeVar anywhere (a base, a method
+        # annotation) would lose its declaration: leave the module alone.
+        uses = {
+            child.id
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name) and child.id in typevars
+        }
+        return None if uses else []
+    if len(node.bases) != 1 or node.keywords:
+        return None
+    slice_ = generic[0].slice
+    elts = slice_.elts if isinstance(slice_, ast.Tuple) else [slice_]
+    params: list[str] = []
+    for elt in elts:
+        if not isinstance(elt, ast.Name) or elt.id not in typevars:
+            return None
+        params.append(elt.id)
+    return params
+
+
+class _Bail(Exception):
+    """Raised by the per-node rewriters: leave the whole module untouched."""
+
+
+def _class_edit(
+    node: ast.ClassDef, line: str, typevars: set[str]
+) -> tuple[str, list[str]] | None:
+    """``(new header line, params)`` for a generic class; None if not generic."""
+    params = _generic_class_params(node, typevars)
+    if params is None:
+        raise _Bail
+    if not params:
+        return None
+    pattern = re.compile(
+        rf'\bclass\s+{re.escape(node.name)}\s*\(\s*Generic\[[^\]]*\]\s*\)'
+    )
+    match = pattern.search(line)
+    if match is None:
+        raise _Bail
+    header = f'class {node.name}[{", ".join(params)}]'
+    return f'{line[: match.start()]}{header}{line[match.end() :]}', params
+
+
+def _function_edit(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, line: str, typevars: set[str]
+) -> tuple[str, list[str]] | None:
+    """``(new def line, params)`` for a generic function; None if not generic."""
+    params = _signature_type_params(node, typevars)
+    if not params:
+        return None
+    match = re.compile(rf'\bdef\s+{re.escape(node.name)}\s*\(').search(line)
+    if match is None:
+        # Unexpected layout (e.g. the signature wrapped after ``def``);
+        # bail out entirely rather than emit a half-converted module.
+        raise _Bail
+    insert_at = match.end() - 1
+    return f'{line[:insert_at]}[{", ".join(params)}]{line[insert_at:]}', params
+
+
+def _import_edits(
+    tree: ast.Module, lines: list[str], drop: frozenset[str]
+) -> dict[int, str | None]:
+    """Line edits removing ``drop`` from every one-line ``from ... import``."""
+    edits: dict[int, str | None] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.lineno != node.end_lineno:
+            continue
+        if not any(alias.name in drop for alias in node.names):
+            continue
+        stripped = _strip_typevar_import(lines[node.lineno - 1].rstrip('\n'), drop)
+        edits[node.lineno] = None if stripped is None else f'{stripped}\n'
+    return edits
+
+
+def _generic_still_used(tree: ast.Module) -> bool:
+    """Whether ``Generic`` is referenced outside class headers and imports."""
+    return any(
+        isinstance(n, ast.Name) and n.id == 'Generic'
+        for stmt in tree.body
+        if not isinstance(stmt, ast.ClassDef | ast.ImportFrom)
+        for n in ast.walk(stmt)
+    )
+
+
+def modernize_type_params(source: str) -> str:
+    """Return *source* with module-level generics using PEP 695 syntax.
+
+    Rewrites ``def f(x: T) -> T`` into ``def f[T](x: T) -> T`` and
+    ``class Box(Generic[T])`` into ``class Box[T]``, then removes the
+    now-redundant ``TypeVar`` declarations and imports (and ``Generic``, once
+    nothing subclasses it).  Functions nested inside another function, and
+    methods, are left alone: they keep referring to the type parameter of the
+    enclosing scope, which PEP 695 scoping already makes visible.
 
     *source* is returned unchanged when it declares no simple module-level
     ``TypeVar``, when a ``TypeVar`` is referenced somewhere the rewrite cannot
-    follow (a generic class, a type alias, a runtime call), or when it does not
-    parse.
+    follow (a class with other bases, a non-generic class, a type alias, a
+    runtime call), or when it does not parse.
     """
     try:
         tree = ast.parse(source)
@@ -143,42 +246,35 @@ def modernize_type_params(source: str) -> str:
     # 1-indexed line -> replacement text (None deletes the line).
     edits: dict[int, str | None] = {}
     rewritten: set[str] = set()
+    rewrote_generic_class = False
 
-    for node in tree.body:
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        params = _signature_type_params(node, set(typevars))
-        if not params:
-            continue
-        def_line = lines[node.lineno - 1]
-        pattern = re.compile(rf'\bdef\s+{re.escape(node.name)}\s*\(')
-        match = pattern.search(def_line)
-        if match is None:
-            # Unexpected layout (e.g. the signature wrapped after ``def``);
-            # bail out entirely rather than emit a half-converted module.
-            return source
-        insert_at = match.end() - 1
-        edits[node.lineno] = (
-            f'{def_line[:insert_at]}[{", ".join(params)}]{def_line[insert_at:]}'
-        )
-        rewritten.update(params)
+    try:
+        for node in tree.body:
+            edit: tuple[str, list[str]] | None = None
+            if isinstance(node, ast.ClassDef):
+                edit = _class_edit(node, lines[node.lineno - 1], set(typevars))
+                rewrote_generic_class |= edit is not None
+            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                edit = _function_edit(node, lines[node.lineno - 1], set(typevars))
+            if edit is not None:
+                edits[node.lineno] = edit[0]
+                rewritten.update(edit[1])
+    except _Bail:
+        return source
 
     if rewritten != set(typevars):
-        # Some TypeVar is used somewhere other than a module-level function
-        # signature -- a generic class, an alias, ``dict[str, T]`` at module
-        # scope.  Converting only part of the module would break it.
+        # Some TypeVar is used somewhere other than a module-level signature
+        # or generic class -- an alias, ``dict[str, T]`` at module scope.
+        # Converting only part of the module would break it.
         return source
 
     for lineno in typevars.values():
         edits[lineno] = None
 
-    for node in tree.body:
-        if not isinstance(node, ast.ImportFrom) or node.lineno != node.end_lineno:
-            continue
-        if not any(alias.name == 'TypeVar' for alias in node.names):
-            continue
-        stripped = _strip_typevar_import(lines[node.lineno - 1].rstrip('\n'))
-        edits[node.lineno] = None if stripped is None else f'{stripped}\n'
+    drop = {'TypeVar'}
+    if rewrote_generic_class and not _generic_still_used(tree):
+        drop.add('Generic')
+    edits.update(_import_edits(tree, lines, frozenset(drop)))
 
     result: list[str] = []
     for lineno, line in enumerate(lines, start=1):

@@ -1,10 +1,12 @@
 """Pagination utilities for OtterAPI generated clients."""
 
+from __future__ import annotations
+
 import logging
-from collections.abc import AsyncIterator, Callable, Generator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Generic, TypeVar
 
 T = TypeVar('T')
 
@@ -933,3 +935,411 @@ async def paginate_page_async(
         return all_items[:max_items]
 
     return all_items
+
+
+# ---------------------------------------------------------------------------
+# Page objects
+# ---------------------------------------------------------------------------
+#
+# The item-level helpers above discard everything but the items. A page keeps
+# the rest: the total, where the next page starts (to resume or checkpoint a
+# long iteration) and the validated envelope for any other field. The
+# next-page decisions mirror the item-level helpers exactly.
+
+E = TypeVar('E')
+
+
+class Page(Generic[T, E]):
+    """One page of a paginated endpoint.
+
+    Attributes:
+        items: The items on this page.
+        data: The parsed response envelope, for fields beyond the items.
+        total: The total item count, when the response reports one.
+        total_pages: The total page count (page-number pagination only).
+        next_cursor: The cursor of the next page (cursor pagination), or None.
+        next_offset: The offset of the next page (offset pagination), or None.
+        next_page: The number of the next page (page pagination), or None.
+
+    Pass ``next_cursor`` / ``next_offset`` / ``next_page`` back as the start
+    position of the endpoint's ``_page`` function to resume later.
+    """
+
+    def __init__(
+        self,
+        items: list[T],
+        data: E,
+        *,
+        total: int | None = None,
+        total_pages: int | None = None,
+        next_cursor: str | None = None,
+        next_offset: int | None = None,
+        next_page: int | None = None,
+        fetch_next: Callable[[], Page[T, E]] | None = None,
+    ) -> None:
+        self.items = items
+        self.data = data
+        self.total = total
+        self.total_pages = total_pages
+        self.next_cursor = next_cursor
+        self.next_offset = next_offset
+        self.next_page = next_page
+        self._fetch_next = fetch_next
+
+    def has_next_page(self) -> bool:
+        """Whether another page follows this one."""
+        return self._fetch_next is not None
+
+    def get_next_page(self) -> Page[T, E] | None:
+        """Fetch the next page, or return None on the last page."""
+        if self._fetch_next is None:
+            return None
+        return self._fetch_next()
+
+    def iter_pages(self, *, max_pages: int | None = None) -> Iterator[Page[T, E]]:
+        """Yield this page and every page after it, fetching on demand."""
+        page: Page[T, E] | None = self
+        count = 0
+        while page is not None:
+            yield page
+            count += 1
+            if max_pages is not None and count >= max_pages:
+                return
+            page = page.get_next_page()
+
+    def __iter__(self) -> Iterator[T]:
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __repr__(self) -> str:
+        return (
+            f'{type(self).__name__}(items={len(self.items)}, total={self.total}, '
+            f'has_next_page={self.has_next_page()})'
+        )
+
+
+class AsyncPage(Generic[T, E]):
+    """One page of a paginated endpoint, fetched asynchronously (see :class:`Page`)."""
+
+    def __init__(
+        self,
+        items: list[T],
+        data: E,
+        *,
+        total: int | None = None,
+        total_pages: int | None = None,
+        next_cursor: str | None = None,
+        next_offset: int | None = None,
+        next_page: int | None = None,
+        fetch_next: Callable[[], Awaitable[AsyncPage[T, E]]] | None = None,
+    ) -> None:
+        self.items = items
+        self.data = data
+        self.total = total
+        self.total_pages = total_pages
+        self.next_cursor = next_cursor
+        self.next_offset = next_offset
+        self.next_page = next_page
+        self._fetch_next = fetch_next
+
+    def has_next_page(self) -> bool:
+        """Whether another page follows this one."""
+        return self._fetch_next is not None
+
+    async def get_next_page(self) -> AsyncPage[T, E] | None:
+        """Fetch the next page, or return None on the last page."""
+        if self._fetch_next is None:
+            return None
+        return await self._fetch_next()
+
+    async def iter_pages(
+        self, *, max_pages: int | None = None
+    ) -> AsyncIterator[AsyncPage[T, E]]:
+        """Yield this page and every page after it (``async for``)."""
+        page: AsyncPage[T, E] | None = self
+        count = 0
+        while page is not None:
+            yield page
+            count += 1
+            if max_pages is not None and count >= max_pages:
+                return
+            page = await page.get_next_page()
+
+    def __iter__(self) -> Iterator[T]:
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __repr__(self) -> str:
+        return (
+            f'{type(self).__name__}(items={len(self.items)}, total={self.total}, '
+            f'has_next_page={self.has_next_page()})'
+        )
+
+
+def _page_items(extract_items: Callable[[Any], Any], data: Any) -> list[Any]:
+    return list(extract_items(data) or [])
+
+
+def _maybe(getter: Callable[[Any], Any] | None, data: Any) -> Any:
+    return getter(data) if getter is not None else None
+
+
+def _next_offset(
+    offset: int, items: list[Any], page_size: int, total: int | None
+) -> int | None:
+    """Offset of the page after ``items``, or None (as in ``paginate_offset``)."""
+    if not items or len(items) < page_size:
+        return None
+    following = offset + len(items)
+    if total is not None and following >= total:
+        return None
+    return following
+
+
+def _next_page_number(
+    page: int, items: list[Any], page_size: int, total_pages: int | None
+) -> int | None:
+    """Number of the page after ``items``, or None (as in ``paginate_page``)."""
+    if not items or len(items) < page_size:
+        return None
+    if total_pages is not None and page >= total_pages:
+        return None
+    return page + 1
+
+
+def fetch_offset_page(
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
+    *,
+    offset: int = 0,
+    page_size: int = 100,
+) -> Page[T, Any]:
+    """Fetch one offset-paginated page."""
+    data = fetch_page(offset, page_size)
+    items = _page_items(extract_items, data)
+    total = _maybe(get_total, data)
+    following = _next_offset(offset, items, page_size, total)
+    fetch_next: Callable[[], Page[T, Any]] | None = None
+    if following is not None:
+        start = following
+
+        def _fetch_next() -> Page[T, Any]:
+            return fetch_offset_page(
+                fetch_page,
+                extract_items,
+                get_total,
+                offset=start,
+                page_size=page_size,
+            )
+
+        fetch_next = _fetch_next
+
+    return Page(items, data, total=total, next_offset=following, fetch_next=fetch_next)
+
+
+async def fetch_offset_page_async(
+    fetch_page: Callable[[int, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
+    *,
+    offset: int = 0,
+    page_size: int = 100,
+) -> AsyncPage[T, Any]:
+    """Async version of :func:`fetch_offset_page`."""
+    data = await fetch_page(offset, page_size)
+    items = _page_items(extract_items, data)
+    total = _maybe(get_total, data)
+    following = _next_offset(offset, items, page_size, total)
+    fetch_next: Callable[[], Awaitable[AsyncPage[T, Any]]] | None = None
+    if following is not None:
+        start = following
+
+        async def _fetch_next() -> AsyncPage[T, Any]:
+            return await fetch_offset_page_async(
+                fetch_page,
+                extract_items,
+                get_total,
+                offset=start,
+                page_size=page_size,
+            )
+
+        fetch_next = _fetch_next
+
+    return AsyncPage(
+        items, data, total=total, next_offset=following, fetch_next=fetch_next
+    )
+
+
+def fetch_cursor_page(
+    fetch_page: Callable[[str | None, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    cursor: str | None = None,
+    page_size: int = 100,
+    _fetched: int = 0,
+) -> Page[T, Any]:
+    """Fetch one cursor-paginated page."""
+    data = fetch_page(cursor, page_size)
+    items = _page_items(extract_items, data)
+    fetched = _fetched + len(items)
+    following = (
+        _advance_cursor(data, cursor, get_next_cursor, get_total, fetched)
+        if items
+        else None
+    )
+    fetch_next: Callable[[], Page[T, Any]] | None = None
+    if following is not None:
+        start = following
+
+        def _fetch_next() -> Page[T, Any]:
+            return fetch_cursor_page(
+                fetch_page,
+                extract_items,
+                get_next_cursor,
+                get_total=get_total,
+                cursor=start,
+                page_size=page_size,
+                _fetched=fetched,
+            )
+
+        fetch_next = _fetch_next
+
+    return Page(
+        items,
+        data,
+        total=_maybe(get_total, data),
+        next_cursor=following,
+        fetch_next=fetch_next,
+    )
+
+
+async def fetch_cursor_page_async(
+    fetch_page: Callable[[str | None, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    cursor: str | None = None,
+    page_size: int = 100,
+    _fetched: int = 0,
+) -> AsyncPage[T, Any]:
+    """Async version of :func:`fetch_cursor_page`."""
+    data = await fetch_page(cursor, page_size)
+    items = _page_items(extract_items, data)
+    fetched = _fetched + len(items)
+    following = (
+        _advance_cursor(data, cursor, get_next_cursor, get_total, fetched)
+        if items
+        else None
+    )
+    fetch_next: Callable[[], Awaitable[AsyncPage[T, Any]]] | None = None
+    if following is not None:
+        start = following
+
+        async def _fetch_next() -> AsyncPage[T, Any]:
+            return await fetch_cursor_page_async(
+                fetch_page,
+                extract_items,
+                get_next_cursor,
+                get_total=get_total,
+                cursor=start,
+                page_size=page_size,
+                _fetched=fetched,
+            )
+
+        fetch_next = _fetch_next
+
+    return AsyncPage(
+        items,
+        data,
+        total=_maybe(get_total, data),
+        next_cursor=following,
+        fetch_next=fetch_next,
+    )
+
+
+def fetch_numbered_page(
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    page: int = 1,
+    page_size: int = 100,
+) -> Page[T, Any]:
+    """Fetch one page of a page-number-paginated endpoint."""
+    data = fetch_page(page, page_size)
+    items = _page_items(extract_items, data)
+    total_pages = _maybe(get_total_pages, data)
+    following = _next_page_number(page, items, page_size, total_pages)
+    fetch_next: Callable[[], Page[T, Any]] | None = None
+    if following is not None:
+        start = following
+
+        def _fetch_next() -> Page[T, Any]:
+            return fetch_numbered_page(
+                fetch_page,
+                extract_items,
+                get_total_pages,
+                get_total=get_total,
+                page=start,
+                page_size=page_size,
+            )
+
+        fetch_next = _fetch_next
+
+    return Page(
+        items,
+        data,
+        total=_maybe(get_total, data),
+        total_pages=total_pages,
+        next_page=following,
+        fetch_next=fetch_next,
+    )
+
+
+async def fetch_numbered_page_async(
+    fetch_page: Callable[[int, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    page: int = 1,
+    page_size: int = 100,
+) -> AsyncPage[T, Any]:
+    """Async version of :func:`fetch_numbered_page`."""
+    data = await fetch_page(page, page_size)
+    items = _page_items(extract_items, data)
+    total_pages = _maybe(get_total_pages, data)
+    following = _next_page_number(page, items, page_size, total_pages)
+    fetch_next: Callable[[], Awaitable[AsyncPage[T, Any]]] | None = None
+    if following is not None:
+        start = following
+
+        async def _fetch_next() -> AsyncPage[T, Any]:
+            return await fetch_numbered_page_async(
+                fetch_page,
+                extract_items,
+                get_total_pages,
+                get_total=get_total,
+                page=start,
+                page_size=page_size,
+            )
+
+        fetch_next = _fetch_next
+
+    return AsyncPage(
+        items,
+        data,
+        total=_maybe(get_total, data),
+        total_pages=total_pages,
+        next_page=following,
+        fetch_next=fetch_next,
+    )

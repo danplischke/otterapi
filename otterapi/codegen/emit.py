@@ -58,6 +58,7 @@ from otterapi.codegen.endpoints import (
     build_default_client_code,
     build_standalone_dataframe_fn,
     build_standalone_endpoint_fn,
+    build_standalone_page_fn,
     build_standalone_paginated_dataframe_fn,
     build_standalone_paginated_fn,
     build_standalone_paginated_iter_fn,
@@ -788,6 +789,29 @@ class CoreEndpointFeature(EndpointFeature):
             )
             sink.add(fn, iter_fn_name, imports)
 
+        pagination = ctx.config.pagination
+        if pagination is None or not pagination.page_variants:
+            return
+        for page_mode, suffix in (('page', '_page'), ('pages', '_pages')):
+            for is_async, base_fn_name in ctx.name_pairs:
+                page_fn_name = f'{base_fn_name}{suffix}'
+                fn, imports = build_standalone_page_fn(
+                    fn_name=page_fn_name,
+                    method=ep.method,
+                    path=ep.path,
+                    parameters=ep.parameters,
+                    request_body_info=ep.request_body,
+                    response_type=ep.response_type,
+                    pagination_style=ctx.pag_config.style,
+                    pagination_config=pag_dict,
+                    page_mode=cast("Literal['page', 'pages']", page_mode),
+                    item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
+                    docs=ep.description,
+                    is_async=is_async,
+                )
+                sink.add(fn, page_fn_name, imports)
+
     def file_imports(self, sink: EmitSink) -> list[ast.stmt]:
         if not sink.has_pagination:
             return []
@@ -810,6 +834,14 @@ class CoreEndpointFeature(EndpointFeature):
                     'extract_path',
                     'merge_body_fields',
                     'last_item_value',
+                    'Page',
+                    'AsyncPage',
+                    'fetch_offset_page',
+                    'fetch_offset_page_async',
+                    'fetch_cursor_page',
+                    'fetch_cursor_page_async',
+                    'fetch_numbered_page',
+                    'fetch_numbered_page_async',
                 }
             }
         )

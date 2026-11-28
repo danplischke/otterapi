@@ -1707,6 +1707,8 @@ class Codegen(OpenAPIProcessor):
                     'iterate_cursor_async',
                     'iterate_page',
                     'iterate_page_async',
+                    'Page',
+                    'AsyncPage',
                 ],
             )
         if self.config.export.enabled:
