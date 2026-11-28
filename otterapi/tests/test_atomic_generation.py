@@ -21,6 +21,7 @@ import yaml
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate
 
 # A file-loaded spec whose only server URL is relative. Generation succeeds:
 # the relative URL is kept as the client default and the caller supplies an
@@ -76,9 +77,7 @@ def _write_spec(tmp_path: Path, spec: dict) -> Path:
 
 
 def _generate(spec_file: Path, output: Path, **kwargs) -> None:
-    Codegen(
-        DocumentConfig(source=str(spec_file), output=str(output), **kwargs)
-    ).generate()
+    generate(spec_file, output, **kwargs)
 
 
 def _base_url_default(output: Path) -> str:

@@ -17,23 +17,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate
 
 FIXTURES_ROOT = Path(__file__).parent / 'fixtures' / 'golden'
 PAGINATED_SPEC = FIXTURES_ROOT / 'paginated' / 'spec.yaml'
 
 
 def _generate(output_dir: Path, **overrides) -> None:
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(PAGINATED_SPEC),
-            'output': str(output_dir),
-            'base_url': 'https://example.test',
-            **overrides,
-        }
-    )
-    Codegen(config).generate()
+    generate(PAGINATED_SPEC, output_dir, base_url='https://example.test', **overrides)
 
 
 def _endpoint_function_names(output_dir: Path) -> set[str]:

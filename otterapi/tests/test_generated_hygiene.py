@@ -29,15 +29,13 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-import yaml
 
 from otterapi.codegen.ast_utils import sort_import_blocks
-from otterapi.codegen.codegen import Codegen
 from otterapi.codegen.utils import _apply_import_separators
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import GOLDEN, generate_golden
 
 RUNTIME_ROOT = Path(__file__).parent.parent / 'codegen' / 'runtime'
-FIXTURES_ROOT = Path(__file__).parent / 'fixtures' / 'golden'
+FIXTURES_ROOT = GOLDEN
 
 
 def _isinstance_target(node: ast.expr) -> str | None:
@@ -98,22 +96,7 @@ _SCENARIOS: list[tuple[str, dict]] = [
 
 def _generate(fixture: str, overrides: dict, output: Path) -> None:
     """Generate *fixture* into *output*, honouring its own config.yaml."""
-    spec_dir = FIXTURES_ROOT / fixture
-    base: dict = {}
-    config_path = spec_dir / 'config.yaml'
-    if config_path.is_file():
-        base = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
-
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(spec_dir / 'spec.yaml'),
-            'output': str(output),
-            'base_url': 'https://example.test',
-            **base,
-            **overrides,
-        }
-    )
-    Codegen(config).generate()
+    generate_golden(fixture, output, **overrides)
 
 
 @pytest.mark.parametrize(

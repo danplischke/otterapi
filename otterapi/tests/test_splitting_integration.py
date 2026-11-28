@@ -8,7 +8,6 @@ and importable.
 import ast
 import importlib
 import json
-import sys
 from pathlib import Path
 
 from otterapi.codegen.codegen import Codegen
@@ -18,6 +17,7 @@ from otterapi.codegen.splitting import (
 )
 from otterapi.codegen.types import Endpoint
 from otterapi.config import DocumentConfig, ModuleDefinition, ModuleSplitConfig
+from otterapi.tests.helpers import import_fresh
 
 
 def make_endpoint(
@@ -525,20 +525,7 @@ class TestNestedSplitImports:
 
     def test_nested_package_is_importable(self, tmp_path: Path):
         self._generate(tmp_path)
-        sys.path.insert(0, str(tmp_path))
-        try:
-            for name in [
-                m
-                for m in list(sys.modules)
-                if m == 'nested_pkg' or m.startswith('nested_pkg.')
-            ]:
-                sys.modules.pop(name, None)
-            module = importlib.import_module('nested_pkg.store.pets')
-            assert callable(module.get_pet)
-            root = importlib.import_module('nested_pkg')
-            assert hasattr(root, 'get_pet')
-        finally:
-            try:
-                sys.path.remove(str(tmp_path))
-            except ValueError:
-                pass
+        root = import_fresh(tmp_path, 'nested_pkg')
+        assert hasattr(root, 'get_pet')
+        module = importlib.import_module('nested_pkg.store.pets')
+        assert callable(module.get_pet)

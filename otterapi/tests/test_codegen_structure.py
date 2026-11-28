@@ -11,12 +11,10 @@ import ast
 from pathlib import Path
 
 import pytest
-import yaml
 
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import GOLDEN, generate_golden
 
-FIXTURES_ROOT = Path(__file__).parent / 'fixtures' / 'golden'
+FIXTURES_ROOT = GOLDEN
 
 
 # ---------------------------------------------------------------------------
@@ -25,19 +23,7 @@ FIXTURES_ROOT = Path(__file__).parent / 'fixtures' / 'golden'
 
 
 def _generate(spec_dir: Path, output_dir: Path) -> dict[str, str]:
-    config_path = spec_dir / 'config.yaml'
-    overrides: dict = {}
-    if config_path.is_file():
-        overrides = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(spec_dir / 'spec.yaml'),
-            'output': str(output_dir),
-            'base_url': 'https://example.test',
-            **overrides,
-        }
-    )
-    Codegen(config).generate()
+    generate_golden(spec_dir.name, output_dir)
     return {
         p.relative_to(output_dir).as_posix(): p.read_text(encoding='utf-8')
         for p in sorted(output_dir.rglob('*.py'))

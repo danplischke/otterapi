@@ -11,16 +11,14 @@ spec that uses the parametrized spelling throughout generated *zero* models.
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from otterapi.codegen.codegen import Codegen
 from otterapi.codegen.types import RequestBodyInfo, ResponseInfo
-from otterapi.config import DocumentConfig
 from otterapi.openapi.constants import base_media_type, is_json_media_type
+from otterapi.tests.helpers import generate
 
 
 def _spec(response_key: str, body_key: str | None = None) -> dict[str, Any]:
@@ -66,11 +64,7 @@ def _spec(response_key: str, body_key: str | None = None) -> dict[str, Any]:
 
 
 def _generate(tmp_path: Path, spec: dict) -> Path:
-    spec_file = tmp_path / 'openapi.json'
-    spec_file.write_text(json.dumps(spec), encoding='utf-8')
-    output = tmp_path / 'pkg'
-    Codegen(DocumentConfig(source=str(spec_file), output=str(output))).generate()
-    return output
+    return generate(spec, tmp_path / 'pkg')
 
 
 def _endpoint(output: Path, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:

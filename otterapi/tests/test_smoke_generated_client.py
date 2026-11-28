@@ -7,8 +7,6 @@ breakage, missing imports, runtime AttributeErrors).
 
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
 
 import httpx2
@@ -16,6 +14,7 @@ import pytest
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import import_fresh
 
 SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'spec.yaml'
 
@@ -27,28 +26,6 @@ def _generate_into(target: Path) -> None:
         base_url='https://example.test',
     )
     Codegen(config).generate()
-
-
-def _import_generated(parent_dir: Path, package_name: str):
-    """Add ``parent_dir`` to ``sys.path`` and import ``package_name`` fresh."""
-    sys.path.insert(0, str(parent_dir))
-    try:
-        # Drop any cached submodules from earlier test runs so we always pick
-        # up the freshly generated source.
-        stale = [
-            mod
-            for mod in list(sys.modules)
-            if mod == package_name or mod.startswith(package_name + '.')
-        ]
-        for mod in stale:
-            sys.modules.pop(mod, None)
-        return importlib.import_module(package_name)
-    finally:
-        # Remove our injected entry on the way out so other tests stay clean.
-        try:
-            sys.path.remove(str(parent_dir))
-        except ValueError:
-            pass
 
 
 @pytest.fixture(scope='module')
@@ -64,7 +41,7 @@ def generated_client_module(tmp_path_factory):
     package_name = 'smoke_client_pkg'
     parent = tmp_path_factory.mktemp('smoke_client')
     _generate_into(parent / package_name)
-    return _import_generated(parent, package_name)
+    return import_fresh(parent, package_name)
 
 
 def _mock_handler(request: httpx2.Request) -> httpx2.Response:
