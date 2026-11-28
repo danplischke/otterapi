@@ -569,6 +569,11 @@ pagination:
       next_cursor_item_path: cursor
 ```
 
+With `request_body.flatten: true` the paginated functions (`_iter`, `_df`,
+`_export`, `_page`, ...) do not take `after` and `limit` as arguments at all,
+the same way the query-string `offset` / `limit` are hidden; set them with
+`cursor=` and `page_size=`.
+
 The paginator overlays `after` and `limit` onto the dumped body for each
 page; everything else you put in the body is sent unchanged. `page_size`
 takes precedence over a `limit` set on the body, and an `after` set on the

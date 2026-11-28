@@ -588,9 +588,13 @@ def build_standalone_paginated_export_fn(
         pagination_omits_page_size,
         pagination_owned_param_names,
         pagination_start_knob,
+        strip_pagination_body_fields,
     )
 
     owned = pagination_owned_param_names(pagination_style, pagination_config)
+    request_body_info = strip_pagination_body_fields(
+        request_body_info, pagination_style, pagination_config
+    )
     filtered_parameters = (
         [p for p in parameters if p.name not in owned] if parameters else parameters
     )

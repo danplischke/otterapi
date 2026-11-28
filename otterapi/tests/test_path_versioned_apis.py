@@ -570,3 +570,76 @@ def test_extract_path_walks_model_attributes() -> None:
         data: Inner
 
     assert extract_path(Outer(data=Inner(items=[1, 2])), 'data.items') == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# 4. Flattened bodies hide the fields the paginator drives
+# ---------------------------------------------------------------------------
+
+
+class TestFlattenedBodyPagination:
+    @pytest.fixture(scope='class')
+    def flat_pkg(self, tmp_path_factory: pytest.TempPathFactory) -> Any:
+        spec = copy.deepcopy(SPEC)
+        # A required paging field must still validate on the first page.
+        spec['components']['schemas']['ByIdRequest']['required'] = ['id', 'limit']
+        tmp_path = tmp_path_factory.mktemp('flat_pag')
+        _generate(
+            tmp_path,
+            'flat_pag',
+            spec=spec,
+            module_split=MODULE_SPLIT,
+            pagination=BODY_PAGINATION,
+            request_body={'flatten': True},
+            dataframe={'enabled': True, 'pandas': True, 'default_path': 'data'},
+            export={'enabled': True},
+        )
+        sys.path.insert(0, str(tmp_path))
+        try:
+            yield (
+                importlib.import_module('flat_pag.widgets'),
+                importlib.import_module('flat_pag.client').Client,
+            )
+        finally:
+            sys.path.remove(str(tmp_path))
+
+    @pytest.mark.parametrize(
+        'suffix', ['', '_iter', '_df', '_export', '_page', '_pages']
+    )
+    def test_paging_fields_are_not_parameters(self, flat_pkg: Any, suffix: str) -> None:
+        import inspect
+
+        widgets, _ = flat_pkg
+        for prefix in ('', 'async_'):
+            fn = getattr(widgets, f'{prefix}get_widgets_by_id_v2{suffix}')
+            params = inspect.signature(fn).parameters
+            assert 'after' not in params and 'limit' not in params
+            assert {'id', 'min_score', 'cursor', 'page_size'} <= set(params)
+
+    def test_non_paginated_endpoint_keeps_every_field(self, flat_pkg: Any) -> None:
+        import inspect
+
+        widgets, _ = flat_pkg
+        params = inspect.signature(widgets.get_widgets_by_id_v2_count).parameters
+        assert {'id', 'min_score', 'limit', 'after'} <= set(params)
+
+    def test_df_fetches_every_page(self, flat_pkg: Any) -> None:
+        widgets, client_cls = flat_pkg
+        server = WidgetServer()
+        df = widgets.get_widgets_by_id_v2_df(
+            'x', min_score=0.5, client=server.client(client_cls)
+        )
+        assert len(df) == TOTAL_ROWS
+        assert server.bodies == [
+            {'id': 'x', 'min_score': 0.5, 'limit': 100},
+            {'id': 'x', 'min_score': 0.5, 'limit': 100, 'after': '100'},
+            {'id': 'x', 'min_score': 0.5, 'limit': 100, 'after': '200'},
+        ]
+
+    def test_export_fetches_every_page(self, flat_pkg: Any, tmp_path: Path) -> None:
+        widgets, client_cls = flat_pkg
+        out = tmp_path / 'rows.jsonl'
+        widgets.get_widgets_by_id_v2_export(
+            str(out), 'x', format='jsonl', client=WidgetServer().client(client_cls)
+        )
+        assert len(out.read_text().splitlines()) == TOTAL_ROWS

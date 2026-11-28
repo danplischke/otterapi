@@ -212,6 +212,59 @@ def pagination_owned_param_names(
     }
 
 
+def pagination_owned_body_fields(
+    pagination_style: PaginationStyle | str | None,
+    pagination_config: dict | None,
+) -> set[str]:
+    """Wire names of the request-body fields a paginated function drives itself.
+
+    The body counterpart of :func:`pagination_owned_param_names`: with
+    ``cursor_location`` / ``limit_location: body`` the position and page-size
+    fields live in the JSON body and are set by the paginator on every page.
+    """
+    if pagination_style is None:
+        return set()
+    if isinstance(pagination_style, str):
+        pagination_style = PaginationStyle(pagination_style)
+    config = pagination_config or {}
+    keys = _PAGINATION_PARAM_KEYS.get(pagination_style)
+    if not keys:
+        return set()
+    (start_key, start_default), (size_key, size_default) = keys
+    owned: set[str] = set()
+    if config.get('cursor_location', 'query') == 'body':
+        owned.add(config.get(start_key) or start_default)
+    if config.get('limit_location', 'query') == 'body' and not (
+        pagination_omits_page_size(pagination_style, config)
+    ):
+        owned.add(config.get(size_key) or size_default)
+    return owned
+
+
+def strip_pagination_body_fields(
+    request_body_info: RequestBodyInfo | None,
+    pagination_style: PaginationStyle | str | None,
+    pagination_config: dict | None,
+) -> RequestBodyInfo | None:
+    """``request_body_info`` without the flattened fields the paginator owns.
+
+    Dropped from every paginated signature (``_iter``, ``_df``, ``_export``,
+    ``_page`` ...) the same way the spec's own ``offset`` / ``limit`` query
+    parameters are: the caller sets them through ``cursor`` / ``page_size``,
+    and a second way to set them would only conflict.
+    """
+    if request_body_info is None or request_body_info.flattened_fields is None:
+        return request_body_info
+    owned = pagination_owned_body_fields(pagination_style, pagination_config)
+    if not owned:
+        return request_body_info
+    stripped = copy.copy(request_body_info)
+    stripped.flattened_fields = [
+        f for f in request_body_info.flattened_fields if f.wire_name not in owned
+    ]
+    return stripped
+
+
 def clean_docstring(docstring: str) -> str:
     """Clean and normalize a docstring by removing excess indentation.
 
@@ -949,10 +1002,10 @@ class EndpointFunctionFactory:
             ]
             builder.add_parameters(filtered_params)
             self._add_pagination_parameters(builder)
+            builder.add_request_body(self._request_body_for_signature())
         else:
             builder.add_parameters(self.config.parameters)
-
-        builder.add_request_body(self.config.request_body_info)
+            builder.add_request_body(self.config.request_body_info)
 
         if self.config.dataframe_library and not self.config.is_paginated_dataframe:
             # Only add path parameter for non-paginated DataFrame functions
@@ -1690,31 +1743,45 @@ class EndpointFunctionFactory:
         )
 
     def _pagination_param_names(self) -> tuple[str, str, str, str]:
-        """Resolve fetch_page's (param1_name, param2_name, param1_api_name, param2_api_name)."""
+        """Resolve fetch_page's (param1_name, param2_name, param1_api_name, param2_api_name).
+
+        fetch_page's own argument names are underscore-prefixed so they can
+        never shadow a spec parameter or a flattened body field it forwards
+        (a flattened ``limit`` field used to be silently replaced by
+        fetch_page's ``limit`` argument).
+        """
         pag_config = self.config.pagination_config or {}
         style = self.config.pagination_style
         if style == PaginationStyle.OFFSET:
             return (
-                'off',
-                'limit',
+                '_start',
+                '_size',
                 pag_config.get('offset_param', 'offset'),
                 pag_config.get('limit_param', 'limit'),
             )
         if style == PaginationStyle.CURSOR:
             return (
-                'cur',
-                'limit',
+                '_start',
+                '_size',
                 pag_config.get('cursor_param', 'cursor'),
                 pag_config.get('limit_param', 'limit'),
             )
         if style == PaginationStyle.PAGE:
             return (
-                'pg',
-                'per_page',
+                '_start',
+                '_size',
                 pag_config.get('page_param', 'page'),
                 pag_config.get('per_page_param', 'per_page'),
             )
-        return 'param1', 'param2', 'param1', 'param2'
+        return '_start', '_size', 'param1', 'param2'
+
+    def _request_body_for_signature(self) -> RequestBodyInfo | None:
+        """The request body as a paginated function exposes it."""
+        return strip_pagination_body_fields(
+            self.config.request_body_info,
+            self.config.pagination_style,
+            self.config.pagination_config,
+        )
 
     def _build_fetch_page_params_dict(
         self,
@@ -1837,9 +1904,30 @@ class EndpointFunctionFactory:
         via ``merge_body_fields`` -- on the wire (alias) names, after
         serialization, so field aliases and validation never get in the way.
         """
-        body_info = self.config.request_body_info
+        body_info = self._request_body_for_signature()
         fields = self._body_pagination_fields()
         body_expr, body_param_name = ParameterASTBuilder.build_body_expr(body_info)
+        if (
+            fields
+            and body_info is not None
+            and body_info.flattened_fields is not None
+            and isinstance(body_expr, ast.Call)
+            and len(body_expr.args) == 2
+        ):
+            # Flattened: merge the paging values into the field dict *before*
+            # build_request_body validates it, so a required paging field is
+            # present when the model checks for it.
+            body_expr.args[1] = _call(
+                func=_name('merge_body_fields'),
+                args=[
+                    body_expr.args[1],
+                    ast.Dict(
+                        keys=[ast.Constant(value=wire) for wire, _ in fields],
+                        values=[_name(arg) for _, arg in fields],
+                    ),
+                ],
+            )
+            return ast.keyword(arg=body_param_name or 'json', value=body_expr)
         if fields:
             if (
                 body_info is None
