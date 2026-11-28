@@ -122,7 +122,19 @@ class PaginationStyle(StrEnum):
     OFFSET = 'offset'  # Offset/limit based pagination
     CURSOR = 'cursor'  # Cursor-based pagination
     PAGE = 'page'  # Page number based pagination
-    LINK = 'link'  # Link header pagination (RFC 5988)
+
+
+def _pagination_style(value: Any) -> Any:
+    """``PaginationStyle`` for a style name, with a readable error for others."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return PaginationStyle(value.lower())
+    except ValueError:
+        choices = ', '.join(style.value for style in PaginationStyle)
+        raise ValueError(
+            f'unsupported pagination style {value!r}; expected one of {choices}'
+        ) from None
 
 
 class EndpointPaginationConfig(BaseModel):
@@ -151,7 +163,7 @@ class EndpointPaginationConfig(BaseModel):
         description='Override whether to generate pagination methods.',
     )
 
-    style: PaginationStyle | Literal['offset', 'cursor', 'page', 'link'] | None = Field(
+    style: PaginationStyle | Literal['offset', 'cursor', 'page'] | None = Field(
         default=None,
         description='Pagination style for this endpoint.',
     )
@@ -266,9 +278,7 @@ class EndpointPaginationConfig(BaseModel):
         """Convert string style to enum."""
         if v is None:
             return None
-        if isinstance(v, str):
-            return PaginationStyle(v.lower())
-        return v
+        return _pagination_style(v)
 
 
 class PaginationConfig(BaseModel):
@@ -301,11 +311,9 @@ class PaginationConfig(BaseModel):
         ),
     )
 
-    default_style: PaginationStyle | Literal['offset', 'cursor', 'page', 'link'] = (
-        Field(
-            default=PaginationStyle.OFFSET,
-            description='Default pagination style.',
-        )
+    default_style: PaginationStyle | Literal['offset', 'cursor', 'page'] = Field(
+        default=PaginationStyle.OFFSET,
+        description='Default pagination style.',
     )
 
     default_page_size: int = Field(
@@ -378,9 +386,7 @@ class PaginationConfig(BaseModel):
     @classmethod
     def normalize_default_style(cls, v: Any) -> PaginationStyle:
         """Convert string style to enum."""
-        if isinstance(v, str):
-            return PaginationStyle(v.lower())
-        return v
+        return _pagination_style(v)
 
     def _auto_detect_pagination(
         self, endpoint_parameters: list | None

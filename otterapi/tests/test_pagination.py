@@ -451,13 +451,19 @@ class TestPaginationStyleEnum:
         assert PaginationStyle.OFFSET.value == 'offset'
         assert PaginationStyle.CURSOR.value == 'cursor'
         assert PaginationStyle.PAGE.value == 'page'
-        assert PaginationStyle.LINK.value == 'link'
 
     def test_from_string(self):
         """Test creating from string."""
         assert PaginationStyle('offset') == PaginationStyle.OFFSET
         assert PaginationStyle('cursor') == PaginationStyle.CURSOR
         assert PaginationStyle('page') == PaginationStyle.PAGE
+
+    @pytest.mark.parametrize('field', ['style', 'default_style'])
+    def test_unsupported_style_is_a_config_error(self, field):
+        """'link' was accepted here but crashed code generation."""
+        cls = PaginationConfig if field == 'default_style' else EndpointPaginationConfig
+        with pytest.raises(ValueError, match="unsupported pagination style 'link'"):
+            cls(**{field: 'link'})
 
 
 class TestPaginationModuleGeneration:
