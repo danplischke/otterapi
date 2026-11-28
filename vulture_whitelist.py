@@ -26,6 +26,7 @@ _.validate_output
 _.validate_filename
 _.validate_documents
 _._compiles
+_.POLARS  # DataFrameLibrary member, looked up by value
 _._validate_client_options
 _._handle_unknown_fields
 _._enforce_known_fields

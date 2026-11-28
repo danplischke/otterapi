@@ -6,10 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from otterapi.codegen.endpoints import (
-    build_standalone_paginated_fn,
-    build_standalone_paginated_iter_fn,
-)
+from otterapi.codegen.endpoints import EndpointFunctionConfig, EndpointFunctionFactory
 from otterapi.codegen.pagination import (
     PaginationMethodConfig,
     endpoint_is_paginated,
@@ -22,6 +19,16 @@ from otterapi.config import (
     PaginationStyle,
     ResolvedPaginationConfig,
 )
+
+
+def build_standalone_paginated_fn(**config):
+    """One paginated endpoint function, built straight from the factory."""
+    config['pagination_style'] = PaginationStyle(config['pagination_style'])
+    return EndpointFunctionFactory(EndpointFunctionConfig(**config)).build()
+
+
+def build_standalone_paginated_iter_fn(**config):
+    return build_standalone_paginated_fn(is_iterator=True, **config)
 
 
 class TestEndpointPaginationConfig:

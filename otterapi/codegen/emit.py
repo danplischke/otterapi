@@ -43,7 +43,7 @@ import fnmatch
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from otterapi.codegen.ast_utils import (
     MODELS_MODULE,
@@ -55,13 +55,11 @@ from otterapi.codegen.ast_utils import (
 )
 from otterapi.codegen.dataframes import get_dataframe_config_for_endpoint
 from otterapi.codegen.endpoints import (
+    DataFrameLibrary,
+    EndpointFunctionConfig,
+    EndpointFunctionFactory,
+    PaginationStyle,
     build_default_client_code,
-    build_standalone_dataframe_fn,
-    build_standalone_endpoint_fn,
-    build_standalone_page_fn,
-    build_standalone_paginated_dataframe_fn,
-    build_standalone_paginated_fn,
-    build_standalone_paginated_iter_fn,
     endpoint_supports_with_response,
 )
 from otterapi.codegen.export import (
@@ -548,6 +546,44 @@ class EmitSink:
 # =============================================================================
 
 
+def endpoint_fn(
+    endpoint: Endpoint, fn_name: str, is_async: bool, **config: Any
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, dict[str, set[str]]]:
+    """Build one generated function for ``endpoint``.
+
+    Fills in what every variant shares (name, method, path, parameters, body,
+    docs); ``config`` holds the variant's own ``EndpointFunctionConfig`` fields.
+    """
+    return EndpointFunctionFactory(
+        EndpointFunctionConfig(
+            fn_name=fn_name,
+            method=endpoint.method,
+            path=endpoint.path,
+            parameters=endpoint.parameters,
+            request_body_info=endpoint.request_body,
+            docs=endpoint.description,
+            is_async=is_async,
+            **config,
+        )
+    ).build()
+
+
+def _paginated(
+    ctx: EndpointContext,
+    item_type_ast: ast.expr | None,
+    item_type_imports: dict[str, set[str]] | None,
+) -> dict[str, Any]:
+    """The ``EndpointFunctionConfig`` fields shared by every paginated variant."""
+    assert ctx.pag_config is not None
+    return {
+        'response_type': ctx.endpoint.response_type,
+        'pagination_style': PaginationStyle(ctx.pag_config.style),
+        'pagination_config': ctx.pag_config,
+        'item_type_ast': item_type_ast,
+        'item_type_imports': item_type_imports,
+    }
+
+
 class EndpointFeature(ABC):
     """A family of functions emitted per endpoint (core, dataframe, export, ...).
 
@@ -605,16 +641,12 @@ class CoreEndpointFeature(EndpointFeature):
         for suffix, with_response in variants:
             for is_async, base_name in ctx.name_pairs:
                 fn_name = f'{base_name}{suffix}'
-                fn, imports = build_standalone_endpoint_fn(
-                    fn_name=fn_name,
-                    method=ep.method,
-                    path=ep.path,
-                    parameters=ep.parameters,
-                    request_body_info=ep.request_body,
+                fn, imports = endpoint_fn(
+                    ep,
+                    fn_name,
+                    is_async,
                     response_type=ep.response_type,
                     response_infos=ep.response_infos,
-                    docs=ep.description,
-                    is_async=is_async,
                     unwrap_data_path=ctx.unwrap_path if ctx.should_unwrap else None,
                     unwrap_type_ast=unwrap_type_ast,
                     unwrap_type_imports=unwrap_type_imports,
@@ -629,39 +661,16 @@ class CoreEndpointFeature(EndpointFeature):
         item_type_ast, item_type_imports = ctx.resolver.item_type_ast(
             ep, ctx.pag_config.data_path
         )
+        paginated = _paginated(ctx, item_type_ast, item_type_imports)
 
         for is_async, fn_name in ctx.name_pairs:
-            fn, imports = build_standalone_paginated_fn(
-                fn_name=fn_name,
-                method=ep.method,
-                path=ep.path,
-                parameters=ep.parameters,
-                request_body_info=ep.request_body,
-                response_type=ep.response_type,
-                pagination_style=ctx.pag_config.style,
-                pagination_config=ctx.pag_config,
-                item_type_ast=item_type_ast,
-                item_type_imports=item_type_imports,
-                docs=ep.description,
-                is_async=is_async,
-            )
+            fn, imports = endpoint_fn(ep, fn_name, is_async, **paginated)
             sink.add(fn, fn_name, imports)
 
         for is_async, base_fn_name in ctx.name_pairs:
             iter_fn_name = f'{base_fn_name}_iter'
-            fn, imports = build_standalone_paginated_iter_fn(
-                fn_name=iter_fn_name,
-                method=ep.method,
-                path=ep.path,
-                parameters=ep.parameters,
-                request_body_info=ep.request_body,
-                response_type=ep.response_type,
-                pagination_style=ctx.pag_config.style,
-                pagination_config=ctx.pag_config,
-                item_type_ast=item_type_ast,
-                item_type_imports=item_type_imports,
-                docs=ep.description,
-                is_async=is_async,
+            fn, imports = endpoint_fn(
+                ep, iter_fn_name, is_async, is_iterator=True, **paginated
             )
             sink.add(fn, iter_fn_name, imports)
 
@@ -671,20 +680,8 @@ class CoreEndpointFeature(EndpointFeature):
         for page_mode, suffix in (('page', '_page'), ('pages', '_pages')):
             for is_async, base_fn_name in ctx.name_pairs:
                 page_fn_name = f'{base_fn_name}{suffix}'
-                fn, imports = build_standalone_page_fn(
-                    fn_name=page_fn_name,
-                    method=ep.method,
-                    path=ep.path,
-                    parameters=ep.parameters,
-                    request_body_info=ep.request_body,
-                    response_type=ep.response_type,
-                    pagination_style=ctx.pag_config.style,
-                    pagination_config=ctx.pag_config,
-                    page_mode=cast("Literal['page', 'pages']", page_mode),
-                    item_type_ast=item_type_ast,
-                    item_type_imports=item_type_imports,
-                    docs=ep.description,
-                    is_async=is_async,
+                fn, imports = endpoint_fn(
+                    ep, page_fn_name, is_async, page_mode=page_mode, **paginated
                 )
                 sink.add(fn, page_fn_name, imports)
 
@@ -770,20 +767,13 @@ class DataFrameFeature(EndpointFeature):
             suffix = '_df' if library == 'pandas' else '_pl'
             for is_async, base_name in ctx.name_pairs:
                 fn_name = f'{base_name}{suffix}'
-                fn, imports = build_standalone_paginated_dataframe_fn(
-                    fn_name=fn_name,
-                    method=ep.method,
-                    path=ep.path,
-                    parameters=ep.parameters,
-                    request_body_info=ep.request_body,
-                    response_type=ep.response_type,
-                    pagination_style=ctx.pag_config.style,
-                    pagination_config=ctx.pag_config,
-                    library=library,
-                    item_type_ast=item_type_ast,
-                    item_type_imports=item_type_imports,
-                    docs=ep.description,
-                    is_async=is_async,
+                fn, imports = endpoint_fn(
+                    ep,
+                    fn_name,
+                    is_async,
+                    dataframe_library=DataFrameLibrary(library),
+                    is_paginated_dataframe=True,
+                    **_paginated(ctx, item_type_ast, item_type_imports),
                 )
                 sink.add(fn, fn_name, imports)
                 emitted = True
@@ -820,16 +810,12 @@ class DataFrameFeature(EndpointFeature):
                 continue
             for is_async, base_name in ctx.name_pairs:
                 fn_name = f'{base_name}{suffix}'
-                fn, imports = build_standalone_dataframe_fn(
-                    fn_name=fn_name,
-                    method=ep.method,
-                    path=ep.path,
-                    parameters=ep.parameters,
-                    request_body_info=ep.request_body,
-                    library=cast("Literal['pandas', 'polars']", library),
-                    default_path=df_config.path,
-                    docs=ep.description,
-                    is_async=is_async,
+                fn, imports = endpoint_fn(
+                    ep,
+                    fn_name,
+                    is_async,
+                    dataframe_library=DataFrameLibrary(library),
+                    dataframe_path=df_config.path,
                 )
                 sink.add(fn, fn_name, imports)
                 emitted = True
