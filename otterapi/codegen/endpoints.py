@@ -58,7 +58,6 @@ _COLLECTIONS_ABC_MODULE = 'collections.abc'
 
 __all__ = [
     # Enums and dataclasses
-    'EndpointMode',
     'DataFrameLibrary',
     'PaginationStyle',
     'EndpointFunctionConfig',
@@ -88,9 +87,7 @@ __all__ = [
     'pagination_owned_param_names',
     # Convenience functions
     'build_standalone_endpoint_fn',
-    'build_delegating_endpoint_fn',
     'build_standalone_dataframe_fn',
-    'build_delegating_dataframe_fn',
     'build_standalone_paginated_fn',
     'build_standalone_paginated_iter_fn',
     'build_standalone_paginated_dataframe_fn',
@@ -100,16 +97,6 @@ __all__ = [
 # =============================================================================
 # Enums and Configuration
 # =============================================================================
-
-
-class EndpointMode(Enum):
-    """Mode of endpoint function generation."""
-
-    STANDALONE = 'standalone'
-    """Standalone function that uses a Client instance internally."""
-
-    DELEGATING = 'delegating'
-    """Delegating function that calls _get_client().method_name()."""
 
 
 class DataFrameLibrary(Enum):
@@ -871,8 +858,6 @@ class EndpointFunctionConfig:
         response_infos: List of ResponseInfo objects for status code handling.
         docs: Optional docstring for the generated function.
         is_async: Whether to generate an async function.
-        mode: The generation mode (standalone or delegating).
-        client_method_name: For delegating mode, the client method to call.
         dataframe_library: For DataFrame functions, which library to use.
         dataframe_path: For DataFrame functions, the default path parameter.
     """
@@ -886,8 +871,6 @@ class EndpointFunctionConfig:
     response_infos: list[ResponseInfo] | None = None
     docs: str | None = None
     is_async: bool = False
-    mode: EndpointMode = EndpointMode.STANDALONE
-    client_method_name: str | None = None
     dataframe_library: DataFrameLibrary | None = None
     dataframe_path: str | None = None
     # Pagination config
@@ -930,7 +913,6 @@ class EndpointFunctionFactory:
         ...     method='get',
         ...     path='/pet/{petId}',
         ...     parameters=[...],
-        ...     mode=EndpointMode.STANDALONE,
         ... )
         >>> factory = EndpointFunctionFactory(config)
         >>> func_ast, imports = factory.build()
@@ -979,10 +961,8 @@ class EndpointFunctionFactory:
                 body = self._build_paginated_body()
         elif self.config.dataframe_library:
             body = self._build_dataframe_body()
-        elif self.config.mode == EndpointMode.STANDALONE:
-            body = self._build_standalone_body()
         else:
-            body = self._build_delegating_body()
+            body = self._build_standalone_body()
 
         returns = self._build_return_type()
 
@@ -1028,8 +1008,7 @@ class EndpointFunctionFactory:
             # Paginated DataFrame functions don't need it - data is already extracted
             builder.add_path_parameter(default=self.config.dataframe_path)
 
-        if self.config.mode == EndpointMode.STANDALONE:
-            builder.add_client_parameter()
+        builder.add_client_parameter()
 
         return builder.build()
 
@@ -1319,31 +1298,6 @@ class EndpointFunctionFactory:
             expr = _attr(expr, part)
         return expr
 
-    def _build_delegating_body(self) -> list[ast.stmt]:
-        """Build the body for a delegating endpoint function.
-
-        Pure forwarder: create a fresh ``Client()`` and call the same-named
-        method on it, optionally awaited. Composed via
-        :class:`BodyStatementBuilder` so the flow reads top-to-bottom.
-        """
-        from otterapi.codegen._body_builder import BodyStatementBuilder
-
-        builder = BodyStatementBuilder()
-        if self.config.docs:
-            builder.add_docstring(self.config.docs)
-
-        call_args, call_keywords = self._build_delegating_call_args()
-        method_name = self.config.client_method_name or self.config.fn_name
-        client_call: ast.expr = _call(
-            func=_attr(_call(_name('Client')), method_name),
-            args=call_args,
-            keywords=call_keywords,
-        )
-        if self.config.is_async:
-            client_call = ast.Await(value=client_call)
-
-        return builder.add_return(client_call).build()
-
     # ------------------------------------------------------------------
     # Shared pagination call/keyword construction.
     #
@@ -1484,9 +1438,7 @@ class EndpointFunctionFactory:
     def _build_dataframe_body(self) -> list[ast.stmt]:
         """Build the body for a DataFrame endpoint function.
 
-        Composed via :class:`BodyStatementBuilder` so the two modes
-        (standalone vs delegating) read top-to-bottom instead of weaving
-        AST construction in line with control flow.
+        Composed via :class:`BodyStatementBuilder`.
         """
         from otterapi.codegen._body_builder import BodyStatementBuilder
 
@@ -1500,20 +1452,6 @@ class EndpointFunctionFactory:
         docstring = (self.config.docs or '') + f'\n\nReturns:\n    {return_type_str}'
 
         builder = BodyStatementBuilder().add_docstring(docstring)
-
-        if self.config.mode != EndpointMode.STANDALONE:
-            # Delegating mode: defer to the corresponding method on a fresh
-            # ``Client()`` instance.
-            call_args, call_keywords = self._build_delegating_call_args()
-            method_name = self.config.client_method_name or self.config.fn_name
-            client_call: ast.expr = _call(
-                func=_attr(_call(_name('Client')), method_name),
-                args=call_args,
-                keywords=call_keywords,
-            )
-            if self.config.is_async:
-                client_call = ast.Await(value=client_call)
-            return builder.add_return(client_call).build()
 
         request_method = (
             '_request_json_async' if self.config.is_async else '_request_json'
@@ -1883,32 +1821,6 @@ class EndpointFunctionFactory:
         request_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
 
         return request_keywords
-
-    def _build_delegating_call_args(
-        self,
-    ) -> tuple[list[ast.expr], list[ast.keyword]]:
-        """Build the arguments for a delegating client method call."""
-        call_args: list[ast.expr] = []
-        call_keywords: list[ast.keyword] = []
-
-        builder = FunctionSignatureBuilder()
-        builder.add_parameters(self.config.parameters)
-        builder.add_request_body(self.config.request_body_info)
-
-        if self.config.dataframe_library:
-            builder.add_path_parameter(default=self.config.dataframe_path)
-
-        signature = builder.build()
-
-        for arg in signature.args:
-            call_args.append(_name(arg.arg))
-
-        for kwarg in signature.kwonlyargs:
-            call_keywords.append(ast.keyword(arg=kwarg.arg, value=_name(kwarg.arg)))
-
-        call_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
-
-        return call_args, call_keywords
 
 
 # =============================================================================
@@ -2809,7 +2721,6 @@ def build_standalone_endpoint_fn(
         response_infos=response_infos,
         docs=docs,
         is_async=is_async,
-        mode=EndpointMode.STANDALONE,
         unwrap_data_path=unwrap_data_path,
         unwrap_type_ast=unwrap_type_ast,
         unwrap_type_imports=unwrap_type_imports,
@@ -2855,46 +2766,6 @@ def endpoint_supports_with_response(response_type: Type | None) -> bool:
     )
 
 
-def build_delegating_endpoint_fn(
-    fn_name: str,
-    client_method_name: str,
-    parameters: list[Parameter] | None,
-    request_body_info: RequestBodyInfo | None,
-    response_type: Type | None,
-    docs: str | None = None,
-    is_async: bool = False,
-) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
-    """Build an endpoint function that delegates to a client method.
-
-    This is a convenience wrapper around EndpointFunctionFactory.
-
-    Args:
-        fn_name: The function name to generate.
-        client_method_name: The client method to delegate to.
-        parameters: List of Parameter objects for the endpoint.
-        request_body_info: RequestBodyInfo object for the request body, or None.
-        response_type: The response Type for the return annotation.
-        docs: Optional docstring for the generated function.
-        is_async: Whether to generate an async function.
-
-    Returns:
-        A tuple of (function_ast, imports).
-    """
-    config = EndpointFunctionConfig(
-        fn_name=fn_name,
-        method='',
-        path='',
-        parameters=parameters,
-        request_body_info=request_body_info,
-        response_type=response_type,
-        docs=docs,
-        is_async=is_async,
-        mode=EndpointMode.DELEGATING,
-        client_method_name=client_method_name,
-    )
-    return EndpointFunctionFactory(config).build()
-
-
 def build_standalone_dataframe_fn(
     fn_name: str,
     method: str,
@@ -2936,7 +2807,6 @@ def build_standalone_dataframe_fn(
         response_type=None,
         docs=docs,
         is_async=is_async,
-        mode=EndpointMode.STANDALONE,
         dataframe_library=df_library,
         dataframe_path=default_path,
     )
@@ -2993,60 +2863,12 @@ def build_standalone_paginated_dataframe_fn(
         response_type=response_type,
         docs=docs,
         is_async=is_async,
-        mode=EndpointMode.STANDALONE,
         pagination_style=pag_style,
         pagination_config=pagination_config,
         is_paginated_dataframe=True,
         dataframe_library=df_library,
         item_type_ast=item_type_ast,
         item_type_imports=item_type_imports,
-    )
-    return EndpointFunctionFactory(config).build()
-
-
-def build_delegating_dataframe_fn(
-    fn_name: str,
-    client_method_name: str,
-    parameters: list[Parameter] | None,
-    request_body_info: RequestBodyInfo | None,
-    library: Literal['pandas', 'polars'],
-    default_path: str | None = None,
-    docs: str | None = None,
-    is_async: bool = False,
-) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
-    """Build a DataFrame endpoint function that delegates to a client method.
-
-    This is a convenience wrapper around EndpointFunctionFactory.
-
-    Args:
-        fn_name: The function name to generate.
-        client_method_name: The client method to delegate to.
-        parameters: List of Parameter objects for the endpoint.
-        request_body_info: RequestBodyInfo object for the request body, or None.
-        library: The DataFrame library ('pandas' or 'polars').
-        default_path: Default path value for the path parameter.
-        docs: Optional docstring for the generated function.
-        is_async: Whether to generate an async function.
-
-    Returns:
-        A tuple of (function_ast, imports).
-    """
-    df_library = (
-        DataFrameLibrary.PANDAS if library == 'pandas' else DataFrameLibrary.POLARS
-    )
-    config = EndpointFunctionConfig(
-        fn_name=fn_name,
-        method='',
-        path='',
-        parameters=parameters,
-        request_body_info=request_body_info,
-        response_type=None,
-        docs=docs,
-        is_async=is_async,
-        mode=EndpointMode.DELEGATING,
-        client_method_name=client_method_name,
-        dataframe_library=df_library,
-        dataframe_path=default_path,
     )
     return EndpointFunctionFactory(config).build()
 
@@ -3096,7 +2918,6 @@ def build_standalone_paginated_fn(
         response_type=response_type,
         docs=docs,
         is_async=is_async,
-        mode=EndpointMode.STANDALONE,
         pagination_style=pag_style,
         pagination_config=pagination_config,
         item_type_ast=item_type_ast,
@@ -3134,7 +2955,6 @@ def build_standalone_page_fn(
         response_type=response_type,
         docs=docs,
         is_async=is_async,
-        mode=EndpointMode.STANDALONE,
         pagination_style=PaginationStyle(pagination_style),
         pagination_config=pagination_config,
         page_mode=page_mode,
@@ -3189,7 +3009,6 @@ def build_standalone_paginated_iter_fn(
         response_type=response_type,
         docs=docs,
         is_async=is_async,
-        mode=EndpointMode.STANDALONE,
         pagination_style=pag_style,
         pagination_config=pagination_config,
         is_iterator=True,

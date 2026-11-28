@@ -26,6 +26,9 @@ _.validate_output
 _.validate_filename
 _.validate_documents
 _._compiles
+_._validate_client_options
+_._handle_unknown_fields
+_._enforce_known_fields
 _._identifiers
 _._has_version_group
 
@@ -111,9 +114,6 @@ _.dependentSchemas
 # They are not imported by the library itself — their symbols are only used
 # in user-generated code at runtime.
 # ---------------------------------------------------------------------------
-OffsetPaginationConfig
-CursorPaginationConfig
-PagePaginationConfig
 export_async
 
 # _pagination.py — offset/cursor/page paginate_*/iterate_* helpers (sync + async)

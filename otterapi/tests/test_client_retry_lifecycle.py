@@ -51,16 +51,6 @@ def retry_pkg(tmp_path_factory):
 
 
 class TestRetryBehavior:
-    def _make_handler(self, responses):
-        """Returns a transport handler that cycles through a list of (status, body) pairs."""
-        it = iter(responses)
-
-        def handler(request: httpx2.Request) -> httpx2.Response:
-            status, body = next(it)
-            return httpx2.Response(status, json={'detail': body})
-
-        return handler
-
     def test_no_retry_on_max_retries_0(self, retry_pkg):
         Client = retry_pkg.Client
         calls = 0

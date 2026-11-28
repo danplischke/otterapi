@@ -510,7 +510,6 @@ class EmitSink:
     names: list[str] = field(default_factory=list)
     has_dataframe: bool = False
     has_pagination: bool = False
-    has_export: bool = False
     #: Maps each emitted function name to the endpoint it was generated for.
     #: Populated only while :func:`emit_endpoint` is running (the client
     #: preamble functions have no owner). Used by layout writers that group
@@ -1047,7 +1046,7 @@ def emit_endpoint(ctx: EndpointContext, sink: EmitSink) -> None:
         _CORE.emit(ctx, sink)
         generated_paginated_df = _DATAFRAME.emit_paginated(ctx, sink)
         sink.has_dataframe |= generated_paginated_df
-        sink.has_export |= _EXPORT.emit_paginated(ctx, sink)
+        _EXPORT.emit_paginated(ctx, sink)
     else:
         _CORE.emit(ctx, sink)
 
@@ -1055,7 +1054,7 @@ def emit_endpoint(ctx: EndpointContext, sink: EmitSink) -> None:
         sink.has_dataframe |= _DATAFRAME.emit_standalone(ctx, sink)
 
     if ctx.pag_config is None:
-        sink.has_export |= _EXPORT.emit_standalone(ctx, sink)
+        _EXPORT.emit_standalone(ctx, sink)
 
     # Orthogonal families run generically after the coupled triad.
     for feature in ADDITIONAL_FEATURES:

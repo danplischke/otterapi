@@ -21,9 +21,6 @@ class Offsets:
         self.calls.append((offset, limit))
         return {'items': ROWS[offset : offset + limit], 'total': self.total}
 
-    async def aio(self, offset: int, limit: int) -> dict:
-        return self(offset, limit)
-
 
 def items(page: dict) -> list[int]:
     return page['items']
