@@ -127,13 +127,51 @@ class PaginationStyle(Enum):
     PAGE = 'page'
 
 
-# Per style: the pagination_config keys naming the spec's paging parameters,
-# each with the name it conventionally defaults to.
-_PAGINATION_PARAM_KEYS: dict[PaginationStyle, tuple[tuple[str, str], ...]] = {
-    PaginationStyle.OFFSET: (('offset_param', 'offset'), ('limit_param', 'limit')),
-    PaginationStyle.CURSOR: (('cursor_param', 'cursor'), ('limit_param', 'limit')),
-    PaginationStyle.PAGE: (('page_param', 'page'), ('per_page_param', 'per_page')),
-}
+@dataclass(frozen=True)
+class _StyleSpec:
+    """How one pagination style maps onto signatures, wire names and runtime.
+
+    Attributes:
+        knob: The generated function's start-position argument.
+        knob_type: Its type (``int`` / ``str``), always ``| None``.
+        knob_default: Passed for an unset knob (``offset or 0``); None passes
+            the knob as is.
+        start_key / size_key: The pagination config keys naming the spec's
+            position and page-size parameters, with their conventional names.
+        runtime: The item-level runtime helpers, ``paginate_<runtime>`` /
+            ``iterate_<runtime>``, which take the start as ``start_<runtime>``.
+        fetcher: The page-level runtime helper, which takes it as ``knob``.
+    """
+
+    knob: str
+    knob_type: str
+    knob_default: int | None
+    start_key: tuple[str, str]
+    size_key: tuple[str, str]
+    runtime: str
+    fetcher: str
+
+
+_STYLES: dict[PaginationStyle, _StyleSpec] = {
+    PaginationStyle.OFFSET: _StyleSpec(
+        'offset', 'int', 0, ('offset_param', 'offset'), ('limit_param', 'limit'),
+        'offset', 'fetch_offset_page',
+    ),
+    PaginationStyle.CURSOR: _StyleSpec(
+        'cursor', 'str', None, ('cursor_param', 'cursor'), ('limit_param', 'limit'),
+        'cursor', 'fetch_cursor_page',
+    ),
+    PaginationStyle.PAGE: _StyleSpec(
+        'page', 'int', 1, ('page_param', 'page'), ('per_page_param', 'per_page'),
+        'page', 'fetch_numbered_page',
+    ),
+}  # fmt: skip
+
+
+def _style_spec(pagination_style: PaginationStyle | str | None) -> _StyleSpec | None:
+    if pagination_style is None:
+        return None
+    return _STYLES[PaginationStyle(pagination_style)]
 
 
 def pagination_start_knob(
@@ -141,19 +179,10 @@ def pagination_start_knob(
 ) -> tuple[str, str] | None:
     """``(name, type)`` of a paginated function's starting-position knob.
 
-    ``offset: int | None`` for offset style, ``cursor: str | None`` for cursor,
-    ``page: int | None`` for page; ``None`` when the style has no such knob.
     Every wrapper that forwards to ``_iter`` mirrors it through this helper.
     """
-    if pagination_style is None:
-        return None
-    if isinstance(pagination_style, str):
-        pagination_style = PaginationStyle(pagination_style)
-    return {
-        PaginationStyle.OFFSET: ('offset', 'int'),
-        PaginationStyle.CURSOR: ('cursor', 'str'),
-        PaginationStyle.PAGE: ('page', 'int'),
-    }.get(pagination_style)
+    spec = _style_spec(pagination_style)
+    return (spec.knob, spec.knob_type) if spec else None
 
 
 def pagination_omits_page_size(
@@ -163,82 +192,60 @@ def pagination_omits_page_size(
     """Whether a paginated function drops its ``page_size`` knob.
 
     Only cursor style honours ``send_page_size: false`` (forward-token feeds
-    with no page-size parameter). Every wrapper that forwards to ``_iter`` must
-    ask this, or it passes a ``page_size`` the target does not accept.
+    with no page-size parameter).
     """
-    if pagination_style is None:
-        return False
-    if isinstance(pagination_style, str):
-        pagination_style = PaginationStyle(pagination_style)
-    if pagination_style != PaginationStyle.CURSOR:
+    if _style_spec(pagination_style) is not _STYLES[PaginationStyle.CURSOR]:
         return False
     return not (pagination_config or {}).get('send_page_size', True)
+
+
+def pagination_fields(
+    pagination_style: PaginationStyle | str | None,
+    pagination_config: dict | None,
+) -> list[tuple[str, str, str]]:
+    """``(wire name, fetch_page argument, location)`` of each paging field.
+
+    The location (``query`` / ``body``) comes from ``cursor_location`` and
+    ``limit_location``; the page size is absent when it is not sent.
+    """
+    spec = _style_spec(pagination_style)
+    if spec is None:
+        return []
+    config = pagination_config or {}
+    fields = [
+        (
+            config.get(spec.start_key[0]) or spec.start_key[1],
+            '_start',
+            config.get('cursor_location', 'query'),
+        )
+    ]
+    if not pagination_omits_page_size(pagination_style, config):
+        fields.append(
+            (
+                config.get(spec.size_key[0]) or spec.size_key[1],
+                '_size',
+                config.get('limit_location', 'query'),
+            )
+        )
+    return fields
 
 
 def pagination_owned_param_names(
     pagination_style: PaginationStyle | str | None,
     pagination_config: dict | None,
 ) -> set[str]:
-    """Return the raw OpenAPI parameter names a paginated function drives itself.
+    """The spec parameter names a paginated function drives itself.
 
-    A paginated function (and its ``_iter`` / ``_df`` / ``_export`` variants)
-    replaces the spec's own paging parameters with its own
-    ``offset``/``cursor``/``page`` + ``page_size`` + ``max_items`` knobs, so
-    those spec parameters must be dropped from the generated signature.
-
-    Which parameters those are depends on the style -- ``page`` pagination is
-    driven by ``page``/``per_page``, not ``offset``/``limit`` -- so every
-    builder resolves them through this one helper rather than assuming.
-
-    Args:
-        pagination_style: The resolved pagination style, or None when the
-            endpoint is not paginated.
-        pagination_config: The resolved pagination config dict (parameter
-            names as they appear in the spec).
-
-    Returns:
-        The set of spec parameter names owned by the paginator. Empty when the
-        endpoint is not paginated.
+    They are dropped from every paginated signature (``_iter``, ``_df``,
+    ``_export`` ...), replaced by its own start / ``page_size`` knobs.
     """
-    if pagination_style is None:
+    spec = _style_spec(pagination_style)
+    if spec is None:
         return set()
-    if isinstance(pagination_style, str):
-        pagination_style = PaginationStyle(pagination_style)
-
     config = pagination_config or {}
     return {
-        config.get(key) or fallback
-        for key, fallback in _PAGINATION_PARAM_KEYS.get(pagination_style, ())
+        config.get(key) or fallback for key, fallback in (spec.start_key, spec.size_key)
     }
-
-
-def pagination_owned_body_fields(
-    pagination_style: PaginationStyle | str | None,
-    pagination_config: dict | None,
-) -> set[str]:
-    """Wire names of the request-body fields a paginated function drives itself.
-
-    The body counterpart of :func:`pagination_owned_param_names`: with
-    ``cursor_location`` / ``limit_location: body`` the position and page-size
-    fields live in the JSON body and are set by the paginator on every page.
-    """
-    if pagination_style is None:
-        return set()
-    if isinstance(pagination_style, str):
-        pagination_style = PaginationStyle(pagination_style)
-    config = pagination_config or {}
-    keys = _PAGINATION_PARAM_KEYS.get(pagination_style)
-    if not keys:
-        return set()
-    (start_key, start_default), (size_key, size_default) = keys
-    owned: set[str] = set()
-    if config.get('cursor_location', 'query') == 'body':
-        owned.add(config.get(start_key) or start_default)
-    if config.get('limit_location', 'query') == 'body' and not (
-        pagination_omits_page_size(pagination_style, config)
-    ):
-        owned.add(config.get(size_key) or size_default)
-    return owned
 
 
 def strip_pagination_body_fields(
@@ -246,16 +253,14 @@ def strip_pagination_body_fields(
     pagination_style: PaginationStyle | str | None,
     pagination_config: dict | None,
 ) -> RequestBodyInfo | None:
-    """``request_body_info`` without the flattened fields the paginator owns.
-
-    Dropped from every paginated signature (``_iter``, ``_df``, ``_export``,
-    ``_page`` ...) the same way the spec's own ``offset`` / ``limit`` query
-    parameters are: the caller sets them through ``cursor`` / ``page_size``,
-    and a second way to set them would only conflict.
-    """
+    """``request_body_info`` without the flattened fields the paginator owns."""
     if request_body_info is None or request_body_info.flattened_fields is None:
         return request_body_info
-    owned = pagination_owned_body_fields(pagination_style, pagination_config)
+    owned = {
+        wire
+        for wire, _, location in pagination_fields(pagination_style, pagination_config)
+        if location == 'body'
+    }
     if not owned:
         return request_body_info
     stripped = copy.copy(request_body_info)
@@ -263,6 +268,17 @@ def strip_pagination_body_fields(
         f for f in request_body_info.flattened_fields if f.wire_name not in owned
     ]
     return stripped
+
+
+def _flattened_values(fields: list, merge_fields: ast.expr | None) -> ast.expr:
+    """``{'wire': local, ...}``, overlaid with ``merge_fields`` when given."""
+    values: ast.expr = ast.Dict(
+        keys=[ast.Constant(value=item.wire_name) for item in fields],
+        values=[_name(item.name) for item in fields],
+    )
+    if merge_fields is None:
+        return values
+    return _call(func=_name('merge_body_fields'), args=[values, merge_fields])
 
 
 def clean_docstring(docstring: str) -> str:
@@ -687,6 +703,7 @@ class ParameterASTBuilder:
     @staticmethod
     def build_body_expr(
         body: RequestBodyInfo | None,
+        merge_fields: ast.expr | None = None,
     ) -> tuple[ast.expr | None, str | None]:
         """Build an AST expression for the request body parameter.
 
@@ -695,6 +712,8 @@ class ParameterASTBuilder:
 
         Args:
             body: The RequestBodyInfo object, or None if no body.
+            merge_fields: For a flattened body, a dict expression overlaid on
+                the field values (``merge_body_fields``) before validation.
 
         Returns:
             A tuple of (body_expr, httpx_param_name).
@@ -749,13 +768,7 @@ class ParameterASTBuilder:
                 )
             return _call(
                 func=_name('build_request_body'),
-                args=[
-                    model,
-                    ast.Dict(
-                        keys=[ast.Constant(value=item.wire_name) for item in fields],
-                        values=[_name(item.name) for item in fields],
-                    ),
-                ],
+                args=[model, _flattened_values(fields, merge_fields)],
                 keywords=keywords,
             )
 
@@ -1370,67 +1383,19 @@ class EndpointFunctionFactory:
     # this out collapses three near-identical style dispatches into one.
     # ------------------------------------------------------------------
 
-    def _pagination_fn_name(self, prefix: str) -> str:
-        """Resolve the runtime helper name, e.g. ``paginate_offset_async``."""
-        style = self.config.pagination_style
-        if style not in (
-            PaginationStyle.OFFSET,
-            PaginationStyle.CURSOR,
-            PaginationStyle.PAGE,
-        ):
-            raise ValueError(f'Unsupported pagination style: {style}')
-        name = f'{prefix}_{style.value}'
-        return f'{name}_async' if self.config.is_async else name
+    def _spec(self) -> _StyleSpec:
+        spec = _style_spec(self.config.pagination_style)
+        if spec is None:
+            raise ValueError('not a paginated endpoint')
+        return spec
 
-    @staticmethod
-    def _build_none_returning_lambda(arg_name: str) -> ast.Lambda:
-        """Build ``lambda <arg_name>: None`` (the cursor-pagination fallback)."""
-        return ast.Lambda(
-            args=ast.arguments(
-                posonlyargs=[],
-                args=[ast.arg(arg=arg_name)],
-                kwonlyargs=[],
-                kw_defaults=[],
-                defaults=[],
-            ),
-            body=ast.Constant(value=None),
-        )
-
-    def _build_offset_pagination_keywords(
-        self, pag_config: dict, extract_items: ast.expr
-    ) -> list[ast.keyword]:
-        total_path = pag_config.get('total_path')
-        get_total = self._build_extract_lambda(total_path) if total_path else None
-
-        keywords = [
-            ast.keyword(arg='fetch_page', value=_name('fetch_page')),
-            ast.keyword(arg='extract_items', value=extract_items),
-        ]
-        if get_total:
-            keywords.append(ast.keyword(arg='get_total', value=get_total))
-        keywords.extend(
-            [
-                ast.keyword(
-                    arg='start_offset',
-                    value=ast.BoolOp(
-                        op=ast.Or(), values=[_name('offset'), ast.Constant(value=0)]
-                    ),
-                ),
-                ast.keyword(arg='page_size', value=_name('page_size')),
-                ast.keyword(arg='max_items', value=_name('max_items')),
-            ]
-        )
-        return keywords
-
-    def _build_cursor_pagination_keywords(
-        self, pag_config: dict, extract_items: ast.expr
-    ) -> list[ast.keyword]:
-        next_cursor_path = pag_config.get('next_cursor_path')
-        get_next_cursor: ast.expr
+    def _next_cursor_getter(
+        self, pag_config: dict, extract_items: ast.Lambda
+    ) -> ast.expr:
+        """``get_next_cursor``: from the response, from the last item, or None."""
         if pag_config.get('next_cursor_from') == 'last_item':
             # lambda page: last_item_value(<items of page>, 'cursor')
-            assert isinstance(extract_items, ast.Lambda)
-            get_next_cursor = ast.Lambda(
+            return ast.Lambda(
                 args=copy.deepcopy(extract_items.args),
                 body=_call(
                     func=_name('last_item_value'),
@@ -1442,85 +1407,71 @@ class EndpointFunctionFactory:
                     ],
                 ),
             )
-        elif next_cursor_path:
-            get_next_cursor = self._build_extract_lambda(next_cursor_path)
-        else:
-            get_next_cursor = self._build_none_returning_lambda('page')
-
-        total_path = pag_config.get('total_path')
-        total_keywords = (
-            [ast.keyword(arg='get_total', value=self._build_extract_lambda(total_path))]
-            if total_path
-            else []
+        next_cursor_path = pag_config.get('next_cursor_path')
+        if next_cursor_path:
+            return self._build_extract_lambda(next_cursor_path)
+        return ast.Lambda(
+            args=copy.deepcopy(extract_items.args), body=ast.Constant(value=None)
         )
 
-        return [
-            ast.keyword(arg='fetch_page', value=_name('fetch_page')),
-            ast.keyword(arg='extract_items', value=extract_items),
-            ast.keyword(arg='get_next_cursor', value=get_next_cursor),
-            *total_keywords,
-            ast.keyword(arg='start_cursor', value=_name('cursor')),
-            *(
-                []
-                if self._omit_page_size()
-                else [ast.keyword(arg='page_size', value=_name('page_size'))]
-            ),
-            ast.keyword(arg='max_items', value=_name('max_items')),
-        ]
+    def _build_pagination_call(
+        self, prefix: Literal['paginate', 'iterate'] | None
+    ) -> ast.expr:
+        """A runtime call over ``fetch_page`` (not awaited).
 
-    def _build_page_pagination_keywords(
-        self, pag_config: dict, extract_items: ast.expr
-    ) -> list[ast.keyword]:
-        total_pages_path = pag_config.get('total_pages_path')
-        get_total_pages = (
-            self._build_extract_lambda(total_pages_path) if total_pages_path else None
-        )
-
+        ``prefix`` picks the item-level helper (``paginate_*`` / ``iterate_*``,
+        which take ``start_*`` and ``max_items``); None picks the page fetcher
+        (``fetch_*_page``, which takes the start under the knob's own name).
+        """
+        spec = self._spec()
+        style = self.config.pagination_style
+        pag_config = self.config.pagination_config or {}
+        extract_items = self._build_extract_lambda(pag_config.get('data_path'))
         keywords = [
             ast.keyword(arg='fetch_page', value=_name('fetch_page')),
             ast.keyword(arg='extract_items', value=extract_items),
         ]
-        if get_total_pages:
-            keywords.append(ast.keyword(arg='get_total_pages', value=get_total_pages))
-        keywords.extend(
-            [
-                ast.keyword(
-                    arg='start_page',
-                    value=ast.BoolOp(
-                        op=ast.Or(), values=[_name('page'), ast.Constant(value=1)]
-                    ),
-                ),
-                ast.keyword(arg='page_size', value=_name('page_size')),
-                ast.keyword(arg='max_items', value=_name('max_items')),
-            ]
-        )
-        return keywords
-
-    def _build_pagination_keywords(
-        self, pag_config: dict, extract_items: ast.expr
-    ) -> list[ast.keyword]:
-        """Dispatch to the per-style keyword builder for the configured style."""
-        style = self.config.pagination_style
-        if style == PaginationStyle.OFFSET:
-            return self._build_offset_pagination_keywords(pag_config, extract_items)
         if style == PaginationStyle.CURSOR:
-            return self._build_cursor_pagination_keywords(pag_config, extract_items)
-        if style == PaginationStyle.PAGE:
-            return self._build_page_pagination_keywords(pag_config, extract_items)
-        raise ValueError(f'Unsupported pagination style: {style}')
-
-    def _build_pagination_call(self, prefix: str) -> ast.expr:
-        """Build a ``paginate_*``/``iterate_*`` call expression (not awaited).
-
-        Callers decide how to consume the result: ``paginate_*`` calls are
-        awaited and assigned/returned, while ``iterate_*`` calls are async
-        iterables consumed with ``async for``/``yield from``.
-        """
-        pag_config = self.config.pagination_config or {}
-        extract_items = self._build_extract_lambda(pag_config.get('data_path'))
-        fn_name = self._pagination_fn_name(prefix)
-        keywords = self._build_pagination_keywords(pag_config, extract_items)
-        return _call(func=_name(fn_name), keywords=keywords)
+            keywords.append(
+                ast.keyword(
+                    arg='get_next_cursor',
+                    value=self._next_cursor_getter(pag_config, extract_items),
+                )
+            )
+        getters = (
+            [('get_total_pages', 'total_pages_path')]
+            if style == PaginationStyle.PAGE
+            else []
+        )
+        # paginate_page / iterate_page take no get_total.
+        if prefix is None or style != PaginationStyle.PAGE:
+            getters.append(('get_total', 'total_path'))
+        for keyword, path_key in getters:
+            if pag_config.get(path_key):
+                keywords.append(
+                    ast.keyword(
+                        arg=keyword,
+                        value=self._build_extract_lambda(pag_config[path_key]),
+                    )
+                )
+        start: ast.expr = _name(spec.knob)
+        if spec.knob_default is not None:
+            start = ast.BoolOp(
+                op=ast.Or(), values=[start, ast.Constant(value=spec.knob_default)]
+            )
+        keywords.append(
+            ast.keyword(
+                arg=f'start_{spec.runtime}' if prefix else spec.knob, value=start
+            )
+        )
+        if not self._omit_page_size():
+            keywords.append(ast.keyword(arg='page_size', value=_name('page_size')))
+        if prefix:
+            keywords.append(ast.keyword(arg='max_items', value=_name('max_items')))
+        fn = f'{prefix}_{spec.runtime}' if prefix else spec.fetcher
+        if self.config.is_async:
+            fn = f'{fn}_async'
+        return _call(func=_name(fn), keywords=keywords)
 
     def _build_paginated_dataframe_body(self) -> list[ast.stmt]:
         """Build the body for a paginated DataFrame endpoint function.
@@ -1675,66 +1626,6 @@ class EndpointFunctionFactory:
 
         return body
 
-    def _build_page_fetch_call(self) -> ast.expr:
-        """``fetch_<style>_page[_async](fetch_page, ...)`` for the start position."""
-        pag_config = self.config.pagination_config or {}
-        extract_items = self._build_extract_lambda(pag_config.get('data_path'))
-        style = self.config.pagination_style
-        total_path = pag_config.get('total_path')
-        get_total = self._build_extract_lambda(total_path) if total_path else None
-        keywords = [
-            ast.keyword(arg='fetch_page', value=_name('fetch_page')),
-            ast.keyword(arg='extract_items', value=extract_items),
-        ]
-        if style == PaginationStyle.CURSOR:
-            cursor_keywords = self._build_cursor_pagination_keywords(
-                pag_config, extract_items
-            )
-            keywords += [
-                k for k in cursor_keywords if k.arg in ('get_next_cursor', 'get_total')
-            ]
-            keywords.append(ast.keyword(arg='cursor', value=_name('cursor')))
-            fn = 'fetch_cursor_page'
-        elif style == PaginationStyle.OFFSET:
-            if get_total is not None:
-                keywords.append(ast.keyword(arg='get_total', value=get_total))
-            keywords.append(
-                ast.keyword(
-                    arg='offset',
-                    value=ast.BoolOp(
-                        op=ast.Or(), values=[_name('offset'), ast.Constant(value=0)]
-                    ),
-                )
-            )
-            fn = 'fetch_offset_page'
-        elif style == PaginationStyle.PAGE:
-            total_pages_path = pag_config.get('total_pages_path')
-            if total_pages_path:
-                keywords.append(
-                    ast.keyword(
-                        arg='get_total_pages',
-                        value=self._build_extract_lambda(total_pages_path),
-                    )
-                )
-            if get_total is not None:
-                keywords.append(ast.keyword(arg='get_total', value=get_total))
-            keywords.append(
-                ast.keyword(
-                    arg='page',
-                    value=ast.BoolOp(
-                        op=ast.Or(), values=[_name('page'), ast.Constant(value=1)]
-                    ),
-                )
-            )
-            fn = 'fetch_numbered_page'
-        else:
-            raise ValueError(f'Unsupported pagination style: {style}')
-        if not self._omit_page_size():
-            keywords.append(ast.keyword(arg='page_size', value=_name('page_size')))
-        if self.config.is_async:
-            fn = f'{fn}_async'
-        return _call(func=_name(fn), keywords=keywords)
-
     def _build_page_body(self) -> list[ast.stmt]:
         """Body of a ``_page`` (one page) or ``_pages`` (page iterator) function."""
         from otterapi.codegen._body_builder import BodyStatementBuilder
@@ -1746,7 +1637,7 @@ class EndpointFunctionFactory:
         builder.add_statement(self._build_fetch_page_function())
         body = builder.build()
 
-        first_page: ast.expr = self._build_page_fetch_call()
+        first_page: ast.expr = self._build_pagination_call(None)
         if self.config.is_async:
             first_page = ast.Await(value=first_page)
 
@@ -1782,39 +1673,6 @@ class EndpointFunctionFactory:
             self.config.pagination_style, self.config.pagination_config
         )
 
-    def _pagination_param_names(self) -> tuple[str, str, str, str]:
-        """Resolve fetch_page's (param1_name, param2_name, param1_api_name, param2_api_name).
-
-        fetch_page's own argument names are underscore-prefixed so they can
-        never shadow a spec parameter or a flattened body field it forwards
-        (a flattened ``limit`` field used to be silently replaced by
-        fetch_page's ``limit`` argument).
-        """
-        pag_config = self.config.pagination_config or {}
-        style = self.config.pagination_style
-        if style == PaginationStyle.OFFSET:
-            return (
-                '_start',
-                '_size',
-                pag_config.get('offset_param', 'offset'),
-                pag_config.get('limit_param', 'limit'),
-            )
-        if style == PaginationStyle.CURSOR:
-            return (
-                '_start',
-                '_size',
-                pag_config.get('cursor_param', 'cursor'),
-                pag_config.get('limit_param', 'limit'),
-            )
-        if style == PaginationStyle.PAGE:
-            return (
-                '_start',
-                '_size',
-                pag_config.get('page_param', 'page'),
-                pag_config.get('per_page_param', 'per_page'),
-            )
-        return '_start', '_size', 'param1', 'param2'
-
     def _request_body_for_signature(self) -> RequestBodyInfo | None:
         """The request body as a paginated function exposes it."""
         return strip_pagination_body_fields(
@@ -1823,32 +1681,16 @@ class EndpointFunctionFactory:
             self.config.pagination_config,
         )
 
-    def _build_fetch_page_params_dict(
-        self,
-        param1_name: str,
-        param2_name: str,
-        param1_api_name: str,
-        param2_api_name: str,
-    ) -> ast.Dict:
-        """Build the ``params`` dict: pagination params plus passthrough query params.
-
-        Pagination parameters configured to live in the request body
-        (``cursor_location`` / ``limit_location: body``) are left out here and
-        merged into the body by :meth:`_build_fetch_page_body` instead.
-        """
+    def _build_fetch_page_params_dict(self) -> ast.Dict:
+        """The ``params`` dict: query-located paging fields plus passthrough params."""
         pag_config = self.config.pagination_config or {}
-        param_keys: list[ast.expr | None] = []
-        param_values: list[ast.expr] = []
-        if pag_config.get('cursor_location', 'query') == 'query':
-            param_keys.append(ast.Constant(value=param1_api_name))
-            param_values.append(_name(param1_name))
-        if (
-            not self._omit_page_size()
-            and pag_config.get('limit_location', 'query') == 'query'
-        ):
-            param_keys.append(ast.Constant(value=param2_api_name))
-            param_values.append(_name(param2_name))
-
+        fields = pagination_fields(self.config.pagination_style, pag_config)
+        param_keys: list[ast.expr | None] = [
+            ast.Constant(value=wire) for wire, _, loc in fields if loc == 'query'
+        ]
+        param_values: list[ast.expr] = [
+            _name(arg) for _, arg, loc in fields if loc == 'query'
+        ]
         skip_params = {
             pag_config.get('offset_param'),
             pag_config.get('limit_param'),
@@ -1921,102 +1763,71 @@ class EndpointFunctionFactory:
             ast.Return(value=parse_call),
         ]
 
-    def _body_pagination_fields(self) -> list[tuple[str, str]]:
-        """``(wire name, fetch_page argument)`` of each paging field sent in the body."""
-        pag_config = self.config.pagination_config or {}
-        param1_name, param2_name, param1_api_name, param2_api_name = (
-            self._pagination_param_names()
-        )
-        fields: list[tuple[str, str]] = []
-        if pag_config.get('cursor_location', 'query') == 'body':
-            fields.append((param1_api_name, param1_name))
-        if (
-            not self._omit_page_size()
-            and pag_config.get('limit_location', 'query') == 'body'
-        ):
-            fields.append((param2_api_name, param2_name))
-        return fields
-
     def _build_fetch_page_body_keyword(self) -> ast.keyword | None:
         """The ``json=`` / ``data=`` keyword for each page request, if any.
 
-        With body-located paging fields the dumped body is overlaid with them
-        via ``merge_body_fields`` -- on the wire (alias) names, after
-        serialization, so field aliases and validation never get in the way.
+        Body-located paging fields are overlaid with ``merge_body_fields`` on
+        their wire names: onto the dumped body, or -- for a flattened body --
+        onto the field dict before ``build_request_body`` validates it, so a
+        required paging field is present on the first page.
         """
         body_info = self._request_body_for_signature()
-        fields = self._body_pagination_fields()
-        body_expr, body_param_name = ParameterASTBuilder.build_body_expr(body_info)
+        fields = [
+            (wire, arg)
+            for wire, arg, loc in pagination_fields(
+                self.config.pagination_style, self.config.pagination_config
+            )
+            if loc == 'body'
+        ]
+        if not fields:
+            body_expr, keyword = ParameterASTBuilder.build_body_expr(body_info)
+            if body_expr is None or not keyword:
+                return None
+            return ast.keyword(arg=keyword, value=body_expr)
         if (
-            fields
-            and body_info is not None
-            and body_info.flattened_fields is not None
-            and isinstance(body_expr, ast.Call)
-            and len(body_expr.args) == 2
+            body_info is None
+            or not body_info.is_json
+            or body_info.type is None
+            or body_info.type.type != 'model'
         ):
-            # Flattened: merge the paging values into the field dict *before*
-            # build_request_body validates it, so a required paging field is
-            # present when the model checks for it.
-            body_expr.args[1] = _call(
-                func=_name('merge_body_fields'),
-                args=[
-                    body_expr.args[1],
-                    ast.Dict(
-                        keys=[ast.Constant(value=wire) for wire, _ in fields],
-                        values=[_name(arg) for _, arg in fields],
-                    ),
-                ],
+            raise ConfigurationError(
+                f'{self.config.fn_name}: cursor_location/limit_location: body '
+                'needs a JSON object request body',
+                field='pagination.endpoints.cursor_location',
             )
-            return ast.keyword(arg=body_param_name or 'json', value=body_expr)
-        if fields:
-            if (
-                body_info is None
-                or not body_info.is_json
-                or body_info.type is None
-                or body_info.type.type != 'model'
-            ):
-                raise ConfigurationError(
-                    f'{self.config.fn_name}: cursor_location/limit_location: body '
-                    'needs a JSON object request body',
-                    field='pagination.endpoints.cursor_location',
-                )
-            merged = _call(
-                func=_name('merge_body_fields'),
-                args=[
-                    body_expr or ast.Constant(value=None),
-                    ast.Dict(
-                        keys=[ast.Constant(value=wire) for wire, _ in fields],
-                        values=[_name(arg) for _, arg in fields],
-                    ),
-                ],
+        paging = ast.Dict(
+            keys=[ast.Constant(value=wire) for wire, _ in fields],
+            values=[_name(arg) for _, arg in fields],
+        )
+        if body_info.flattened_fields is not None:
+            body_expr, keyword = ParameterASTBuilder.build_body_expr(
+                body_info, merge_fields=paging
             )
-            return ast.keyword(arg=body_param_name or 'json', value=merged)
-        if body_expr is not None and body_param_name:
-            return ast.keyword(arg=body_param_name, value=body_expr)
-        return None
+        else:
+            dumped, keyword = ParameterASTBuilder.build_body_expr(body_info)
+            assert dumped is not None  # a JSON model body always dumps
+            body_expr = _call(func=_name('merge_body_fields'), args=[dumped, paging])
+        assert body_expr is not None
+        return ast.keyword(arg=keyword or 'json', value=body_expr)
 
     def _build_fetch_page_function(self) -> ast.FunctionDef | ast.AsyncFunctionDef:
-        """Build the inner fetch_page function for pagination."""
-        param1_name, param2_name, param1_api_name, param2_api_name = (
-            self._pagination_param_names()
-        )
-        params_dict = self._build_fetch_page_params_dict(
-            param1_name, param2_name, param1_api_name, param2_api_name
-        )
-        fetch_body = self._build_fetch_page_body(params_dict)
+        """``def fetch_page(_start, _size)``: one page request.
 
-        param1_annotation = (
+        The arguments are underscore-prefixed so they can never shadow a spec
+        parameter or flattened body field the request forwards.
+        """
+        fetch_body = self._build_fetch_page_body(self._build_fetch_page_params_dict())
+        start_annotation = (
             _union_expr([_name('str'), ast.Constant(value=None)])
-            if self.config.pagination_style == PaginationStyle.CURSOR
+            if self._spec().knob_type == 'str'
             else _name('int')
         )
-        fetch_args = [
-            _argument(param1_name, param1_annotation),
-            _argument(param2_name, _name('int')),
-        ]
         fn_args = ast.arguments(
             posonlyargs=[],
-            args=fetch_args,
+            args=[
+                _argument('_start', start_annotation),
+                _argument('_size', _name('int')),
+            ],
             kwonlyargs=[],
             kw_defaults=[],
             kwarg=None,
@@ -2029,7 +1840,7 @@ class EndpointFunctionFactory:
             is_async=self.config.is_async,
         )
 
-    def _build_extract_lambda(self, path: str | None) -> ast.expr:
+    def _build_extract_lambda(self, path: str | None) -> ast.Lambda:
         """Build a lambda to extract data from a response using a path."""
         page_arg = ast.arg(arg='page', annotation=None)
 
