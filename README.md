@@ -216,7 +216,6 @@ naming:
   rules: [{pattern: '_v\d+(?=_|$)', replace: ''}]
 versioning:
   path_pattern: "/v(?P<version>\\d+)/"   # default: /v(?P<version>\d+)(?=/|$)
-  latest: unsuffixed
   legacy: submodule                      # or: suffix
 ```
 

@@ -144,14 +144,6 @@ class EndpointPaginationConfig(BaseModel):
         total_pages_path: JSON path to total pages in response (for page style).
         default_page_size: Default page size for this endpoint.
         max_page_size: Maximum page size for this endpoint.
-        cursor_location: Where the position parameter (offset / cursor / page)
-            goes: the query string (default) or the JSON request body.
-        limit_location: Where the page-size parameter goes; defaults to
-            ``cursor_location``.
-        next_cursor_from: Where the next cursor comes from: ``next_cursor_path``
-            in the response (default), or a field of the last item on the page.
-        next_cursor_item_path: With ``next_cursor_from: last_item``, the path
-            of the cursor on an item (default ``cursor``).
     """
 
     enabled: bool | None = Field(
@@ -1022,13 +1014,7 @@ class ResponseUnwrapConfig(BaseModel):
         return True, self.data_path
 
     def has_explicit_path(self, endpoint_name: str) -> bool:
-        """Whether ``endpoint_name`` names its own ``data_path`` override.
-
-        An explicit per-endpoint path is a promise about that endpoint's
-        response, so code generation treats a missing field as an error rather
-        than silently skipping the unwrap (which it does for the document-wide
-        default, since that one applies to every endpoint).
-        """
+        """Whether ``endpoint_name`` sets its own ``data_path``."""
         endpoint_config = self.endpoints.get(endpoint_name)
         return endpoint_config is not None and endpoint_config.data_path is not None
 
@@ -1187,13 +1173,7 @@ def _normalize_module_map(
 
 
 class NamingRule(BaseModel):
-    """One regex rewrite applied to every operation's name.
-
-    Attributes:
-        pattern: A regular expression searched for in the operationId (or the
-            path-derived name).
-        replace: The replacement, in ``re.sub`` syntax (group references work).
-    """
+    """One regex rewrite (``re.sub``) applied to every operation's name."""
 
     pattern: str = Field(description='Regular expression to search for.')
     replace: str = Field(default='', description='Replacement text (re.sub syntax).')
@@ -1220,10 +1200,6 @@ class NamingConfig(BaseModel):
 
     A rename that makes two operations share a name is an error -- unless
     ``versioning`` resolves it (the operations differ in path version).
-
-    Attributes:
-        rules: Regex rewrites, applied in order.
-        overrides: Exact names keyed by operationId (or raw path-derived name).
     """
 
     rules: list[NamingRule] = Field(
@@ -1266,25 +1242,13 @@ class VersioningConfig(BaseModel):
     are moved out of the way. An operation that exists in only one version
     stays where it is.
 
-    Attributes:
-        enabled: Turn version routing on.
-        path_pattern: Regex reading the version from a path; it must have a
-            ``version`` group matching an integer.
-        latest: How the newest version is named (``unsuffixed``).
-        legacy: Where older versions go: ``submodule`` puts them in
-            ``<module>/v<N>.py`` under the same name (needs module splitting
-            and ``client_style: functions``); ``suffix`` keeps them in the main
-            module as ``<name>_v<N>``.
+    ``legacy: submodule`` needs module splitting and ``client_style:
+    functions``; ``suffix`` works with every layout.
     """
 
-    enabled: bool = Field(default=True, description='Enable version routing.')
     path_pattern: str = Field(
         default=r'/v(?P<version>\d+)(?=/|$)',
         description="Regex with a 'version' group reading the version from a path.",
-    )
-    latest: Literal['unsuffixed'] = Field(
-        default='unsuffixed',
-        description='How the newest version is named.',
     )
     legacy: Literal['submodule', 'suffix'] = Field(
         default='submodule',

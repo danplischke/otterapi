@@ -1,20 +1,8 @@
 """Request/response logging for OtterAPI generated clients.
 
-Every request the client sends is logged through the standard :mod:`logging`
-module under the ``<package>._client`` logger:
-
-* ``INFO``  -- method, URL, status code and elapsed time;
-* ``DEBUG`` -- additionally the request and response headers and bodies.
-
-Credentials never reach the log: the ``Authorization`` / cookie / API-key
-headers, the query parameters and header names of the document's auth
-schemes, and body fields that look like secrets (``password``,
-``client_secret``, ``access_token`` ...) are replaced with ``[REDACTED]``.
-
-Nothing is printed unless logging is configured -- either by the application
-(``logging.basicConfig(level=logging.INFO)``) or by setting the client's
-environment variable (e.g. ``PETSTORE_LOG=debug``), which attaches a stderr
-handler to this logger only.
+Logs to ``<package>._client``: a summary at INFO, headers and bodies at DEBUG,
+with credentials redacted. Silent unless logging is configured or the client's
+``<NAME>_LOG`` environment variable is set to ``info`` / ``debug``.
 """
 
 from __future__ import annotations

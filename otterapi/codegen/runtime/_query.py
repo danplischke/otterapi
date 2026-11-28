@@ -41,6 +41,11 @@ def _export_params(params: dict[str, Any]) -> dict[str, Any]:
     return {(k + '_' if k in _EXPORT_RESERVED else k): v for k, v in params.items()}
 
 
+def _page_params(params: dict[str, Any]) -> dict[str, Any]:
+    # ``max_items`` caps the item-level terminals only.
+    return {k: v for k, v in params.items() if k != 'max_items'}
+
+
 def _require(name: str, fn: Callable | None) -> Callable:
     if fn is None:
         raise RuntimeError(
@@ -128,17 +133,15 @@ class Query(Generic[T]):
 
     def page(self) -> Page[T, Any]:
         """Fetch the first page object (items, total, next position, envelope)."""
-        return _require('page', self._page)(client=self._client, **self._page_params())
+        return _require('page', self._page)(
+            client=self._client, **_page_params(self._params)
+        )
 
     def pages(self) -> Iterator[Page[T, Any]]:
         """Stream page objects, fetching each on demand."""
         return _require('pages', self._pages)(
-            client=self._client, **self._page_params()
+            client=self._client, **_page_params(self._params)
         )
-
-    def _page_params(self) -> dict[str, Any]:
-        # ``max_items`` caps the item-level terminals only.
-        return {k: v for k, v in self._params.items() if k != 'max_items'}
 
 
 class AsyncQuery(Generic[T]):
@@ -213,14 +216,11 @@ class AsyncQuery(Generic[T]):
     async def page(self) -> AsyncPage[T, Any]:
         """Fetch the first page object (see ``Query.page``)."""
         return await _require('page', self._page)(
-            client=self._client, **self._page_params()
+            client=self._client, **_page_params(self._params)
         )
 
     def pages(self) -> AsyncIterator[AsyncPage[T, Any]]:
         """Stream page objects (consume with ``async for``)."""
         return _require('pages', self._pages)(
-            client=self._client, **self._page_params()
+            client=self._client, **_page_params(self._params)
         )
-
-    def _page_params(self) -> dict[str, Any]:
-        return {k: v for k, v in self._params.items() if k != 'max_items'}

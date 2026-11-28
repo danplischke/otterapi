@@ -1207,7 +1207,7 @@ class EndpointFunctionFactory:
         if self.config.response_type_imports:
             self._merge_imports(self.config.response_type_imports)
 
-        if self._is_raw_response_type(self.config.response_type):
+        if is_raw_response_type(self.config.response_type):
             # Raw types skip Pydantic parsing, but a function annotated
             # ``-> str`` returning the httpx2 Response is a lie: the caller gets
             # an object, not the text it asked for. Pull the body out for the
@@ -1286,36 +1286,6 @@ class EndpointFunctionFactory:
         for stmt in parse_body:
             builder.add_statement(stmt)
         return builder.build()
-
-    @staticmethod
-    def _is_raw_union_element(elt: ast.expr) -> bool:
-        """Check if a Union member is a raw type (Response/bytes/str/None)."""
-        if isinstance(elt, ast.Name):
-            return elt.id in ('Response', 'bytes', 'str', 'None')
-        return isinstance(elt, ast.Constant) and elt.value is None
-
-    def _is_raw_response_type(self, response_type: Type) -> bool:
-        """Check if the response type is a raw type that doesn't need JSON parsing.
-
-        Raw types include: Response, bytes, str (for non-JSON content types).
-        A Union is considered raw only if every member is itself a raw type.
-        """
-        if response_type is None:
-            return True
-
-        ann = response_type.annotation_ast
-        if isinstance(ann, ast.Name):
-            return ann.id in ('Response', 'bytes', 'str')
-
-        if (
-            isinstance(ann, ast.Subscript)
-            and isinstance(ann.value, ast.Name)
-            and ann.value.id == 'Union'
-            and isinstance(ann.slice, ast.Tuple)
-        ):
-            return all(self._is_raw_union_element(elt) for elt in ann.slice.elts)
-
-        return False
 
     @staticmethod
     def _raw_response_attribute(response_type: Type) -> str | None:
@@ -2849,19 +2819,40 @@ def build_standalone_endpoint_fn(
     return EndpointFunctionFactory(config).build()
 
 
-def endpoint_supports_with_response(response_type: Type | None) -> bool:
-    """Whether an endpoint gets a ``_with_response`` variant.
+_RAW_NAMES = frozenset({'Response', 'bytes', 'str'})
 
-    Only endpoints whose body is parsed: a raw ``Response`` / ``bytes`` /
-    ``str`` endpoint (or one with no response body) already hands back the
-    response, or has nothing to parse.
+
+def is_raw_response_type(response_type: Type | None) -> bool:
+    """Whether a response is returned unparsed (``Response`` / ``bytes`` / ``str``).
+
+    A union is raw only when every member is (``None`` included).
     """
-    if response_type is None or response_type.annotation_ast is None:
-        return False
-    factory = EndpointFunctionFactory(
-        EndpointFunctionConfig(fn_name='_', method='get', path='/')
+    if response_type is None:
+        return True
+    ann = response_type.annotation_ast
+    if isinstance(ann, ast.Name):
+        return ann.id in _RAW_NAMES
+    if (
+        isinstance(ann, ast.Subscript)
+        and isinstance(ann.value, ast.Name)
+        and ann.value.id == 'Union'
+        and isinstance(ann.slice, ast.Tuple)
+    ):
+        return all(
+            (isinstance(elt, ast.Name) and elt.id in {*_RAW_NAMES, 'None'})
+            or (isinstance(elt, ast.Constant) and elt.value is None)
+            for elt in ann.slice.elts
+        )
+    return False
+
+
+def endpoint_supports_with_response(response_type: Type | None) -> bool:
+    """Whether an endpoint gets a ``_with_response`` variant: its body is parsed."""
+    return (
+        response_type is not None
+        and response_type.annotation_ast is not None
+        and not is_raw_response_type(response_type)
     )
-    return not factory._is_raw_response_type(response_type)
 
 
 def build_delegating_endpoint_fn(

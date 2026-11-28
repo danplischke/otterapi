@@ -139,26 +139,8 @@ _ENUM_BASES = frozenset({'Enum', 'StrEnum', 'IntEnum'})
 #: :meth:`TypeResolver.field_path_status`.
 FieldStatus = Literal['present', 'absent', 'unknown']
 
-#: Annotation names whose values never have a named field to unwrap.
-_NO_FIELD_NAMES = frozenset(
-    {
-        'int',
-        'float',
-        'str',
-        'bool',
-        'bytes',
-        'list',
-        'dict',
-        'set',
-        'tuple',
-        'Response',
-        'datetime',
-        'date',
-        'time',
-        'UUID',
-        'Decimal',
-    }
-)
+#: Builtins a JSON response can parse into that have no named fields.
+_NO_FIELD_NAMES = frozenset({'int', 'float', 'str', 'bool', 'bytes', 'list', 'dict'})
 
 
 def _strip_annotated(node: ast.expr) -> ast.expr:
@@ -190,12 +172,7 @@ def _union_members(node: ast.expr) -> list[ast.expr]:
 
 
 class TypeResolver:
-    """Owns the type-introspection helpers, seeded once with the generated types.
-
-    These previously existed as identical private methods on both ``Codegen`` and
-    ``SplitModuleEmitter``. Behaviour is unchanged; the split path's cleaner
-    ``_lookup_response_field_annotation`` factoring is adopted here.
-    """
+    """Owns the type-introspection helpers, seeded once with the generated types."""
 
     def __init__(self, typegen_types: dict[str, Type]):
         self._types = typegen_types
@@ -236,210 +213,113 @@ class TypeResolver:
             return item, self.collect_model_imports_from_ast(item)
 
         if data_path:
-            field_ast = self._lookup_response_field_annotation(endpoint, data_path)
-            item = self._list_item_type(field_ast)
+            item = self._list_item_type(self._resolve(endpoint, data_path)[1])
             if item is not None:
                 return item, self.collect_model_imports_from_ast(item)
 
         return None, {}
 
     # -- response-model field lookup ------------------------------------------
+    #
+    # Generated models never allow extra fields (pydantic's default is
+    # ``extra='ignore'``; ``additionalProperties: false`` becomes ``forbid``),
+    # so a field a model does not declare is never an attribute at runtime.
 
-    @staticmethod
-    def _resolve_response_type_name(endpoint: Endpoint) -> str | None:
-        """Resolve the model name backing an endpoint's response type.
-
-        Union response types (e.g. ``SuccessResponse | ErrorResponse``) have no
-        name on ``response_type`` directly, so fall back to the 2xx success
-        response in ``response_infos``.
-        """
-        type_name = endpoint.response_type.name if endpoint.response_type else None
-        if type_name or not endpoint.response_infos:
-            return type_name
-
-        for response_info in endpoint.response_infos:
-            if 200 <= response_info.status_code < 300 and response_info.type:
-                return response_info.type.name
-
-        return None
-
-    @staticmethod
-    def _find_field_annotation(
-        class_def: ast.ClassDef, field_name: str
-    ) -> ast.expr | None:
-        """Find the annotation AST for a field declared in a class body."""
-        for stmt in class_def.body:
+    def _class_field(self, class_name: str, field_name: str) -> ast.expr | None:
+        """``field_name``'s annotation on a generated class or its generated bases."""
+        type_def = self._types.get(class_name)
+        impl = type_def.implementation_ast if type_def else None
+        if not isinstance(impl, ast.ClassDef):
+            return None
+        for stmt in impl.body:
             if (
                 isinstance(stmt, ast.AnnAssign)
                 and isinstance(stmt.target, ast.Name)
                 and stmt.target.id == field_name
             ):
                 return stmt.annotation
-        return None
-
-    def _lookup_response_field_annotation(
-        self, endpoint: Endpoint, field_path: str
-    ) -> ast.expr | None:
-        """Return the annotation AST for the first segment of ``field_path``."""
-        if not endpoint.response_type:
-            return None
-
-        field_name = field_path.split('.')[0]
-        type_name = self._resolve_response_type_name(endpoint)
-        if not type_name:
-            return None
-
-        type_def = self._types.get(type_name)
-        if not type_def or not type_def.implementation_ast:
-            return None
-
-        impl = type_def.implementation_ast
-        if not isinstance(impl, ast.ClassDef):
-            return None
-
-        return self._find_field_annotation(impl, field_name)
-
-    # -- does a response actually carry a field path? -------------------------
-
-    def _class_field_annotation(
-        self, class_name: str, field_name: str, seen: set[str]
-    ) -> ast.expr | None:
-        """``field_name``'s annotation on ``class_name`` or a generated base class."""
-        if class_name in seen:
-            return None
-        seen.add(class_name)
-        type_def = self._types.get(class_name)
-        impl = type_def.implementation_ast if type_def else None
-        if not isinstance(impl, ast.ClassDef):
-            return None
-        found = self._find_field_annotation(impl, field_name)
-        if found is not None:
-            return found
         for base in impl.bases:
-            if isinstance(base, ast.Name):
-                found = self._class_field_annotation(base.id, field_name, seen)
+            if isinstance(base, ast.Name) and base.id != class_name:
+                found = self._class_field(base.id, field_name)
                 if found is not None:
                     return found
         return None
 
-    def _member_field(
-        self, member: ast.expr, field_name: str
-    ) -> tuple[FieldStatus, ast.expr | None]:
-        """Status of ``field_name`` on one (non-union) annotation."""
-        if isinstance(member, ast.Constant) and member.value is None:
-            return 'absent', None
-        if isinstance(member, ast.Name):
-            type_def = self._types.get(member.id)
-            if type_def is not None and isinstance(
-                type_def.implementation_ast, ast.ClassDef
-            ):
-                # Generated models never allow extra fields (pydantic's default
-                # is ``extra='ignore'``, and ``additionalProperties: false``
-                # becomes ``forbid``), so an undeclared field is never an
-                # attribute at runtime.
-                found = self._class_field_annotation(member.id, field_name, set())
-                return ('present', found) if found is not None else ('absent', None)
-            if member.id in _NO_FIELD_NAMES:
-                return 'absent', None
-            return 'unknown', None
-        if (
-            isinstance(member, ast.Subscript)
-            and isinstance(member.value, ast.Name)
-            and member.value.id in _NO_FIELD_NAMES
-        ):
-            return 'absent', None
-        return 'unknown', None
-
-    def _annotation_field(
+    def _step(
         self, annotation: ast.expr, field_name: str
     ) -> tuple[FieldStatus, ast.expr | None]:
-        """Status (and annotation, when unambiguous) of ``field_name`` on a type."""
-        members = [
-            m
-            for m in _union_members(_strip_annotated(annotation))
-            if not (isinstance(m, ast.Constant) and m.value is None)
-        ]
-        if not members:
-            return 'absent', None
-        results = [self._member_field(m, field_name) for m in members]
+        """Status (and annotation, when unambiguous) of ``.field_name`` on a type."""
+        results: list[tuple[FieldStatus, ast.expr | None]] = []
+        for member in _union_members(_strip_annotated(annotation)):
+            if isinstance(member, ast.Constant) and member.value is None:
+                continue
+            name = member.value if isinstance(member, ast.Subscript) else member
+            if isinstance(member, ast.Name) and isinstance(
+                getattr(self._types.get(member.id), 'implementation_ast', None),
+                ast.ClassDef,
+            ):
+                found = self._class_field(member.id, field_name)
+                results.append(
+                    ('present', found) if found is not None else ('absent', None)
+                )
+            elif isinstance(name, ast.Name) and name.id in _NO_FIELD_NAMES:
+                results.append(('absent', None))
+            else:
+                results.append(('unknown', None))
         statuses = {status for status, _ in results}
-        if statuses == {'absent'}:
+        if not results or statuses == {'absent'}:
             return 'absent', None
         if statuses == {'present'}:
             return 'present', results[0][1] if len(results) == 1 else None
         return 'unknown', None
 
-    def _success_annotations(self, endpoint: Endpoint) -> list[ast.expr]:
-        """The annotations a successful call of ``endpoint`` can parse into."""
-        annotations = [
+    def _resolve(
+        self, endpoint: Endpoint, field_path: str
+    ) -> tuple[FieldStatus, ast.expr | None]:
+        """Whether every 2xx response of ``endpoint`` has ``field_path``, and its type.
+
+        ``'absent'`` means ``result.<path>`` would raise ``AttributeError`` (no
+        JSON response, a builtin, or a model without that field); ``'unknown'``
+        that the type could not be resolved far enough to tell. The annotation
+        is the first 2xx response's, when the path is present.
+        """
+        annotations: list[ast.expr | None] = [
             info.type.annotation_ast
             for info in endpoint.response_infos or []
             if 200 <= info.status_code < 300
             and info.type is not None
             and info.type.annotation_ast is not None
         ]
-        if annotations:
-            return annotations
-        if endpoint.response_type and endpoint.response_type.annotation_ast:
-            return [endpoint.response_type.annotation_ast]
-        return []
-
-    def _walk_path(self, endpoint: Endpoint, field_path: str) -> ast.expr | None:
-        """The annotation at ``field_path`` when it resolves unambiguously."""
-        annotations = self._success_annotations(endpoint)
-        if len(annotations) != 1:
-            return None
-        current: ast.expr | None = annotations[0]
-        for part in field_path.split('.'):
-            if current is None:
-                return None
-            status, current = self._annotation_field(current, part)
-            if status != 'present':
-                return None
-        return current
-
-    def field_path_status(self, endpoint: Endpoint, field_path: str) -> FieldStatus:
-        """Whether every success response of ``endpoint`` has ``field_path``.
-
-        ``'present'`` -- the path resolves on every 2xx response model;
-        ``'absent'`` -- it provably cannot (no JSON model, a list or primitive
-        response, or a model without that field), so ``result.<path>`` would
-        raise ``AttributeError``; ``'unknown'`` -- the type could not be
-        resolved far enough to tell (``Any``, a type alias, a mixed union).
-        """
-        annotations = self._success_annotations(endpoint)
-        if not annotations:
-            return 'absent'
-        overall: set[FieldStatus] = set()
-        for annotation in annotations:
-            current: ast.expr | None = annotation
-            status: FieldStatus = 'present'
+        if not annotations and endpoint.response_type:
+            annotations = [endpoint.response_type.annotation_ast]
+        statuses: set[FieldStatus] = set()
+        first: ast.expr | None = None
+        for current in annotations:
+            status: FieldStatus = 'absent' if current is None else 'present'
             for part in field_path.split('.'):
                 if current is None:
-                    status = 'unknown'
                     break
-                status, current = self._annotation_field(current, part)
+                status, current = self._step(current, part)
                 if status != 'present':
                     break
-            overall.add(status)
-        if 'absent' in overall:
-            return 'absent'
-        if 'unknown' in overall:
-            return 'unknown'
-        return 'present'
+            statuses.add(status)
+            if first is None and status == 'present':
+                first = current
+        if not statuses or 'absent' in statuses:
+            return 'absent', None
+        if 'unknown' in statuses:
+            return 'unknown', None
+        return 'present', first
+
+    def field_path_status(self, endpoint: Endpoint, field_path: str) -> FieldStatus:
+        """Whether every success response of ``endpoint`` has ``field_path``."""
+        return self._resolve(endpoint, field_path)[0]
 
     def unwrapped_type_ast(
         self, endpoint: Endpoint, data_path: str
     ) -> tuple[ast.expr | None, dict[str, set[str]]]:
-        """Extract the type AST (and imports) for the unwrapped data field.
-
-        A dotted path (``data.items``) resolves segment by segment, so the
-        annotation is that of the value actually returned, not of ``data``.
-        """
-        if '.' in data_path:
-            annotation = self._walk_path(endpoint, data_path)
-        else:
-            annotation = self._lookup_response_field_annotation(endpoint, data_path)
+        """The type (and imports) of ``result.<data_path>``, if it resolves."""
+        annotation = self._resolve(endpoint, data_path)[1]
         if annotation is None:
             return None, {}
         return annotation, self.collect_model_imports_from_ast(annotation)
@@ -505,13 +385,9 @@ class TypeResolver:
 def _warn_if_looks_paginated(
     endpoint: Endpoint, pagination: PaginationConfig, resolver: TypeResolver
 ) -> None:
-    """Warn when an unpaginated endpoint returns what looks like one page.
+    """Warn when an unpaginated endpoint returns an items list and a total.
 
-    Auto-detection only sees query parameters, so an endpoint that pages
-    through its request body (or names its parameters differently) gets no
-    ``_iter`` and its ``_df`` / ``_export`` helpers silently return the first
-    page. An envelope carrying both the configured items list and a total
-    count is the tell.
+    Its DataFrame / export helpers would silently return only the first page.
     """
     if endpoint.config_name in pagination.endpoints:
         return
@@ -543,15 +419,10 @@ def _unwrap_applies(
     unwrap_config: ResponseUnwrapConfig,
     resolver: TypeResolver,
 ) -> bool:
-    """Whether ``response_unwrap`` can really return ``result.<unwrap_path>``.
+    """Whether ``result.<unwrap_path>`` exists on the endpoint's response.
 
-    The document-wide ``data_path`` applies to every endpoint, including ones
-    whose response has no such field (a ``/count`` returning ``{total}``, a
-    single-object ``GET``, a ``204``). Unwrapping those emitted code that
-    raised ``AttributeError`` on every call, so they now return the parsed
-    response unchanged. A path an endpoint names explicitly is a promise
-    about that response, so a missing field there is a configuration error.
-    Types that can't be resolved far enough to tell keep the old behaviour.
+    A missing default path skips the unwrap; a missing per-endpoint path is an
+    error. Unresolvable types still unwrap.
     """
     status = resolver.field_path_status(endpoint, unwrap_path)
     if status != 'absent':
@@ -649,12 +520,7 @@ class EmitSink:
     _seen: set[str] = field(default_factory=set)
 
     def add(self, fn: ast.stmt, name: str, imports: dict[str, set[str]]) -> None:
-        """Append a generated function, record its name, and merge its imports.
-
-        Two functions of one name in a module would silently shadow each other
-        (``list_users_page`` the operation vs the ``_page`` variant of a
-        paginated ``list_users``), so a duplicate fails generation instead.
-        """
+        """Append a generated function; a duplicate name fails generation."""
         if name in self._seen:
             first = self.owners.get(name)
             second = self._current_endpoint
@@ -753,47 +619,31 @@ class CoreEndpointFeature(EndpointFeature):
                 ep.response_type.annotation_ast
             )
 
-        for is_async, fn_name in ctx.name_pairs:
-            fn, imports = build_standalone_endpoint_fn(
-                fn_name=fn_name,
-                method=ep.method,
-                path=ep.path,
-                parameters=ep.parameters,
-                request_body_info=ep.request_body,
-                response_type=ep.response_type,
-                response_infos=ep.response_infos,
-                docs=ep.description,
-                is_async=is_async,
-                unwrap_data_path=ctx.unwrap_path if ctx.should_unwrap else None,
-                unwrap_type_ast=unwrap_type_ast,
-                unwrap_type_imports=unwrap_type_imports,
-                response_type_imports=response_type_imports,
-            )
-            sink.add(fn, fn_name, imports)
-
-        if not ctx.config.raw_response or not endpoint_supports_with_response(
+        variants = [('', False)]
+        if ctx.config.raw_response and endpoint_supports_with_response(
             ep.response_type
         ):
-            return
-        for is_async, fn_name in ctx.name_pairs:
-            raw_fn_name = f'{fn_name}_with_response'
-            fn, imports = build_standalone_endpoint_fn(
-                fn_name=raw_fn_name,
-                method=ep.method,
-                path=ep.path,
-                parameters=ep.parameters,
-                request_body_info=ep.request_body,
-                response_type=ep.response_type,
-                response_infos=ep.response_infos,
-                docs=ep.description,
-                is_async=is_async,
-                unwrap_data_path=ctx.unwrap_path if ctx.should_unwrap else None,
-                unwrap_type_ast=unwrap_type_ast,
-                unwrap_type_imports=unwrap_type_imports,
-                response_type_imports=response_type_imports,
-                with_response=True,
-            )
-            sink.add(fn, raw_fn_name, imports)
+            variants.append(('_with_response', True))
+        for suffix, with_response in variants:
+            for is_async, base_name in ctx.name_pairs:
+                fn_name = f'{base_name}{suffix}'
+                fn, imports = build_standalone_endpoint_fn(
+                    fn_name=fn_name,
+                    method=ep.method,
+                    path=ep.path,
+                    parameters=ep.parameters,
+                    request_body_info=ep.request_body,
+                    response_type=ep.response_type,
+                    response_infos=ep.response_infos,
+                    docs=ep.description,
+                    is_async=is_async,
+                    unwrap_data_path=ctx.unwrap_path if ctx.should_unwrap else None,
+                    unwrap_type_ast=unwrap_type_ast,
+                    unwrap_type_imports=unwrap_type_imports,
+                    response_type_imports=response_type_imports,
+                    with_response=with_response,
+                )
+                sink.add(fn, fn_name, imports)
 
     def _emit_paginated(self, ctx: EndpointContext, sink: EmitSink) -> None:
         ep = ctx.endpoint

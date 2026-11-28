@@ -93,7 +93,7 @@ def assign_names(
             continue
         routed = (
             _route_versions(members, ops, versioning)
-            if versioning is not None and versioning.enabled
+            if versioning is not None
             else None
         )
         if routed is not None:

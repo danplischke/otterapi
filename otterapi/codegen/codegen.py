@@ -1019,15 +1019,7 @@ class Codegen(OpenAPIProcessor):
             ep.add_imports([response_model.annotation_imports])
 
     def _generate_endpoints(self) -> list[Endpoint]:
-        """Generate all endpoints from the OpenAPI paths.
-
-        Names are assigned for every operation at once (see
-        :mod:`otterapi.codegen.naming`) so renames and path-version routing
-        can see every collision.
-
-        Returns:
-            List of generated Endpoint objects.
-        """
+        """Generate all endpoints, naming every operation at once (see naming.py)."""
         from otterapi.codegen.naming import NamedOperation, assign_names
 
         self._check_versioning_layout()
@@ -1076,7 +1068,7 @@ class Codegen(OpenAPIProcessor):
     def _check_versioning_layout(self) -> None:
         """``legacy: submodule`` needs a layout with modules to put it in."""
         versioning = self.config.versioning
-        if versioning is None or not versioning.enabled:
+        if versioning is None:
             return
         if versioning.legacy != 'submodule':
             return
@@ -1096,13 +1088,9 @@ class Codegen(OpenAPIProcessor):
             )
 
     def _normalize_endpoint_config_keys(self, endpoints: list[Endpoint]) -> None:
-        """Re-key per-endpoint config to the final names; warn on unknown keys.
+        """Re-key operationId keys of per-endpoint config to function names.
 
-        Per-endpoint sections (pagination, response_unwrap, dataframe, export)
-        are keyed by function name. A naming rule changes those names, so a key
-        may also be the operation's operationId; it is re-keyed here to the
-        name the emitter looks up. A key matching no operation at all used to
-        be ignored silently -- usually a typo, or a name a rename changed.
+        Keys matching no endpoint are reported as a warning.
         """
         by_config_name = {ep.config_name: ep for ep in endpoints}
         by_operation_id: dict[str, Endpoint] = {}

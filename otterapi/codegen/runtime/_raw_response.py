@@ -1,16 +1,10 @@
-"""Raw-response access for OtterAPI generated clients.
+"""Raw-response access: what the ``<name>_with_response`` variants return.
 
-Every endpoint with a parsed body has a ``<name>_with_response`` variant that
-returns one of these instead of the parsed model, so the status code and the
-headers (rate limits, ``ETag``, request IDs, ``Location``) of that one call
-are reachable::
+Example::
 
     raw = get_user_with_response(user_id=1)
     raw.status_code, raw.headers['x-ratelimit-remaining']
-    user = raw.parse()      # exactly what get_user(user_id=1) returns
-
-Error responses still raise the usual ``APIError`` subclasses; the response
-is on the exception as ``err.response``.
+    user = raw.parse()  # exactly what get_user(user_id=1) returns
 """
 
 from __future__ import annotations
