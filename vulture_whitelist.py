@@ -25,6 +25,9 @@ _.validate_source
 _.validate_output
 _.validate_filename
 _.validate_documents
+_._compiles
+_._identifiers
+_._has_version_group
 
 # config.py — pydantic Field(...) declarations assigned to class-level names;
 # pydantic accesses them via model.__fields__, not direct name lookup.
@@ -127,6 +130,9 @@ paginate_page
 paginate_page_async
 iterate_page
 iterate_page_async
+# body pagination and page objects
+merge_body_fields
+last_item_value
 
 # _concurrency.py — called by generated package consumers
 run_sync

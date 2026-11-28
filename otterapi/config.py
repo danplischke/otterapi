@@ -1186,6 +1186,140 @@ def _normalize_module_map(
     }
 
 
+class NamingRule(BaseModel):
+    """One regex rewrite applied to every operation's name.
+
+    Attributes:
+        pattern: A regular expression searched for in the operationId (or the
+            path-derived name).
+        replace: The replacement, in ``re.sub`` syntax (group references work).
+    """
+
+    pattern: str = Field(description='Regular expression to search for.')
+    replace: str = Field(default='', description='Replacement text (re.sub syntax).')
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('pattern')
+    @classmethod
+    def _compiles(cls, v: str) -> str:
+        try:
+            re.compile(v)
+        except re.error as exc:
+            raise ValueError(f'invalid regular expression {v!r}: {exc}') from exc
+        return v
+
+
+class NamingConfig(BaseModel):
+    """Rewrite the names of generated endpoint functions.
+
+    ``rules`` run in order on each operation's raw name (its operationId, or
+    the path-derived name with ``function_naming: path``); ``overrides`` then
+    pins individual operations to an exact name. Every generated variant
+    (``_df``, ``_iter``, ``async_*`` ...) derives from the result.
+
+    A rename that makes two operations share a name is an error -- unless
+    ``versioning`` resolves it (the operations differ in path version).
+
+    Attributes:
+        rules: Regex rewrites, applied in order.
+        overrides: Exact names keyed by operationId (or raw path-derived name).
+    """
+
+    rules: list[NamingRule] = Field(
+        default_factory=list,
+        description='Regex rewrites applied in order to each operation name.',
+    )
+    overrides: dict[str, str] = Field(
+        default_factory=dict,
+        description='Exact function names keyed by operationId.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('overrides')
+    @classmethod
+    def _identifiers(cls, v: dict[str, str]) -> dict[str, str]:
+        for key, name in v.items():
+            if not name.isidentifier():
+                raise ValueError(
+                    f'naming.overrides[{key!r}] = {name!r} is not a valid identifier'
+                )
+        return v
+
+    def apply(self, raw_name: str) -> str:
+        """The name for an operation whose raw name is ``raw_name``."""
+        if raw_name in self.overrides:
+            return self.overrides[raw_name]
+        name = raw_name
+        for rule in self.rules:
+            name = re.sub(rule.pattern, rule.replace, name)
+        return name
+
+
+class VersioningConfig(BaseModel):
+    """Route endpoints that exist in several path versions.
+
+    When two operations end up with the same function name (usually after a
+    ``naming`` rule strips a ``_v2`` suffix) and their paths carry different
+    versions, the newest keeps the plain name in its module and older ones
+    are moved out of the way. An operation that exists in only one version
+    stays where it is.
+
+    Attributes:
+        enabled: Turn version routing on.
+        path_pattern: Regex reading the version from a path; it must have a
+            ``version`` group matching an integer.
+        latest: How the newest version is named (``unsuffixed``).
+        legacy: Where older versions go: ``submodule`` puts them in
+            ``<module>/v<N>.py`` under the same name (needs module splitting
+            and ``client_style: functions``); ``suffix`` keeps them in the main
+            module as ``<name>_v<N>``.
+    """
+
+    enabled: bool = Field(default=True, description='Enable version routing.')
+    path_pattern: str = Field(
+        default=r'/v(?P<version>\d+)(?=/|$)',
+        description="Regex with a 'version' group reading the version from a path.",
+    )
+    latest: Literal['unsuffixed'] = Field(
+        default='unsuffixed',
+        description='How the newest version is named.',
+    )
+    legacy: Literal['submodule', 'suffix'] = Field(
+        default='submodule',
+        description=(
+            "Where older versions go: 'submodule' (<module>/v<N>.py, same name) "
+            "or 'suffix' (<name>_v<N> in the main module)."
+        ),
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('path_pattern')
+    @classmethod
+    def _has_version_group(cls, v: str) -> str:
+        try:
+            compiled = re.compile(v)
+        except re.error as exc:
+            raise ValueError(f'invalid regular expression {v!r}: {exc}') from exc
+        if 'version' not in compiled.groupindex:
+            raise ValueError(
+                f"versioning.path_pattern {v!r} needs a '(?P<version>...)' group"
+            )
+        return v
+
+    def version_of(self, path: str) -> int | None:
+        """The path's version, or None when it has none."""
+        match = re.search(self.path_pattern, path)
+        if match is None:
+            return None
+        try:
+            return int(match.group('version'))
+        except (TypeError, ValueError):
+            return None
+
+
 class DocumentConfig(BaseModel):
     """Configuration for a single OpenAPI document to be processed.
 
@@ -1306,6 +1440,20 @@ class DocumentConfig(BaseModel):
             'numerically-suffixed duplicates (e.g. ``feed_changes2`` .. '
             '``feed_changes43``) produced by specs that reuse the same '
             'operationId across distinct paths.'
+        ),
+    )
+
+    naming: NamingConfig = Field(
+        default_factory=NamingConfig,
+        description='Regex rules and exact overrides for endpoint function names.',
+    )
+
+    versioning: VersioningConfig | None = Field(
+        default=None,
+        description=(
+            'Route operations that exist in several path versions: the newest '
+            'keeps the plain name, older ones move to a submodule or get a '
+            'version suffix.'
         ),
     )
 

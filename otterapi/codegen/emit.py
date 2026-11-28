@@ -510,7 +510,7 @@ def _warn_if_looks_paginated(
     page. An envelope carrying both the configured items list and a total
     count is the tell.
     """
-    if endpoint.sync_fn_name in pagination.endpoints:
+    if endpoint.config_name in pagination.endpoints:
         return
     data_path = pagination.default_data_path
     total_path = pagination.default_total_path
@@ -530,7 +530,7 @@ def _warn_if_looks_paginated(
         endpoint.path,
         data_path,
         total_path,
-        endpoint.sync_fn_name,
+        endpoint.config_name,
     )
 
 
@@ -553,12 +553,12 @@ def _unwrap_applies(
     status = resolver.field_path_status(endpoint, unwrap_path)
     if status != 'absent':
         return True
-    if unwrap_config.has_explicit_path(endpoint.sync_fn_name):
+    if unwrap_config.has_explicit_path(endpoint.config_name):
         raise ConfigurationError(
-            f'response_unwrap.endpoints.{endpoint.sync_fn_name}.data_path '
+            f'response_unwrap.endpoints.{endpoint.config_name}.data_path '
             f'{unwrap_path!r} does not exist on the response of '
             f'{endpoint.method.upper()} {endpoint.path}',
-            field=f'response_unwrap.endpoints.{endpoint.sync_fn_name}.data_path',
+            field=f'response_unwrap.endpoints.{endpoint.config_name}.data_path',
         )
     logger.debug(
         'Not unwrapping %s: its response has no %r field',
@@ -593,7 +593,7 @@ class EndpointContext:
         pagination = config.pagination
         if pagination is not None and pagination.enabled:
             pag_config = get_pagination_config_for_endpoint(
-                endpoint.sync_fn_name, pagination, endpoint.parameters
+                endpoint.config_name, pagination, endpoint.parameters
             )
             if pag_config is None:
                 _warn_if_looks_paginated(endpoint, pagination, resolver)
@@ -602,7 +602,7 @@ class EndpointContext:
         if config.response_unwrap:
             should_unwrap, unwrap_path = (
                 config.response_unwrap.get_unwrap_config_for_endpoint(
-                    endpoint.sync_fn_name
+                    endpoint.config_name
                 )
             )
             if should_unwrap and unwrap_path:
@@ -643,9 +643,31 @@ class EmitSink:
     #: functions by endpoint / resource.
     owners: dict[str, Endpoint] = field(default_factory=dict)
     _current_endpoint: Endpoint | None = None
+    _seen: set[str] = field(default_factory=set)
 
     def add(self, fn: ast.stmt, name: str, imports: dict[str, set[str]]) -> None:
-        """Append a generated function, record its name, and merge its imports."""
+        """Append a generated function, record its name, and merge its imports.
+
+        Two functions of one name in a module would silently shadow each other
+        (``list_users_page`` the operation vs the ``_page`` variant of a
+        paginated ``list_users``), so a duplicate fails generation instead.
+        """
+        if name in self._seen:
+            first = self.owners.get(name)
+            second = self._current_endpoint
+            described = ' and '.join(
+                f'{ep.method.upper()} {ep.path}'
+                for ep in (first, second)
+                if ep is not None
+            )
+            raise ConfigurationError(
+                f'two generated functions are named {name!r}'
+                + (f' ({described})' if described else '')
+                + '; rename one with naming.overrides, or turn off the variant '
+                'that collides (e.g. pagination.page_variants: false)',
+                field='naming.overrides',
+            )
+        self._seen.add(name)
         self.body.append(fn)
         self.names.append(name)
         self.imports.add_imports(imports)
@@ -874,7 +896,7 @@ class DataFrameFeature(EndpointFeature):
             return False
         assert cfg.dataframe is not None and ctx.pag_config is not None
 
-        endpoint_df_config = cfg.dataframe.endpoints.get(ctx.endpoint.sync_fn_name)
+        endpoint_df_config = cfg.dataframe.endpoints.get(ctx.endpoint.config_name)
         if endpoint_df_config and endpoint_df_config.enabled is False:
             return False
 
@@ -1005,7 +1027,7 @@ class ExportFeature(EndpointFeature):
             return False
 
         should_generate, formats, _path = cfg.export.should_generate_for_endpoint(
-            endpoint_name=ctx.endpoint.sync_fn_name,
+            endpoint_name=ctx.endpoint.config_name,
             returns_list=True,
         )
         if not should_generate:
@@ -1054,7 +1076,7 @@ class ExportFeature(EndpointFeature):
             return False
 
         should_generate, formats, _path = cfg.export.should_generate_for_endpoint(
-            endpoint_name=ctx.endpoint.sync_fn_name,
+            endpoint_name=ctx.endpoint.config_name,
             returns_list=True,
         )
         if not should_generate:

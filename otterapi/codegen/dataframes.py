@@ -203,7 +203,7 @@ def get_dataframe_config_for_endpoint(
     returns_list = endpoint_returns_list(endpoint, unwrap_type_ast=unwrap_type_ast)
 
     # Get the sync function name for config lookup
-    endpoint_name = endpoint.sync_fn_name
+    endpoint_name = endpoint.config_name
 
     # Use the config method to determine what to generate
     gen_pandas, gen_polars, path = dataframe_config.should_generate_for_endpoint(

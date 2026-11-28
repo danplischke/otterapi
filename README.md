@@ -177,6 +177,63 @@ documents:
     function_naming: path   # get_v1_feed_trial_changes, get_v1_feed_hcp_profile_changes, ...
 ```
 
+#### Renaming Functions
+
+`naming.rules` rewrites every operation's name with regular expressions, in
+order; `naming.overrides` pins single operations (keyed by operationId) to an
+exact name. Every variant (`_df`, `_iter`, `_page`, `async_*`, ...), `__all__`
+and the class-client methods follow the new name.
+
+```yaml
+naming:
+  rules:
+    - pattern: '_v\d+(?=_|$)'     # get_widgets_by_id_v2_count -> get_widgets_by_id_count
+      replace: ''
+  overrides:
+    legacyGetThing: get_thing
+```
+
+A rename that gives two operations the same name fails generation (naming one
+of them `_2` would hide which one you meant) -- unless `versioning` resolves it.
+Generation also fails when two generated functions in one module would share
+a name, such as an operation called `list_users_page` next to the `_page`
+variant of a paginated `list_users`.
+
+Per-endpoint settings (`pagination.endpoints`, `dataframe.endpoints`,
+`export.endpoints`, `response_unwrap.endpoints`) are keyed by the final
+function name; an operationId works too. A key that matches no endpoint is
+reported as a warning.
+
+#### Path-Versioned APIs
+
+For specs that version endpoints in the path (`/widgets/v1/...` next to
+`/widgets/v2/...`), `versioning` keeps the newest version under the plain name
+and moves older ones out of the way:
+
+```yaml
+module_split: {enabled: true, strategy: path}
+naming:
+  rules: [{pattern: '_v\d+(?=_|$)', replace: ''}]
+versioning:
+  path_pattern: "/v(?P<version>\\d+)/"   # default: /v(?P<version>\d+)(?=/|$)
+  latest: unsuffixed
+  legacy: submodule                      # or: suffix
+```
+
+```python
+from client.widgets import get_widgets_by_id       # v2, the newest
+from client.widgets.v1 import get_widgets_by_id    # v1
+```
+
+Versioning applies to operations that end up with the same name and differ
+only in their path version; an operation that exists in one version stays
+where it is. With `legacy: submodule` older versions go to
+`<module>/v<N>.py` (the module becomes a package) and are not re-exported from
+the package root; this needs `module_split` and `client_style: functions`.
+`legacy: suffix` works with every layout and client style: older versions
+stay next to the newest as `<name>_v<N>`. Per-endpoint settings for a
+submodule version are keyed `<name>_v<N>` (e.g. `get_widgets_by_id_v1`).
+
 #### Path Filtering
 
 ```yaml
