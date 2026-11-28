@@ -85,12 +85,6 @@ class EndpointDataFrameConfig(BaseModel):
     """Per-endpoint DataFrame configuration.
 
     Allows overriding the default DataFrame settings for specific endpoints.
-
-    Attributes:
-        enabled: Override whether to generate DataFrame methods for this endpoint.
-        path: JSON path to extract data from response (e.g., "data.users").
-        pandas: Override whether to generate _df method (pandas).
-        polars: Override whether to generate _pl method (polars).
     """
 
     enabled: bool | None = Field(
@@ -141,21 +135,6 @@ class EndpointPaginationConfig(BaseModel):
     """Per-endpoint pagination configuration.
 
     Allows configuring pagination behavior for specific endpoints.
-
-    Attributes:
-        enabled: Override whether to generate pagination methods for this endpoint.
-        style: Pagination style for this endpoint.
-        offset_param: Name of offset parameter (for offset style).
-        limit_param: Name of limit parameter.
-        cursor_param: Name of cursor parameter (for cursor style).
-        page_param: Name of page parameter (for page style).
-        per_page_param: Name of per_page parameter (for page style).
-        data_path: JSON path to items array in response.
-        total_path: JSON path to total count in response.
-        next_cursor_path: JSON path to next cursor in response (for cursor style).
-        total_pages_path: JSON path to total pages in response (for page style).
-        default_page_size: Default page size for this endpoint.
-        max_page_size: Maximum page size for this endpoint.
     """
 
     enabled: bool | None = Field(
@@ -285,15 +264,6 @@ class PaginationConfig(BaseModel):
     """Global pagination configuration.
 
     When enabled, generates pagination methods for configured endpoints.
-
-    Attributes:
-        enabled: Enable pagination method generation.
-        auto_detect: Automatically detect and enable pagination for endpoints
-            that have pagination parameters (offset/limit, cursor, page/per_page).
-        default_style: Default pagination style when not explicitly configured.
-        default_page_size: Default page size for iteration.
-        default_data_path: Default JSON path to items array.
-        endpoints: Per-endpoint pagination configuration.
     """
 
     enabled: bool = Field(
@@ -313,7 +283,7 @@ class PaginationConfig(BaseModel):
 
     default_style: PaginationStyle | Literal['offset', 'cursor', 'page'] = Field(
         default=PaginationStyle.OFFSET,
-        description='Default pagination style.',
+        description='Default pagination style when not explicitly configured.',
     )
 
     default_page_size: int = Field(
@@ -550,14 +520,6 @@ class DataFrameConfig(BaseModel):
 
     When enabled, generates additional endpoint methods that return
     pandas DataFrames (_df suffix) and/or polars DataFrames (_pl suffix).
-
-    Attributes:
-        enabled: Enable DataFrame method generation.
-        pandas: Generate _df methods returning pandas DataFrames.
-        polars: Generate _pl methods returning polars DataFrames.
-        default_path: Default JSON path for extracting list data from responses.
-        include_all: Generate DataFrame methods for all list-returning endpoints.
-        endpoints: Per-endpoint configuration overrides.
     """
 
     enabled: bool = Field(
@@ -664,11 +626,6 @@ class EndpointExportConfig(BaseModel):
     """Per-endpoint file export configuration.
 
     Allows overriding the default export settings for specific endpoints.
-
-    Attributes:
-        enabled: Override whether to generate export helpers for this endpoint.
-        path: JSON path to extract data from response.
-        formats: Override which formats the endpoint should support.
     """
 
     enabled: bool | None = Field(
@@ -697,14 +654,6 @@ class ExportConfig(BaseModel):
     take an iterable of Pydantic models (or dicts) and write them to disk or
     cloud storage via ``UPath``. Parquet support requires ``pyarrow`` which
     is exposed via the ``otterapi[parquet]`` optional extra.
-
-    Attributes:
-        enabled: Enable export helper generation.
-        formats: Default list of formats the generated helpers should support.
-        default_path: Default JSON path for extracting list data from responses.
-        include_all: Generate export helpers for all list-returning endpoints.
-        batch_size: Default batch size used when streaming pages to disk.
-        endpoints: Per-endpoint configuration overrides.
     """
 
     enabled: bool = Field(
@@ -793,10 +742,6 @@ class EndpointResponseUnwrapConfig(BaseModel):
     """Per-endpoint response unwrap configuration.
 
     Allows overriding the default response unwrap settings for specific endpoints.
-
-    Attributes:
-        enabled: Override whether to unwrap response for this endpoint.
-        data_path: JSON path to extract data from response.
     """
 
     enabled: bool | None = Field(
@@ -816,10 +761,6 @@ class EndpointRequestBodyConfig(BaseModel):
     """Per-path request body overrides.
 
     Every field defaults to ``None``, meaning "inherit the document setting".
-
-    Attributes:
-        exclude_unset: Override the document's ``exclude_unset``.
-        flatten: Override the document's ``flatten``.
     """
 
     exclude_unset: bool | None = Field(
@@ -843,26 +784,15 @@ class ResolvedRequestBodyConfig(BaseModel):
 
 
 class RequestBodyConfig(BaseModel):
-    """Configuration for how request bodies are serialized.
-
-    Attributes:
-        exclude_unset: Send only the fields the caller actually set.  With this
-            off, a model's every untouched optional field goes out as an
-            explicit ``null`` -- which some APIs read as "clear this field".
-            Turn it off when an endpoint genuinely needs those nulls, for
-            instance a PUT that replaces a whole resource.
-        flatten: Spread the body model's fields into individual keyword
-            parameters instead of taking one ``body=`` argument.
-        paths: Per-path overrides, keyed by a glob over the URL path.  The
-            longest matching pattern wins, so a specific path beats the
-            wildcard that also covers it.
-    """
+    """Configuration for how request bodies are serialized."""
 
     exclude_unset: bool = Field(
         default=True,
         description=(
             'Send only fields the caller set, rather than an explicit null for '
-            'every untouched optional field.'
+            'every untouched optional field (which some APIs read as "clear '
+            'this field"). Turn it off when an endpoint needs those nulls, e.g. '
+            'a PUT that replaces a whole resource.'
         ),
     )
 
@@ -878,7 +808,8 @@ class RequestBodyConfig(BaseModel):
         default_factory=dict,
         description=(
             'Per-path overrides keyed by a glob over the URL path; the longest '
-            'matching pattern wins.'
+            'matching pattern wins, so a specific path beats the wildcard that '
+            'also covers it.'
         ),
     )
 
@@ -920,34 +851,23 @@ class AuthConfig(BaseModel):
 
     Each supported scheme in the document becomes a keyword-only constructor
     parameter on the generated client, applied automatically to every request.
-
-    Attributes:
-        enabled: Whether to generate credential parameters at all.  Turn this
-            off to keep the previous behaviour of wiring auth by hand in the
-            user-owned ``client.py``.
-        env_prefix: Prefix for the environment variables an omitted credential
-            falls back to, e.g. ``OTTER`` gives ``OTTER_API_KEY`` for a scheme
-            named ``apiKey``.  Set it per document when a project generates
-            more than one client, so their variables do not collide.  An empty
-            string drops the prefix entirely.
-        env_vars: Exact environment variable name per security scheme, keyed by
-            the scheme's name in ``components.securitySchemes``.  Use it when a
-            credential already lives somewhere the prefix rule would never
-            derive -- an existing ``STRIPE_SECRET_KEY``, say.  Takes precedence
-            over ``env_prefix`` for the schemes it names; the rest keep the
-            derived default.
     """
 
     enabled: bool = Field(
         default=True,
-        description='Generate client credential parameters from securitySchemes.',
+        description=(
+            'Generate client credential parameters from securitySchemes. Turn '
+            'this off to wire auth by hand in the user-owned client.py.'
+        ),
     )
 
     env_prefix: str = Field(
         default='OTTER',
         description=(
             'Prefix for the environment variables that supply credentials when '
-            'the constructor argument is omitted.'
+            'the constructor argument is omitted (OTTER gives OTTER_API_KEY for '
+            'a scheme named apiKey). Set it per document when a project '
+            'generates several clients; an empty string drops the prefix.'
         ),
     )
 
@@ -955,8 +875,9 @@ class AuthConfig(BaseModel):
         default_factory=dict,
         description=(
             'Exact environment variable name per security scheme, keyed by the '
-            'scheme name in components.securitySchemes. Overrides env_prefix '
-            'for the schemes it names.'
+            'scheme name in components.securitySchemes, for credentials the '
+            'prefix rule would never derive (an existing STRIPE_SECRET_KEY). '
+            'Overrides env_prefix for the schemes it names.'
         ),
     )
 
@@ -967,11 +888,6 @@ class ResponseUnwrapConfig(BaseModel):
     When enabled, generates endpoint functions that extract and return
     just the data portion of envelope-style responses, making non-paginated
     endpoints consistent with paginated ones.
-
-    Attributes:
-        enabled: Enable response unwrapping.
-        data_path: Default JSON path to extract data from responses.
-        endpoints: Per-endpoint configuration overrides.
     """
 
     enabled: bool = Field(
@@ -1029,22 +945,24 @@ class ModuleDefinition(BaseModel):
     """Definition for a single module or module group.
 
     Supports both flat modules (with just paths) and nested module hierarchies.
-
-    Attributes:
-        paths: List of glob patterns to match endpoint paths.
-        modules: Nested submodules (recursive structure).
-        strip_prefix: Prefix to strip from paths in this group.
-        package_prefix: Prefix for generated imports.
-        file_name: Override for the generated file name.
-        description: Module docstring.
     """
 
-    paths: list[str] = Field(default_factory=list)
-    modules: dict[str, ModuleDefinition] = Field(default_factory=dict)
-    strip_prefix: str | None = None
-    package_prefix: str | None = None
-    file_name: str | None = None
-    description: str | None = None
+    paths: list[str] = Field(
+        default_factory=list, description='Glob patterns matching endpoint paths.'
+    )
+    modules: dict[str, ModuleDefinition] = Field(
+        default_factory=dict, description='Nested submodules (recursive).'
+    )
+    strip_prefix: str | None = Field(
+        default=None, description='Prefix to strip from paths in this group.'
+    )
+    package_prefix: str | None = Field(
+        default=None, description='Prefix for generated imports.'
+    )
+    file_name: str | None = Field(
+        default=None, description='Override for the generated file name.'
+    )
+    description: str | None = Field(default=None, description='Module docstring.')
 
     model_config = {'extra': 'forbid'}
 
@@ -1061,35 +979,44 @@ ModuleMapValue = ModuleDefinition | list[str] | str | dict
 
 
 class ModuleSplitConfig(BaseModel):
-    """Configuration for splitting endpoints into submodules.
+    """Configuration for splitting endpoints into submodules."""
 
-    Attributes:
-        enabled: Whether module splitting is enabled.
-        strategy: The splitting strategy to use.
-        global_strip_prefixes: Prefixes to strip from all paths before matching.
-        path_depth: Number of path segments to use for path-based strategy.
-        min_endpoints: Minimum endpoints required per module before consolidating.
-        fallback_module: Module name for endpoints that don't match any rule.
-        module_map: Custom mapping of module names to path patterns or definitions.
-        flat_structure: If True, generate flat file structure instead of directories.
-        split_models: Whether to split models per module (advanced).
-        shared_models_module: Module name for shared models when split_models is True.
-    """
-
-    enabled: bool = False
+    enabled: bool = Field(default=False, description='Enable module splitting.')
     strategy: SplitStrategy | Literal['none', 'path', 'tag', 'hybrid', 'custom'] = (
-        SplitStrategy.HYBRID
+        Field(default=SplitStrategy.HYBRID, description='The splitting strategy.')
     )
     global_strip_prefixes: list[str] = Field(
-        default_factory=lambda: ['/api', '/api/v1', '/api/v2', '/api/v3']
+        default_factory=lambda: ['/api', '/api/v1', '/api/v2', '/api/v3'],
+        description='Prefixes stripped from every path before matching.',
     )
-    path_depth: int = Field(default=1, ge=1, le=5)
-    min_endpoints: int = Field(default=2, ge=1)
-    fallback_module: str = 'common'
-    module_map: dict[str, ModuleMapValue] = Field(default_factory=dict)
-    flat_structure: bool = False
-    split_models: bool = False
-    shared_models_module: str = '_models'
+    path_depth: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description='Number of path segments the path strategy uses.',
+    )
+    min_endpoints: int = Field(
+        default=2,
+        ge=1,
+        description='Modules with fewer endpoints fold into the fallback module.',
+    )
+    fallback_module: str = Field(
+        default='common', description='Module for endpoints that match no rule.'
+    )
+    module_map: dict[str, ModuleMapValue] = Field(
+        default_factory=dict,
+        description='Module names mapped to path patterns or module definitions.',
+    )
+    flat_structure: bool = Field(
+        default=False, description='Generate flat files instead of directories.'
+    )
+    split_models: bool = Field(
+        default=False, description='Split models per module (advanced).'
+    )
+    shared_models_module: str = Field(
+        default='_models',
+        description='Module for shared models when split_models is on.',
+    )
 
     model_config = {'extra': 'forbid'}
 
@@ -1291,20 +1218,7 @@ class VersioningConfig(BaseModel):
 
 
 class DocumentConfig(BaseModel):
-    """Configuration for a single OpenAPI document to be processed.
-
-    Attributes:
-        source: Path or URL to the OpenAPI document.
-        output: Output directory for the generated code.
-        base_url: Optional base URL override for the API.
-        models_file: Name of the generated models file.
-        models_import_path: Optional import path for models in endpoints.
-        endpoints_file: Name of the generated endpoints file.
-        generate_async: Whether to generate async endpoint functions.
-        generate_sync: Whether to generate sync endpoint functions.
-        client_class_name: Optional name for a generated client class.
-        module_split: Configuration for splitting endpoints into submodules.
-    """
+    """Configuration for a single OpenAPI document to be processed."""
 
     source: str = Field(..., description='Path or URL to the OpenAPI document.')
 
@@ -1565,17 +1479,7 @@ class DocumentConfig(BaseModel):
 
 
 class CodegenConfig(BaseSettings):
-    """Main configuration for OtterAPI code generation.
-
-    Attributes:
-        documents: List of OpenAPI documents to process.
-        generate_endpoints: Whether to generate endpoint functions.
-        format_output: Whether to format generated code with black/ruff.
-        validate_output: Whether to validate generated code syntax.
-        create_py_typed: Whether to create py.typed marker files.
-        lenient: Whether to drop unrecognized, structurally-invalid fields
-            from the input specification instead of failing validation.
-    """
+    """Main configuration for OtterAPI code generation."""
 
     documents: list[DocumentConfig] = Field(
         ..., description='List of OpenAPI documents to process.'
