@@ -20,6 +20,7 @@ Key Features:
 from __future__ import annotations
 
 import ast
+import copy
 import re
 import textwrap
 from collections.abc import Callable
@@ -42,6 +43,7 @@ from otterapi.codegen.ast_utils import (
     _union_expr,
     annotation_includes_none,
 )
+from otterapi.exceptions import ConfigurationError
 from otterapi.openapi.constants import MediaType
 
 if TYPE_CHECKING:
@@ -1293,16 +1295,39 @@ class EndpointFunctionFactory:
         self, pag_config: dict, extract_items: ast.expr
     ) -> list[ast.keyword]:
         next_cursor_path = pag_config.get('next_cursor_path')
-        get_next_cursor = (
-            self._build_extract_lambda(next_cursor_path)
-            if next_cursor_path
-            else self._build_none_returning_lambda('page')
+        get_next_cursor: ast.expr
+        if pag_config.get('next_cursor_from') == 'last_item':
+            # lambda page: last_item_value(<items of page>, 'cursor')
+            assert isinstance(extract_items, ast.Lambda)
+            get_next_cursor = ast.Lambda(
+                args=copy.deepcopy(extract_items.args),
+                body=_call(
+                    func=_name('last_item_value'),
+                    args=[
+                        copy.deepcopy(extract_items.body),
+                        ast.Constant(
+                            value=pag_config.get('next_cursor_item_path') or 'cursor'
+                        ),
+                    ],
+                ),
+            )
+        elif next_cursor_path:
+            get_next_cursor = self._build_extract_lambda(next_cursor_path)
+        else:
+            get_next_cursor = self._build_none_returning_lambda('page')
+
+        total_path = pag_config.get('total_path')
+        total_keywords = (
+            [ast.keyword(arg='get_total', value=self._build_extract_lambda(total_path))]
+            if total_path
+            else []
         )
 
         return [
             ast.keyword(arg='fetch_page', value=_name('fetch_page')),
             ast.keyword(arg='extract_items', value=extract_items),
             ast.keyword(arg='get_next_cursor', value=get_next_cursor),
+            *total_keywords,
             ast.keyword(arg='start_cursor', value=_name('cursor')),
             *(
                 []
@@ -1563,11 +1588,22 @@ class EndpointFunctionFactory:
         param1_api_name: str,
         param2_api_name: str,
     ) -> ast.Dict:
-        """Build the ``params`` dict: pagination params plus passthrough query params."""
+        """Build the ``params`` dict: pagination params plus passthrough query params.
+
+        Pagination parameters configured to live in the request body
+        (``cursor_location`` / ``limit_location: body``) are left out here and
+        merged into the body by :meth:`_build_fetch_page_body` instead.
+        """
         pag_config = self.config.pagination_config or {}
-        param_keys: list[ast.expr | None] = [ast.Constant(value=param1_api_name)]
-        param_values: list[ast.expr] = [_name(param1_name)]
-        if not self._omit_page_size():
+        param_keys: list[ast.expr | None] = []
+        param_values: list[ast.expr] = []
+        if pag_config.get('cursor_location', 'query') == 'query':
+            param_keys.append(ast.Constant(value=param1_api_name))
+            param_values.append(_name(param1_name))
+        if (
+            not self._omit_page_size()
+            and pag_config.get('limit_location', 'query') == 'query'
+        ):
             param_keys.append(ast.Constant(value=param2_api_name))
             param_values.append(_name(param2_name))
 
@@ -1597,13 +1633,24 @@ class EndpointFunctionFactory:
                 arg='method', value=ast.Constant(value=self.config.method.lower())
             ),
             ast.keyword(arg='path', value=path_expr),
-            ast.keyword(arg='params', value=params_dict),
         ]
+        if params_dict.keys:
+            page_keywords.append(ast.keyword(arg='params', value=params_dict))
         param_styles = ParameterASTBuilder.build_param_styles(
             self.config.parameters or []
         )
         if param_styles:
             page_keywords.append(ast.keyword(arg='param_styles', value=param_styles))
+        # Header parameters and the request body travel with every page; they
+        # were previously accepted by the signature but never sent.
+        header_params = ParameterASTBuilder.build_header_params(
+            self.config.parameters or []
+        )
+        if header_params:
+            page_keywords.append(ast.keyword(arg='headers', value=header_params))
+        body_keyword = self._build_fetch_page_body_keyword()
+        if body_keyword is not None:
+            page_keywords.append(body_keyword)
         page_keywords.append(ast.keyword(arg=None, value=_name('kwargs')))
 
         request_call = _call(func=_attr('c', request_method), keywords=page_keywords)
@@ -1631,6 +1678,59 @@ class EndpointFunctionFactory:
             _assign(_name('response'), request_expr),
             ast.Return(value=parse_call),
         ]
+
+    def _body_pagination_fields(self) -> list[tuple[str, str]]:
+        """``(wire name, fetch_page argument)`` of each paging field sent in the body."""
+        pag_config = self.config.pagination_config or {}
+        param1_name, param2_name, param1_api_name, param2_api_name = (
+            self._pagination_param_names()
+        )
+        fields: list[tuple[str, str]] = []
+        if pag_config.get('cursor_location', 'query') == 'body':
+            fields.append((param1_api_name, param1_name))
+        if (
+            not self._omit_page_size()
+            and pag_config.get('limit_location', 'query') == 'body'
+        ):
+            fields.append((param2_api_name, param2_name))
+        return fields
+
+    def _build_fetch_page_body_keyword(self) -> ast.keyword | None:
+        """The ``json=`` / ``data=`` keyword for each page request, if any.
+
+        With body-located paging fields the dumped body is overlaid with them
+        via ``merge_body_fields`` -- on the wire (alias) names, after
+        serialization, so field aliases and validation never get in the way.
+        """
+        body_info = self.config.request_body_info
+        fields = self._body_pagination_fields()
+        body_expr, body_param_name = ParameterASTBuilder.build_body_expr(body_info)
+        if fields:
+            if (
+                body_info is None
+                or not body_info.is_json
+                or body_info.type is None
+                or body_info.type.type != 'model'
+            ):
+                raise ConfigurationError(
+                    f'{self.config.fn_name}: cursor_location/limit_location: body '
+                    'needs a JSON object request body',
+                    field='pagination.endpoints.cursor_location',
+                )
+            merged = _call(
+                func=_name('merge_body_fields'),
+                args=[
+                    body_expr or ast.Constant(value=None),
+                    ast.Dict(
+                        keys=[ast.Constant(value=wire) for wire, _ in fields],
+                        values=[_name(arg) for _, arg in fields],
+                    ),
+                ],
+            )
+            return ast.keyword(arg=body_param_name or 'json', value=merged)
+        if body_expr is not None and body_param_name:
+            return ast.keyword(arg=body_param_name, value=body_expr)
+        return None
 
     def _build_fetch_page_function(self) -> ast.FunctionDef | ast.AsyncFunctionDef:
         """Build the inner fetch_page function for pagination."""

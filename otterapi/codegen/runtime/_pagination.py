@@ -1,11 +1,14 @@
 """Pagination utilities for OtterAPI generated clients."""
 
+import logging
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
 T = TypeVar('T')
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -71,12 +74,79 @@ def extract_path(data: dict | list, path: str | None) -> Any:
             current = current[key]
         elif isinstance(current, list) and key.isdigit():
             current = current[int(key)]
+        elif current is not None and hasattr(current, key):
+            # A parsed response model: walk its attributes.
+            current = getattr(current, key)
         else:
             raise KeyError(
                 f"Cannot access '{key}' on {type(current).__name__}. Full path: {path}"
             )
 
     return current
+
+
+def merge_body_fields(body: Any, fields: dict[str, Any]) -> dict[str, Any]:
+    """Overlay pagination fields onto a dumped JSON request body.
+
+    ``None`` values are skipped, so the first request keeps whatever position
+    the caller put in the body themselves (e.g. a saved ``after``) unless a
+    start position was passed explicitly.
+    """
+    if body is None:
+        merged: dict[str, Any] = {}
+    elif isinstance(body, dict):
+        merged = dict(body)
+    else:
+        raise TypeError(
+            'Body pagination needs a JSON object request body, got '
+            f'{type(body).__name__}'
+        )
+    for key, value in fields.items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def last_item_value(items: list[Any], path: str) -> Any:
+    """``path`` on the last of ``items`` (None for an empty page).
+
+    For APIs whose pages carry no next cursor and instead expect the last
+    row's own cursor back as the next request's ``after``.
+    """
+    if not items:
+        return None
+    return extract_path(items[-1], path)
+
+
+def _advance_cursor(
+    page: Any,
+    current: str | None,
+    get_next_cursor: Callable[[Any], str | None],
+    get_total: Callable[[Any], int | None] | None,
+    fetched: int,
+) -> str | None:
+    """The cursor for the next request, or None to stop.
+
+    Stops once ``total`` items have been fetched (saving the request for an
+    empty last page), when there is no next cursor, and when the server hands
+    back the cursor it was just sent -- a server ignoring the cursor would
+    otherwise be paged forever.
+    """
+    if get_total is not None:
+        total = get_total(page)
+        if total is not None and fetched >= total:
+            return None
+    next_cursor = get_next_cursor(page)
+    if not next_cursor:
+        return None
+    if next_cursor == current:
+        logger.warning(
+            'Stopping pagination: the server returned the same cursor (%r) '
+            'it was sent, so the next page would repeat this one.',
+            next_cursor,
+        )
+        return None
+    return next_cursor
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +449,7 @@ def paginate_cursor(
     extract_items: Callable[[Any], list[T]],
     get_next_cursor: Callable[[Any], str | None],
     *,
+    get_total: Callable[[Any], int | None] | None = None,
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
@@ -390,6 +461,8 @@ def paginate_cursor(
         fetch_page: Function that fetches a page given (cursor, limit).
         extract_items: Function that extracts items from a page response.
         get_next_cursor: Function to get next cursor from response.
+        get_total: Optional function reading the total item count; once that
+            many items have been fetched, no further page is requested.
         start_cursor: Starting cursor (default: None for first page).
         page_size: Items per page (default: 100).
         max_items: Maximum items to return (default: unlimited).
@@ -419,7 +492,9 @@ def paginate_cursor(
             if max_items is not None and len(all_items) >= max_items:
                 break
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(
+                page, current_cursor, get_next_cursor, get_total, len(all_items)
+            )
             if not current_cursor:
                 break
 
@@ -434,6 +509,7 @@ async def paginate_cursor_async(
     extract_items: Callable[[Any], list[T]],
     get_next_cursor: Callable[[Any], str | None],
     *,
+    get_total: Callable[[Any], int | None] | None = None,
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
@@ -470,7 +546,9 @@ async def paginate_cursor_async(
             if max_items is not None and len(all_items) >= max_items:
                 break
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(
+                page, current_cursor, get_next_cursor, get_total, len(all_items)
+            )
             if not current_cursor:
                 break
     finally:
@@ -488,6 +566,7 @@ def iterate_cursor(
     extract_items: Callable[[Any], list[T]],
     get_next_cursor: Callable[[Any], str | None],
     *,
+    get_total: Callable[[Any], int | None] | None = None,
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
@@ -499,6 +578,8 @@ def iterate_cursor(
         fetch_page: Function that fetches a page given (cursor, limit).
         extract_items: Function that extracts items from a page response.
         get_next_cursor: Function to get next cursor from response.
+        get_total: Optional function reading the total item count; once that
+            many items have been fetched, no further page is requested.
         start_cursor: Starting cursor (default: None for first page).
         page_size: Items per page (default: 100).
         max_items: Maximum items to yield (default: unlimited).
@@ -530,7 +611,9 @@ def iterate_cursor(
                 if max_items is not None and items_yielded >= max_items:
                     return
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(
+                page, current_cursor, get_next_cursor, get_total, items_yielded
+            )
             if not current_cursor:
                 return
 
@@ -540,6 +623,7 @@ async def iterate_cursor_async(
     extract_items: Callable[[Any], list[T]],
     get_next_cursor: Callable[[Any], str | None],
     *,
+    get_total: Callable[[Any], int | None] | None = None,
     start_cursor: str | None = None,
     page_size: int = 100,
     max_items: int | None = None,
@@ -578,7 +662,9 @@ async def iterate_cursor_async(
                 if max_items is not None and items_yielded >= max_items:
                     return
 
-            current_cursor = get_next_cursor(page)
+            current_cursor = _advance_cursor(
+                page, current_cursor, get_next_cursor, get_total, items_yielded
+            )
             if not current_cursor:
                 return
     finally:

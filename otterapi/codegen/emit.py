@@ -666,6 +666,10 @@ def build_pagination_config_dict(pag_config: PaginationMethodConfig) -> dict:
         'total_pages_path': pag_config.total_pages_path,
         'default_page_size': pag_config.default_page_size,
         'send_page_size': pag_config.send_page_size,
+        'cursor_location': pag_config.cursor_location,
+        'limit_location': pag_config.limit_location,
+        'next_cursor_from': pag_config.next_cursor_from,
+        'next_cursor_item_path': pag_config.next_cursor_item_path,
     }
 
 
@@ -804,6 +808,8 @@ class CoreEndpointFeature(EndpointFeature):
                     'iterate_page',
                     'iterate_page_async',
                     'extract_path',
+                    'merge_body_fields',
+                    'last_item_value',
                 }
             }
         )

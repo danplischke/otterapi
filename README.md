@@ -541,6 +541,46 @@ pagination:
 | `total_pages_path` | string | `null` | JSON path to total page count |
 | `default_page_size` | int | inherits | Default page size |
 | `max_page_size` | int | `null` | Maximum allowed page size |
+| `cursor_location` | `query`\|`body` | `query` | Where the position parameter (offset/cursor/page) is sent |
+| `limit_location` | `query`\|`body` | `cursor_location` | Where the page-size parameter is sent |
+| `next_cursor_from` | `response`\|`last_item` | `response` | Read the next cursor from `next_cursor_path`, or from the last item on the page |
+| `next_cursor_item_path` | string | `cursor` | Path of the cursor on an item, with `next_cursor_from: last_item` |
+
+### Paginating Through the Request Body
+
+Some APIs page `POST` endpoints through the JSON body instead of the query
+string, and expect the last row's cursor back as the next `after`. Configure
+them explicitly -- auto-detection only looks at query parameters, and never
+turns on body pagination by itself, because it re-sends the request once per
+page:
+
+```yaml
+pagination:
+  enabled: true
+  default_data_path: data
+  default_total_path: total
+  endpoints:
+    search_widgets:
+      style: cursor
+      cursor_param: after        # body field names, as on the wire
+      limit_param: limit
+      cursor_location: body      # limit_location defaults to the same
+      next_cursor_from: last_item
+      next_cursor_item_path: cursor
+```
+
+The paginator overlays `after` and `limit` onto the dumped body for each
+page; everything else you put in the body is sent unchanged. `page_size`
+takes precedence over a `limit` set on the body, and an `after` set on the
+body is used as the starting position unless `cursor=` is passed. Paging
+stops on an empty page, once `total` items have been fetched (when the
+response has a total), or when the server returns the cursor it was just
+sent. It does not stop on a short page, since a server that caps the page
+size would otherwise cut the results off.
+
+When pagination is enabled, code generation warns about endpoints that return
+the configured items list and total count but are not paginated, since their
+DataFrame and export helpers would return only the first page.
 
 ### Usage
 
@@ -745,6 +785,12 @@ response_unwrap:
     get_raw_data:
       enabled: false           # don't unwrap this endpoint
 ```
+
+The document-wide `data_path` only applies to endpoints whose response
+actually has that field: an endpoint returning `{"total": 3}`, a plain object
+or no body at all returns the parsed response unchanged. A `data_path` set
+for one endpoint must exist on its response, or generation fails. Use one to
+unwrap a scalar, e.g. `count_users: {data_path: total}` returns an `int`.
 
 ### Response Unwrap Options
 

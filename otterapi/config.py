@@ -144,6 +144,14 @@ class EndpointPaginationConfig(BaseModel):
         total_pages_path: JSON path to total pages in response (for page style).
         default_page_size: Default page size for this endpoint.
         max_page_size: Maximum page size for this endpoint.
+        cursor_location: Where the position parameter (offset / cursor / page)
+            goes: the query string (default) or the JSON request body.
+        limit_location: Where the page-size parameter goes; defaults to
+            ``cursor_location``.
+        next_cursor_from: Where the next cursor comes from: ``next_cursor_path``
+            in the response (default), or a field of the last item on the page.
+        next_cursor_item_path: With ``next_cursor_from: last_item``, the path
+            of the cursor on an item (default ``cursor``).
     """
 
     enabled: bool | None = Field(
@@ -221,6 +229,40 @@ class EndpointPaginationConfig(BaseModel):
             'Set false for cursor APIs that have no page-size parameter so the '
             'generated client stops sending an unwanted limit param. Only honored '
             'for cursor style; offset/page styles always send it.'
+        ),
+    )
+
+    cursor_location: Literal['query', 'body'] | None = Field(
+        default=None,
+        description=(
+            'Where to send the position parameter (offset, cursor or page): the '
+            "query string ('query', the default) or a field of the JSON request "
+            "body ('body'), for POST endpoints that page through their body."
+        ),
+    )
+
+    limit_location: Literal['query', 'body'] | None = Field(
+        default=None,
+        description=(
+            'Where to send the page-size parameter. Defaults to cursor_location.'
+        ),
+    )
+
+    next_cursor_from: Literal['response', 'last_item'] | None = Field(
+        default=None,
+        description=(
+            "Where the next cursor comes from (cursor style): 'response' reads "
+            "next_cursor_path from the page (the default); 'last_item' reads "
+            'next_cursor_item_path from the last item on the page, for APIs '
+            "that expect the last row's cursor back as the next 'after'."
+        ),
+    )
+
+    next_cursor_item_path: str | None = Field(
+        default=None,
+        description=(
+            'With next_cursor_from: last_item, the path of the cursor on an item '
+            "(default 'cursor')."
         ),
     )
 
@@ -398,6 +440,14 @@ class PaginationConfig(BaseModel):
                 if endpoint_config.send_page_size is not None
                 else self.default_send_page_size
             ),
+            cursor_location=endpoint_config.cursor_location or 'query',
+            limit_location=(
+                endpoint_config.limit_location
+                or endpoint_config.cursor_location
+                or 'query'
+            ),
+            next_cursor_from=endpoint_config.next_cursor_from or 'response',
+            next_cursor_item_path=endpoint_config.next_cursor_item_path or 'cursor',
         )
         return True, resolved
 
@@ -480,6 +530,10 @@ class ResolvedPaginationConfig(BaseModel):
     default_page_size: int
     max_page_size: int | None
     send_page_size: bool = True
+    cursor_location: Literal['query', 'body'] = 'query'
+    limit_location: Literal['query', 'body'] = 'query'
+    next_cursor_from: Literal['response', 'last_item'] = 'response'
+    next_cursor_item_path: str = 'cursor'
 
     model_config = {'extra': 'forbid'}
 
