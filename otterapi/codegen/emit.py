@@ -62,6 +62,7 @@ from otterapi.codegen.endpoints import (
     build_standalone_paginated_dataframe_fn,
     build_standalone_paginated_fn,
     build_standalone_paginated_iter_fn,
+    endpoint_supports_with_response,
 )
 from otterapi.codegen.export import (
     build_standalone_export_fn,
@@ -108,6 +109,7 @@ class EmitConfig:
     export: ExportConfig | None
     generate_sync: bool = True
     generate_async: bool = True
+    raw_response: bool = False
 
     @classmethod
     def from_document(cls, config: DocumentConfig) -> EmitConfig:
@@ -119,6 +121,7 @@ class EmitConfig:
             export=config.export,
             generate_sync=config.generate_sync,
             generate_async=config.generate_async,
+            raw_response=config.raw_response,
         )
 
     @property
@@ -767,6 +770,30 @@ class CoreEndpointFeature(EndpointFeature):
                 response_type_imports=response_type_imports,
             )
             sink.add(fn, fn_name, imports)
+
+        if not ctx.config.raw_response or not endpoint_supports_with_response(
+            ep.response_type
+        ):
+            return
+        for is_async, fn_name in ctx.name_pairs:
+            raw_fn_name = f'{fn_name}_with_response'
+            fn, imports = build_standalone_endpoint_fn(
+                fn_name=raw_fn_name,
+                method=ep.method,
+                path=ep.path,
+                parameters=ep.parameters,
+                request_body_info=ep.request_body,
+                response_type=ep.response_type,
+                response_infos=ep.response_infos,
+                docs=ep.description,
+                is_async=is_async,
+                unwrap_data_path=ctx.unwrap_path if ctx.should_unwrap else None,
+                unwrap_type_ast=unwrap_type_ast,
+                unwrap_type_imports=unwrap_type_imports,
+                response_type_imports=response_type_imports,
+                with_response=True,
+            )
+            sink.add(fn, raw_fn_name, imports)
 
     def _emit_paginated(self, ctx: EndpointContext, sink: EmitSink) -> None:
         ep = ctx.endpoint

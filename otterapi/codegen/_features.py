@@ -138,6 +138,8 @@ def all_features() -> list[FeatureModule]:
         ExportFeature(),
         ConcurrencyFeature(),
         RetryFeature(),
+        LoggingFeature(),
+        RawResponseFeature(),
         QueryFeature(),
         SerializationFeature(),
     ]
@@ -238,6 +240,24 @@ class RetryFeature(FeatureModule):
 
     def is_enabled(self, _config: DocumentConfig) -> bool:
         return True
+
+
+class LoggingFeature(FeatureModule):
+    """Emits ``_logging.py`` (request/response logging used by ``_client.py``)."""
+
+    module_filename = '_logging.py'
+
+    def is_enabled(self, _config: DocumentConfig) -> bool:
+        return True
+
+
+class RawResponseFeature(FeatureModule):
+    """Emits ``_raw_response.py`` (``RawResponse`` for ``_with_response`` variants)."""
+
+    module_filename = '_raw_response.py'
+
+    def is_enabled(self, config: DocumentConfig) -> bool:
+        return bool(config.raw_response)
 
 
 class QueryFeature(FeatureModule):

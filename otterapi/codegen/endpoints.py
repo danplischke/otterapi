@@ -895,6 +895,9 @@ class EndpointFunctionConfig:
     unwrap_type_imports: dict[str, set[str]] | None = None  # Imports for unwrapped type
     # Response type imports (for model names in response_type.annotation_ast)
     response_type_imports: dict[str, set[str]] | None = None
+    # The ``_with_response`` variant: return a RawResponse wrapping the HTTP
+    # response, with ``parse()`` yielding what the plain function returns.
+    with_response: bool = False
 
 
 # =============================================================================
@@ -1059,6 +1062,11 @@ class EndpointFunctionFactory:
 
         if self.config.pagination_style:
             return self._pagination_return_type()
+
+        if self.config.response_type and self.config.with_response:
+            raw_cls = 'AsyncRawResponse' if self.config.is_async else 'RawResponse'
+            self._add_import('._raw_response', raw_cls)
+            return _subscript(raw_cls, self._response_return_type())
 
         if self.config.response_type:
             return self._response_return_type()
@@ -1225,14 +1233,46 @@ class EndpointFunctionFactory:
         if self.config.is_async:
             parse_call = ast.Await(value=parse_call)
 
+        parse_body: list[ast.stmt]
         if self.config.unwrap_data_path:
-            builder.add_statement(_assign(_name('result'), parse_call))
             unwrap_expr = self._build_unwrap_expression(
                 'result', self.config.unwrap_data_path
             )
-            return builder.add_return(unwrap_expr).build()
+            parse_body = [
+                _assign(_name('result'), parse_call),
+                ast.Return(value=unwrap_expr),
+            ]
+        else:
+            parse_body = [ast.Return(value=parse_call)]
 
-        return builder.add_return(parse_call).build()
+        if self.config.with_response:
+            # def _parse() -> T: <parse + unwrap>
+            # return RawResponse(response, _parse)
+            raw_cls = 'AsyncRawResponse' if self.config.is_async else 'RawResponse'
+            self._add_import('._raw_response', raw_cls)
+            builder.add_statement(
+                _function_def(
+                    name='_parse',
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        kwarg=None,
+                        defaults=[],
+                    ),
+                    body=parse_body,
+                    is_async=self.config.is_async,
+                    returns=self._response_return_type(),
+                )
+            )
+            return builder.add_return(
+                _call(_name(raw_cls), args=[_name('response'), _name('_parse')])
+            ).build()
+
+        for stmt in parse_body:
+            builder.add_statement(stmt)
+        return builder.build()
 
     @staticmethod
     def _is_raw_union_element(elt: ast.expr) -> bool:
@@ -2952,6 +2992,7 @@ def build_standalone_endpoint_fn(
     unwrap_type_ast: ast.expr | None = None,
     unwrap_type_imports: dict[str, set[str]] | None = None,
     response_type_imports: dict[str, set[str]] | None = None,
+    with_response: bool = False,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build a standalone endpoint function with full implementation.
 
@@ -2971,6 +3012,8 @@ def build_standalone_endpoint_fn(
         unwrap_type_ast: The AST for the unwrapped return type.
         unwrap_type_imports: Imports needed for the unwrapped return type.
         response_type_imports: Imports needed for model names in response type.
+        with_response: Build the ``_with_response`` variant, returning a
+            ``RawResponse`` whose ``parse()`` gives the usual result.
 
     Returns:
         A tuple of (function_ast, imports).
@@ -2990,8 +3033,24 @@ def build_standalone_endpoint_fn(
         unwrap_type_ast=unwrap_type_ast,
         unwrap_type_imports=unwrap_type_imports,
         response_type_imports=response_type_imports,
+        with_response=with_response,
     )
     return EndpointFunctionFactory(config).build()
+
+
+def endpoint_supports_with_response(response_type: Type | None) -> bool:
+    """Whether an endpoint gets a ``_with_response`` variant.
+
+    Only endpoints whose body is parsed: a raw ``Response`` / ``bytes`` /
+    ``str`` endpoint (or one with no response body) already hands back the
+    response, or has nothing to parse.
+    """
+    if response_type is None or response_type.annotation_ast is None:
+        return False
+    factory = EndpointFunctionFactory(
+        EndpointFunctionConfig(fn_name='_', method='get', path='/')
+    )
+    return not factory._is_raw_response_type(response_type)
 
 
 def build_delegating_endpoint_fn(

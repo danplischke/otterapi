@@ -134,6 +134,13 @@ iterate_page_async
 merge_body_fields
 last_item_value
 
+# _logging.py / _raw_response.py — used by generated _client.py and endpoints
+configure_from_env
+log_request
+log_response
+RawResponse
+AsyncRawResponse
+
 # _concurrency.py — called by generated package consumers
 run_sync
 run_concurrently

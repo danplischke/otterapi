@@ -1443,6 +1443,16 @@ class DocumentConfig(BaseModel):
         ),
     )
 
+    raw_response: bool = Field(
+        default=False,
+        description=(
+            'Also generate <name>_with_response for every endpoint whose response '
+            'is parsed: it returns a RawResponse with the status code, headers '
+            'and the HTTP response, and parse() returns what <name> would. Class '
+            'clients get the same as <method>_with_response.'
+        ),
+    )
+
     naming: NamingConfig = Field(
         default_factory=NamingConfig,
         description='Regex rules and exact overrides for endpoint function names.',

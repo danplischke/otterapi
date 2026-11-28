@@ -27,6 +27,7 @@ from otterapi.codegen.ast_utils import (
 from otterapi.codegen.auth import AuthScheme, collect_auth_schemes
 from otterapi.codegen.client import (
     _exported_error_names,
+    build_logging_setup,
     generate_api_error_hierarchy,
     generate_base_client_class,
     generate_client_stub,
@@ -1952,6 +1953,7 @@ class Codegen(OpenAPIProcessor):
             format_output=self.format_output,
             validate_output=self.validate_output,
             http_module=self.config.http_library,
+            raw_response=self.config.raw_response,
         )
 
         assert self.typegen is not None
@@ -2033,6 +2035,11 @@ class Codegen(OpenAPIProcessor):
         body: list[ast.stmt] = []
         import_collector = ImportCollector()
         import_collector.add_imports(client_imports)
+        # Request logging: the auth names to redact, and the <CLIENT>_LOG opt-in.
+        logging_stmts, logging_imports = build_logging_setup(
+            client_name, self._auth_schemes()
+        )
+        import_collector.add_imports(logging_imports)
 
         # No model imports needed in _client.py anymore - models are imported in module files
 
@@ -2043,6 +2050,7 @@ class Codegen(OpenAPIProcessor):
         # Add __all__ export (include the full per-status error hierarchy
         # so users can ``from .<pkg>._client import NotFoundError`` etc.).
         body.append(_all(sorted([base_client_name, *_exported_error_names()])))
+        body.extend(logging_stmts)
 
         # Add the BaseAPIError + per-status subclass hierarchy.
         body.extend(generate_api_error_hierarchy())

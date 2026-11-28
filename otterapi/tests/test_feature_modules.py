@@ -86,9 +86,11 @@ class TestWriteEnabledFeatures:
         )
         written = write_enabled_features(doc, tmp_path, all_features())
         names = sorted(p.name for p in written)
-        # _concurrency.py, _retry.py and _serialization.py are always-on
+        # _concurrency.py, _logging.py, _retry.py and _serialization.py are
+        # always-on
         assert names == [
             '_concurrency.py',
+            '_logging.py',
             '_pagination.py',
             '_retry.py',
             '_serialization.py',
@@ -105,6 +107,7 @@ class TestWriteEnabledFeatures:
             '_concurrency.py',
             '_dataframe.py',
             '_export.py',
+            '_logging.py',
             '_pagination.py',
             '_retry.py',
             '_serialization.py',
@@ -115,6 +118,7 @@ class TestWriteEnabledFeatures:
         written = write_enabled_features(_doc(), tmp_path, all_features())
         assert sorted(p.name for p in written) == [
             '_concurrency.py',
+            '_logging.py',
             '_retry.py',
             '_serialization.py',
         ]

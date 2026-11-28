@@ -1157,6 +1157,45 @@ print(user.id, user.email)
 
 ---
 
+### Raw Responses
+
+Set `raw_response: true` to get a `<name>_with_response` variant of every
+endpoint whose response is parsed. It returns a `RawResponse` carrying that
+one call's status code and headers, and `parse()` returns exactly what the
+plain function would:
+
+```python
+raw = get_user_with_response(user_id=1)
+raw.status_code, raw.headers["x-ratelimit-remaining"]
+user = raw.parse()                     # User, typed
+
+raw = await async_get_user_with_response(user_id=1)
+user = await raw.parse()               # AsyncRawResponse
+
+client.users.get_user_with_response(user_id=1)   # class-based clients
+```
+
+Error responses still raise the usual `APIError` subclasses, with the response
+on `err.response`. Endpoints that already return the raw `Response`, `bytes`
+or `str` get no variant, nor do paginated endpoints (see the page objects).
+
+### Logging
+
+Every request is logged through the standard `logging` module under the
+`<package>._client` logger: method, URL, status code and elapsed time at
+`INFO`; request and response headers and bodies (truncated) at `DEBUG`.
+`Authorization`, cookie and API-key headers, the header / query names of the
+document's auth schemes, and body fields such as `password`, `client_secret`
+or `access_token` are written as `[REDACTED]`.
+
+Nothing is printed unless you configure logging --
+`logging.basicConfig(level=logging.INFO)` -- or set the environment variable
+named after the client, which attaches a stderr handler to that logger only:
+
+```bash
+PET_STORE_LOG=debug python my_script.py   # PetStoreClient -> PET_STORE_LOG
+```
+
 ## 🔐 Authentication
 
 Every scheme under `components.securitySchemes` becomes a keyword-only

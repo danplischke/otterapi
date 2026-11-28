@@ -47,6 +47,7 @@ _ALL_FEATURES = {
     'dataframe': {'enabled': True, 'pandas': True, 'polars': True},
     'export': {'enabled': True, 'formats': ['csv', 'jsonl', 'parquet']},
     'pagination': {'enabled': True, 'auto_detect': True},
+    'raw_response': True,
 }
 
 # name -> (spec fixture, config overrides). Spans styles x split x result_objects

@@ -670,6 +670,7 @@ class SplitModuleEmitter:
         format_output: bool = True,
         validate_output: bool = True,
         http_module: str = HTTP_MODULE,
+        raw_response: bool = False,
     ):
         """Initialize the split module emitter.
 
@@ -701,6 +702,7 @@ class SplitModuleEmitter:
             format_output: Whether to format generated code with ruff/black.
             validate_output: Whether to validate generated code syntax.
             http_module: HTTP library the generated modules import.
+            raw_response: Also emit ``_with_response`` variants.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -710,6 +712,7 @@ class SplitModuleEmitter:
         self.dataframe_config = dataframe_config
         self.pagination_config = pagination_config
         self.response_unwrap_config = response_unwrap_config
+        self.raw_response = raw_response
         self.export_config = export_config
         self.generate_sync = generate_sync
         self.generate_async = generate_async
@@ -886,6 +889,7 @@ class SplitModuleEmitter:
             export=self.export_config,
             generate_sync=self.generate_sync,
             generate_async=self.generate_async,
+            raw_response=self.raw_response,
         )
         resolver = TypeResolver(self._typegen_types)
         sink = build_endpoint_sink(endpoints, emit_config, resolver, description)
