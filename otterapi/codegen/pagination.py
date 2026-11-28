@@ -165,21 +165,5 @@ def get_pagination_config_for_endpoint(
         return None
 
     return PaginationMethodConfig(
-        style=resolved.style.value,
-        offset_param=resolved.offset_param,
-        limit_param=resolved.limit_param,
-        cursor_param=resolved.cursor_param,
-        page_param=resolved.page_param,
-        per_page_param=resolved.per_page_param,
-        data_path=resolved.data_path,
-        total_path=resolved.total_path,
-        next_cursor_path=resolved.next_cursor_path,
-        total_pages_path=resolved.total_pages_path,
-        default_page_size=resolved.default_page_size,
-        max_page_size=resolved.max_page_size,
-        send_page_size=resolved.send_page_size,
-        cursor_location=resolved.cursor_location,
-        limit_location=resolved.limit_location,
-        next_cursor_from=resolved.next_cursor_from,
-        next_cursor_item_path=resolved.next_cursor_item_path,
+        **(resolved.model_dump() | {'style': resolved.style.value})
     )

@@ -1440,40 +1440,56 @@ class TestPaginationOwnedParamNames:
 
     def test_offset_style(self):
         from otterapi.codegen.endpoints import pagination_owned_param_names
+        from otterapi.codegen.pagination import PaginationMethodConfig
 
         assert pagination_owned_param_names(
-            'offset', {'offset_param': 'skip', 'limit_param': 'take'}
+            'offset', PaginationMethodConfig(offset_param='skip', limit_param='take')
         ) == {'skip', 'take'}
 
     def test_page_style_uses_per_page_not_limit(self):
         from otterapi.codegen.endpoints import pagination_owned_param_names
+        from otterapi.codegen.pagination import PaginationMethodConfig
 
         assert pagination_owned_param_names(
-            'page', {'page_param': 'page', 'per_page_param': 'per_page'}
+            'page', PaginationMethodConfig(page_param='page', per_page_param='per_page')
         ) == {'page', 'per_page'}
 
     def test_cursor_style(self):
         from otterapi.codegen.endpoints import pagination_owned_param_names
+        from otterapi.codegen.pagination import PaginationMethodConfig
 
         assert pagination_owned_param_names(
-            'cursor', {'cursor_param': 'after', 'limit_param': 'first'}
+            'cursor', PaginationMethodConfig(cursor_param='after', limit_param='first')
         ) == {'after', 'first'}
 
     def test_falls_back_to_conventional_names(self):
         from otterapi.codegen.endpoints import pagination_owned_param_names
+        from otterapi.codegen.pagination import PaginationMethodConfig
 
-        assert pagination_owned_param_names('offset', {}) == {'offset', 'limit'}
+        assert pagination_owned_param_names('offset', PaginationMethodConfig()) == {
+            'offset',
+            'limit',
+        }
 
     def test_no_style_owns_nothing(self):
         from otterapi.codegen.endpoints import pagination_owned_param_names
+        from otterapi.codegen.pagination import PaginationMethodConfig
 
-        assert pagination_owned_param_names(None, {'limit_param': 'limit'}) == set()
+        assert (
+            pagination_owned_param_names(
+                None, PaginationMethodConfig(limit_param='limit')
+            )
+            == set()
+        )
 
     def test_accepts_the_config_enum(self):
         from otterapi.codegen.endpoints import pagination_owned_param_names
+        from otterapi.codegen.pagination import PaginationMethodConfig
         from otterapi.config import PaginationStyle
 
-        assert pagination_owned_param_names(PaginationStyle.PAGE, {}) == {
+        assert pagination_owned_param_names(
+            PaginationStyle.PAGE, PaginationMethodConfig()
+        ) == {
             'page',
             'per_page',
         }

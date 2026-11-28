@@ -543,27 +543,6 @@ class EmitSink:
             self.owners[name] = self._current_endpoint
 
 
-def build_pagination_config_dict(pag_config: PaginationMethodConfig) -> dict:
-    """Build the plain-dict pagination config passed to the AST builders."""
-    return {
-        'offset_param': pag_config.offset_param,
-        'limit_param': pag_config.limit_param,
-        'cursor_param': pag_config.cursor_param,
-        'page_param': pag_config.page_param,
-        'per_page_param': pag_config.per_page_param,
-        'data_path': pag_config.data_path,
-        'total_path': pag_config.total_path,
-        'next_cursor_path': pag_config.next_cursor_path,
-        'total_pages_path': pag_config.total_pages_path,
-        'default_page_size': pag_config.default_page_size,
-        'send_page_size': pag_config.send_page_size,
-        'cursor_location': pag_config.cursor_location,
-        'limit_location': pag_config.limit_location,
-        'next_cursor_from': pag_config.next_cursor_from,
-        'next_cursor_item_path': pag_config.next_cursor_item_path,
-    }
-
-
 # =============================================================================
 # Endpoint features (the registry, symmetric to _features.all_features())
 # =============================================================================
@@ -650,7 +629,6 @@ class CoreEndpointFeature(EndpointFeature):
         item_type_ast, item_type_imports = ctx.resolver.item_type_ast(
             ep, ctx.pag_config.data_path
         )
-        pag_dict = build_pagination_config_dict(ctx.pag_config)
 
         for is_async, fn_name in ctx.name_pairs:
             fn, imports = build_standalone_paginated_fn(
@@ -661,7 +639,7 @@ class CoreEndpointFeature(EndpointFeature):
                 request_body_info=ep.request_body,
                 response_type=ep.response_type,
                 pagination_style=ctx.pag_config.style,
-                pagination_config=pag_dict,
+                pagination_config=ctx.pag_config,
                 item_type_ast=item_type_ast,
                 item_type_imports=item_type_imports,
                 docs=ep.description,
@@ -679,7 +657,7 @@ class CoreEndpointFeature(EndpointFeature):
                 request_body_info=ep.request_body,
                 response_type=ep.response_type,
                 pagination_style=ctx.pag_config.style,
-                pagination_config=pag_dict,
+                pagination_config=ctx.pag_config,
                 item_type_ast=item_type_ast,
                 item_type_imports=item_type_imports,
                 docs=ep.description,
@@ -701,7 +679,7 @@ class CoreEndpointFeature(EndpointFeature):
                     request_body_info=ep.request_body,
                     response_type=ep.response_type,
                     pagination_style=ctx.pag_config.style,
-                    pagination_config=pag_dict,
+                    pagination_config=ctx.pag_config,
                     page_mode=cast("Literal['page', 'pages']", page_mode),
                     item_type_ast=item_type_ast,
                     item_type_imports=item_type_imports,
@@ -779,7 +757,6 @@ class DataFrameFeature(EndpointFeature):
         item_type_ast, item_type_imports = ctx.resolver.item_type_ast(
             ctx.endpoint, ctx.pag_config.data_path
         )
-        pag_dict = build_pagination_config_dict(ctx.pag_config)
 
         libraries: list[Literal['pandas', 'polars']] = []
         if cfg.dataframe.pandas:
@@ -801,7 +778,7 @@ class DataFrameFeature(EndpointFeature):
                     request_body_info=ep.request_body,
                     response_type=ep.response_type,
                     pagination_style=ctx.pag_config.style,
-                    pagination_config=pag_dict,
+                    pagination_config=ctx.pag_config,
                     library=library,
                     item_type_ast=item_type_ast,
                     item_type_imports=item_type_imports,
@@ -911,7 +888,6 @@ class ExportFeature(EndpointFeature):
 
         ep = ctx.endpoint
         default_format = formats[0] if formats else 'csv'
-        pag_dict = build_pagination_config_dict(ctx.pag_config)
         for is_async, base_name in ctx.name_pairs:
             fn_name = f'{base_name}_export'
             fn, imports = build_standalone_paginated_export_fn(
@@ -926,7 +902,7 @@ class ExportFeature(EndpointFeature):
                 default_format=default_format,
                 default_batch_size=cfg.export.batch_size,
                 pagination_style=ctx.pag_config.style,
-                pagination_config=pag_dict,
+                pagination_config=ctx.pag_config,
             )
             sink.add(fn, fn_name, imports)
         return True
