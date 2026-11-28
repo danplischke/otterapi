@@ -20,8 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import GOLDEN, generate
 
 pytestmark = pytest.mark.typecheck
 
@@ -29,8 +28,6 @@ if importlib.util.find_spec('pyright') is None:  # pragma: no cover
     pytest.skip(
         'pyright not installed (uv sync --group typecheck)', allow_module_level=True
     )
-
-GOLDEN = Path(__file__).parent / 'fixtures' / 'golden'
 
 
 def _spec_path(spec: str) -> Path:
@@ -122,16 +119,14 @@ MATRIX: dict[str, tuple[str, dict]] = {
 
 def _generate_matrix(root: Path) -> None:
     for name, (spec, overrides) in MATRIX.items():
-        config = DocumentConfig.model_validate(
-            {
-                'source': str(_spec_path(spec)),
-                'output': str(root / name),
-                'base_url': 'https://example.test',
-                **overrides,
-            }
-        )
         # Skip formatting -- pyright does not care and it keeps the test fast.
-        Codegen(config, format_output=False).generate()
+        generate(
+            _spec_path(spec),
+            root / name,
+            base_url='https://example.test',
+            format_output=False,
+            **overrides,
+        )
 
 
 def _run_pyright(root: Path) -> list[dict]:

@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import ast
 import copy
-import importlib
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +23,7 @@ import pytest
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate, import_fresh
 
 CORE_ENTRY = {
     'type': 'object',
@@ -72,11 +71,7 @@ UNTYPED_ERROR_SPEC: dict[str, Any] = {
 
 def _generate(tmp_path: Path, spec: dict, name: str = 'pkg') -> Path:
     """Generate *spec* into ``tmp_path/name`` and return the package directory."""
-    spec_file = tmp_path / 'openapi.json'
-    spec_file.write_text(json.dumps(spec), encoding='utf-8')
-    output = tmp_path / name
-    Codegen(DocumentConfig(source=str(spec_file), output=str(output))).generate()
-    return output
+    return generate(spec, tmp_path / name)
 
 
 def _return_annotation(output: Path, function: str) -> str:
@@ -250,20 +245,7 @@ class TestGeneratedClientReturnsTheTypedModel:
         parent = tmp_path_factory.mktemp('error_union')
         _generate(parent, UNTYPED_ERROR_SPEC, name=package)
 
-        sys.path.insert(0, str(parent))
-        try:
-            for stale in [
-                mod
-                for mod in list(sys.modules)
-                if mod == package or mod.startswith(package + '.')
-            ]:
-                sys.modules.pop(stale, None)
-            yield importlib.import_module(package)
-        finally:
-            try:
-                sys.path.remove(str(parent))
-            except ValueError:
-                pass
+        yield import_fresh(parent, package)
 
     @staticmethod
     def _handler(request: httpx2.Request) -> httpx2.Response:

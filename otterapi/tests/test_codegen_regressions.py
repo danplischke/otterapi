@@ -12,18 +12,14 @@ Each case compiled and imported but generated the wrong thing, silently:
    YAML read as booleans must not break them.
 """
 
-import importlib
-import json
-import sys
 from enum import StrEnum
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
-from otterapi.codegen.codegen import Codegen
 from otterapi.codegen.types import _PYDANTIC_RESERVED_NAMES
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate_package
 
 
 def _spec(schemas: dict, paths: dict | None = None) -> dict:
@@ -54,24 +50,14 @@ def _spec(schemas: dict, paths: dict | None = None) -> dict:
 
 def _generate(tmp_path: Path, name: str, spec: dict, **overrides):
     """Generate a package from ``spec`` and import it fresh."""
-    spec_file = tmp_path / f'{name}.json'
-    spec_file.write_text(json.dumps(spec))
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(spec_file),
-            'output': str(tmp_path / name),
-            'base_url': 'https://example.test',
-            **overrides,
-        }
+    return generate_package(
+        tmp_path,
+        name,
+        spec,
+        base_url='https://example.test',
+        format_output=False,
+        **overrides,
     )
-    Codegen(config, format_output=False).generate()
-    sys.path.insert(0, str(tmp_path))
-    try:
-        for mod in [m for m in sys.modules if m == name or m.startswith(name + '.')]:
-            sys.modules.pop(mod)
-        return importlib.import_module(name)
-    finally:
-        sys.path.remove(str(tmp_path))
 
 
 def _object(properties: dict, **extra) -> dict:

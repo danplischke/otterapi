@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import sys
 from pathlib import Path
 
 from pydantic import TypeAdapter
@@ -14,6 +13,7 @@ from otterapi.codegen.types import Type, TypeGenerator
 from otterapi.config import DocumentConfig
 from otterapi.openapi import UniversalOpenAPI
 from otterapi.openapi.v3_2.v3_2 import OpenAPI
+from otterapi.tests.helpers import import_fresh
 
 
 def _create_type_generator(spec: dict) -> TypeGenerator:
@@ -47,24 +47,6 @@ def _openapi_spec(*, schemas: dict, response_ref: str, operation_id: str) -> dic
     }
 
 
-def _import_generated(parent_dir: Path, package_name: str, module_name: str):
-    sys.path.insert(0, str(parent_dir))
-    try:
-        stale = [
-            mod
-            for mod in list(sys.modules)
-            if mod == package_name or mod.startswith(package_name + '.')
-        ]
-        for mod in stale:
-            sys.modules.pop(mod, None)
-        return importlib.import_module(f'{package_name}.{module_name}')
-    finally:
-        try:
-            sys.path.remove(str(parent_dir))
-        except ValueError:
-            pass
-
-
 def _generate_models_module(tmp_path: Path, spec: dict, package_name: str):
     spec_file = tmp_path / f'{package_name}.json'
     spec_file.write_text(json.dumps(spec), encoding='utf-8')
@@ -78,7 +60,8 @@ def _generate_models_module(tmp_path: Path, spec: dict, package_name: str):
     Codegen(config).generate()
 
     models_source = (output_dir / 'models.py').read_text(encoding='utf-8')
-    models_module = _import_generated(tmp_path, package_name, 'models')
+    import_fresh(tmp_path, package_name)
+    models_module = importlib.import_module(f'{package_name}.models')
     return models_module, models_source
 
 

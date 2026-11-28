@@ -16,27 +16,20 @@ gate is not installed:
 """
 
 import ast
-import json
+from pathlib import Path
 
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate
 
 
-def _generate(tmp_path, spec: dict, **overrides) -> str:
+def _generate(tmp_path, spec: dict, **overrides) -> Path:
     """Generate a functions-style client and return the output dir."""
-    spec_file = tmp_path / 'openapi.json'
-    spec_file.write_text(json.dumps(spec))
-    output_dir = tmp_path / 'client'
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(spec_file),
-            'output': str(output_dir),
-            'base_url': 'https://example.test',
-            **overrides,
-        }
+    return generate(
+        spec,
+        tmp_path / 'client',
+        base_url='https://example.test',
+        format_output=False,
+        **overrides,
     )
-    Codegen(config, format_output=False).generate()
-    return output_dir
 
 
 def _field_annotations(models_src: str, class_name: str) -> dict[str, str]:

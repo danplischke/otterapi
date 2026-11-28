@@ -14,16 +14,13 @@ what exposed two bugs:
 
 import asyncio
 import csv
-import importlib
 import json
-import sys
 from pathlib import Path
 
 import httpx2
 import pytest
 
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate_package
 
 SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'discriminator' / 'spec.yaml'
 ROWS = [{'kind': 'dog', 'bark': 'woof'}, {'kind': 'cat', 'meow': 'mew'}]
@@ -31,22 +28,14 @@ EXPORT = {'enabled': True, 'formats': ['csv', 'jsonl', 'parquet']}
 
 
 def _generate(tmp_path: Path, name: str, source: Path = SPEC, **overrides):
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(source),
-            'output': str(tmp_path / name),
-            'base_url': 'https://example.test',
-            **overrides,
-        }
+    return generate_package(
+        tmp_path,
+        name,
+        source,
+        base_url='https://example.test',
+        format_output=False,
+        **overrides,
     )
-    Codegen(config, format_output=False).generate()
-    sys.path.insert(0, str(tmp_path))
-    try:
-        for mod in [m for m in sys.modules if m == name or m.startswith(name + '.')]:
-            sys.modules.pop(mod)
-        return importlib.import_module(name)
-    finally:
-        sys.path.remove(str(tmp_path))
 
 
 def _http(rows=ROWS) -> httpx2.Client:

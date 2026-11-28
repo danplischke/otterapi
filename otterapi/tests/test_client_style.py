@@ -11,7 +11,6 @@ import ast
 import importlib
 import inspect
 import json
-import sys
 from pathlib import Path
 
 import httpx2
@@ -20,6 +19,7 @@ from pydantic import ValidationError
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate, import_fresh
 
 GOLDEN = Path(__file__).parent / 'fixtures' / 'golden'
 SPEC = GOLDEN / 'constraints' / 'spec.yaml'
@@ -87,37 +87,14 @@ def _tagged_handler(request: httpx2.Request) -> httpx2.Response:
 
 
 def _generate(target: Path, **overrides) -> None:
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(SPEC),
-            'output': str(target),
-            'base_url': 'https://example.test',
-            **overrides,
-        }
-    )
-    Codegen(config).generate()
-
-
-def _import_fresh(parent: Path, package: str):
-    sys.path.insert(0, str(parent))
-    try:
-        for mod in [
-            m for m in list(sys.modules) if m == package or m.startswith(package + '.')
-        ]:
-            sys.modules.pop(mod, None)
-        return importlib.import_module(package)
-    finally:
-        try:
-            sys.path.remove(str(parent))
-        except ValueError:
-            pass
+    generate(SPEC, target, base_url='https://example.test', **overrides)
 
 
 @pytest.fixture(scope='module')
 def client_style_module(tmp_path_factory):
     parent = tmp_path_factory.mktemp('client_style')
     _generate(parent / 'cs_pkg', client_style='client')
-    return _import_fresh(parent, 'cs_pkg')
+    return import_fresh(parent, 'cs_pkg')
 
 
 @pytest.fixture(scope='module')
@@ -132,7 +109,7 @@ def resource_style_module(tmp_path_factory):
         }
     )
     Codegen(config).generate()
-    return _import_fresh(parent, 'rs_pkg')
+    return import_fresh(parent, 'rs_pkg')
 
 
 class TestPublicSurface:
@@ -227,15 +204,7 @@ class TestResourceStyle:
 
 
 def _generate_tagged(target: Path, **overrides) -> None:
-    config = DocumentConfig.model_validate(
-        {
-            'source': str(TAGGED_SPEC),
-            'output': str(target),
-            'base_url': 'https://example.test',
-            **overrides,
-        }
-    )
-    Codegen(config).generate()
+    generate(TAGGED_SPEC, target, base_url='https://example.test', **overrides)
 
 
 class TestSplitClientStyle:
@@ -255,7 +224,7 @@ class TestSplitClientStyle:
         assert (tmp_path / 'sr' / 'orders.py').exists()
         assert not (tmp_path / 'sr' / 'endpoints.py').exists()
 
-        mod = _import_fresh(tmp_path, 'sr')
+        mod = import_fresh(tmp_path, 'sr')
         assert 'Client' in mod.__all__ and 'AsyncClient' in mod.__all__
         assert 'list_users' not in mod.__all__
         with httpx2.Client(transport=httpx2.MockTransport(_tagged_handler)) as http:
@@ -269,7 +238,7 @@ class TestSplitClientStyle:
             client_style='client',
             module_split={'enabled': True, 'strategy': 'tag'},
         )
-        mod = _import_fresh(tmp_path, 'sc')
+        mod = import_fresh(tmp_path, 'sc')
         assert hasattr(mod.Client, 'list_users')
         assert hasattr(mod.Client, 'list_orders')
         with httpx2.Client(transport=httpx2.MockTransport(_tagged_handler)) as http:
@@ -283,7 +252,7 @@ class TestSplitClientStyle:
             client_style='resource',
             module_split={'enabled': True, 'strategy': 'tag'},
         )
-        mod = _import_fresh(tmp_path, 'sra')
+        mod = import_fresh(tmp_path, 'sra')
         async with httpx2.AsyncClient(
             transport=httpx2.MockTransport(_tagged_handler)
         ) as http:
@@ -321,7 +290,7 @@ class TestNestedResources:
     )
     def test_nested_chain_calls(self, tmp_path, naming, names):
         _generate_nested(tmp_path / f'nst_{naming}', naming)
-        mod = _import_fresh(tmp_path, f'nst_{naming}')
+        mod = import_fresh(tmp_path, f'nst_{naming}')
         list_users, get_user, list_invoices = names
         with httpx2.Client(transport=httpx2.MockTransport(_nested_handler)) as http:
             client = mod.Client(http_client=http)
@@ -336,7 +305,7 @@ class TestNestedResources:
     @pytest.mark.asyncio
     async def test_nested_async(self, tmp_path):
         _generate_nested(tmp_path / 'nst_a', 'path')
-        mod = _import_fresh(tmp_path, 'nst_a')
+        mod = import_fresh(tmp_path, 'nst_a')
         async with httpx2.AsyncClient(
             transport=httpx2.MockTransport(_nested_handler)
         ) as http:
@@ -347,7 +316,7 @@ class TestNestedResources:
     def test_tag_mode_stays_flat(self, tmp_path):
         # Default resource_naming keeps the single-level grouping.
         _generate_nested(tmp_path / 'nst_flat', 'tag')
-        mod = _import_fresh(tmp_path, 'nst_flat')
+        mod = import_fresh(tmp_path, 'nst_flat')
         client = mod.Client(base_url='https://example.test')
         # No nested identity.users chain; the tag/hybrid strategy groups flatly.
         assert not hasattr(getattr(client, 'identity', object()), 'users')
@@ -375,7 +344,7 @@ class TestResultObjects:
             dataframe={'enabled': True, 'pandas': True},
             export={'enabled': True, 'formats': ['csv']},
         )
-        mod = _import_fresh(tmp_path, 'ro')
+        mod = import_fresh(tmp_path, 'ro')
         out = tmp_path / 'out.csv'
         with httpx2.Client(transport=httpx2.MockTransport(_paginated_handler)) as http:
             client = mod.Client(http_client=http)
@@ -393,7 +362,7 @@ class TestResultObjects:
             pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 2},
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'roa')
+        mod = import_fresh(tmp_path, 'roa')
         async with httpx2.AsyncClient(
             transport=httpx2.MockTransport(_paginated_handler)
         ) as http:
@@ -409,7 +378,7 @@ class TestResultObjects:
             TAGGED_SPEC,
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'ros')
+        mod = import_fresh(tmp_path, 'ros')
         with httpx2.Client(transport=httpx2.MockTransport(_tagged_handler)) as http:
             client = mod.Client(http_client=http)
             listed = client.users.list_users()
@@ -430,7 +399,7 @@ class TestResultObjects:
             pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 2},
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'roc')
+        mod = import_fresh(tmp_path, 'roc')
         with httpx2.Client(transport=httpx2.MockTransport(_paginated_handler)) as http:
             q = mod.Client(http_client=http).list_items()
             assert type(q).__name__ == 'Query'
@@ -460,7 +429,7 @@ class TestNameCollisions:
             client_style='resource',
             resource_naming='path',
         )
-        mod = _import_fresh(tmp_path, 'sh')
+        mod = import_fresh(tmp_path, 'sh')
         client = mod.Client(base_url='https://example.test')
         assert callable(client.close)
         assert not isinstance(type(client).__dict__.get('close'), property)
@@ -480,7 +449,7 @@ class TestFeatureCombinations:
             pagination={'enabled': True, 'auto_detect': True, 'default_page_size': 2},
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'sro')
+        mod = import_fresh(tmp_path, 'sro')
         with httpx2.Client(transport=httpx2.MockTransport(_paginated_handler)) as http:
             client = mod.Client(http_client=http)
             q = client.items.list_items()
@@ -495,7 +464,7 @@ class TestFeatureCombinations:
             client_style='resource',
             response_unwrap={'enabled': True, 'data_path': 'data'},
         )
-        mod = _import_fresh(tmp_path, 'unw')
+        mod = import_fresh(tmp_path, 'unw')
 
         def handler(_r: httpx2.Request) -> httpx2.Response:
             return httpx2.Response(
@@ -510,7 +479,7 @@ class TestFeatureCombinations:
         _gen(
             tmp_path / 'rx', TAGGED_SPEC, client_style='resource', reexport_models=True
         )
-        mod = _import_fresh(tmp_path, 'rx')
+        mod = import_fresh(tmp_path, 'rx')
         assert 'Client' in mod.__all__
         assert 'User' in mod.__all__
 
@@ -518,7 +487,7 @@ class TestFeatureCombinations:
 class TestConfigGuards:
     def test_default_style_still_exports_functions(self, tmp_path):
         _generate(tmp_path / 'fn_pkg')
-        mod = _import_fresh(tmp_path, 'fn_pkg')
+        mod = import_fresh(tmp_path, 'fn_pkg')
         assert 'list_users' in mod.__all__
         assert 'Client' in mod.__all__
 
@@ -604,7 +573,7 @@ class TestComposedFacade:
             result_objects=True,
             **self._FEATURES,
         )
-        mod = _import_fresh(tmp_path, 'sa')
+        mod = import_fresh(tmp_path, 'sa')
         assert _own_public_methods(mod.Client) == _own_public_methods(mod.AsyncClient)
         reach = _delegated_endpoints(tmp_path / 'sa')
         assert {n.removeprefix('async_') for n in reach['async']} == reach['sync']
@@ -617,7 +586,7 @@ class TestComposedFacade:
             result_objects=True,
             **self._FEATURES,
         )
-        mod = _import_fresh(tmp_path, 'cf')
+        mod = import_fresh(tmp_path, 'cf')
 
         class Catalog:
             """A hand-written facade; only what it defines is public."""
@@ -650,7 +619,7 @@ class TestComposedFacade:
             result_objects=True,
             **self._FEATURES,
         )
-        mod = _import_fresh(tmp_path, 'cfa')
+        mod = import_fresh(tmp_path, 'cfa')
 
         class Catalog:
             def __init__(self, api):
@@ -787,7 +756,7 @@ class TestReviewRegressions:
         )
         for style in ('client', 'resource'):
             _gen(tmp_path / f'imp_{style}', spec, client_style=style)
-        mod = _import_fresh(tmp_path, 'imp_client')
+        mod = import_fresh(tmp_path, 'imp_client')
         params = inspect.signature(mod.Client.list_items).parameters
         assert 'datetime' in str(params['since'].annotation)
         assert 'UUID' in str(params['owner'].annotation)
@@ -814,7 +783,7 @@ class TestReviewRegressions:
             result_objects=True,
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'vs')
+        mod = import_fresh(tmp_path, 'vs')
         expected = {'create_export', 'get_iter', 'list_items'}
         assert expected <= _own_public_methods(mod.Client)
         assert expected <= _own_public_methods(mod.AsyncClient)
@@ -843,7 +812,7 @@ class TestReviewRegressions:
             result_objects=True,
             **features,
         )
-        mod = _import_fresh(tmp_path, 'evq')
+        mod = import_fresh(tmp_path, 'evq')
         client = mod.Client(base_url='https://example.test')
         for name in ('list_a', 'list_b', 'list_c'):
             assert isinstance(getattr(client, name)(), mod.Query), name
@@ -905,7 +874,7 @@ class TestReviewRegressions:
             result_objects=True,
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'aq')
+        mod = import_fresh(tmp_path, 'aq')
         async with httpx2.AsyncClient(
             transport=httpx2.MockTransport(_tagged_handler)
         ) as http:
@@ -944,7 +913,7 @@ class TestReviewRegressions:
             resource_naming='path',
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'nofold')
+        mod = import_fresh(tmp_path, 'nofold')
         client = mod.Client(base_url='https://example.test')
         # Every path segment is a resource -- single-operation "action"
         # segments are not folded into their parent -- and every method keeps
@@ -994,7 +963,7 @@ class TestReviewRegressions:
             result_objects=True,
             export={'enabled': True, 'formats': ['csv']},
         )
-        mod = _import_fresh(tmp_path, 'xf')
+        mod = import_fresh(tmp_path, 'xf')
         endpoints = importlib.import_module('xf.endpoints')
         seen: list[str | None] = []
 
@@ -1139,7 +1108,7 @@ class TestReviewRegressions:
         )
         src = (tmp_path / 'nsi' / '_clients.py').read_text()
         assert 'from ..' not in src
-        mod = _import_fresh(tmp_path, 'nsi')
+        mod = import_fresh(tmp_path, 'nsi')
         params = inspect.signature(mod.Client.list_users).parameters
         assert 'datetime' in str(params['since'].annotation)
 
@@ -1181,7 +1150,7 @@ class TestReviewRegressions:
             request_body={'flatten': True},
             export={'enabled': True, 'formats': ['csv']},
         )
-        mod = _import_fresh(tmp_path, 'xb')
+        mod = import_fresh(tmp_path, 'xb')
         endpoints = importlib.import_module('xb.endpoints')
         seen: list[dict] = []
 
@@ -1257,7 +1226,7 @@ class TestGeneratedIdentifiers:
             },
         )
         _gen(tmp_path / 'kw_pkg', spec, client_style='resource')
-        mod = _import_fresh(tmp_path, 'kw_pkg')
+        mod = import_fresh(tmp_path, 'kw_pkg')
         users = mod.Client(base_url='https://example.test').users
         assert _own_public_methods(type(users)) == {'import_users', 'list_users'}
 
@@ -1285,7 +1254,7 @@ class TestGeneratedIdentifiers:
             client_style='resource',
             resource_naming='path',
         )
-        mod = _import_fresh(tmp_path, 'seg_pkg')
+        mod = import_fresh(tmp_path, 'seg_pkg')
         seen: list[str] = []
         with httpx2.Client(
             transport=httpx2.MockTransport(_path_recorder(seen))
@@ -1316,7 +1285,7 @@ class TestGeneratedIdentifiers:
         ]
         assert len(class_names) == len(set(class_names)), class_names
 
-        mod = _import_fresh(tmp_path, pkg)
+        mod = import_fresh(tmp_path, pkg)
         seen: list[str] = []
         handler = _path_recorder(seen)
         if is_async:
@@ -1357,7 +1326,7 @@ class TestGeneratedIdentifiers:
         )
         Codegen(config, generate_endpoints=False).generate()
         assert not (tmp_path / 'noep_pkg' / '_clients.py').exists()
-        mod = _import_fresh(tmp_path, 'noep_pkg')
+        mod = import_fresh(tmp_path, 'noep_pkg')
         assert 'Client' in mod.__all__
 
 
@@ -1369,7 +1338,7 @@ class TestQueryIteration:
             client_style='client',
             result_objects=True,
         )
-        return _import_fresh(tmp_path, 'q_pkg')
+        return import_fresh(tmp_path, 'q_pkg')
 
     def test_iter_streams_when_paginated(self, tmp_path):
         mod = self._query_module(tmp_path)
@@ -1615,7 +1584,7 @@ class TestOperationIdNaming:
             resource_naming='operation_id',
             dataframe={'enabled': True, 'pandas': True},
         )
-        mod = _import_fresh(tmp_path, 'opn')
+        mod = import_fresh(tmp_path, 'opn')
         client = mod.Client(base_url='https://example.test')
         assert _own_public_methods(type(client.identity.users)) == {
             'create',
@@ -1663,7 +1632,7 @@ class TestOperationIdNaming:
             client_style='resource',
             resource_naming='operation_id',
         )
-        mod = _import_fresh(tmp_path, 'opd')
+        mod = import_fresh(tmp_path, 'opd')
         methods = _own_public_methods(
             type(mod.Client(base_url='https://example.test').identity.users)
         )
@@ -1717,7 +1686,7 @@ class TestExtendedReviewRegressions:
             },
         )
         _gen(tmp_path / 'both', spec, client_style='resource', resource_naming='path')
-        mod = _import_fresh(tmp_path, 'both')
+        mod = import_fresh(tmp_path, 'both')
         seen: list[str] = []
 
         def handler(request: httpx2.Request) -> httpx2.Response:
@@ -1760,7 +1729,7 @@ class TestExtendedReviewRegressions:
         path = tmp_path / f'auth_{style}.json'
         path.write_text(json.dumps(spec))
         _gen(tmp_path / f'auth_{style}', path, client_style=style)
-        mod = _import_fresh(tmp_path, f'auth_{style}')
+        mod = import_fresh(tmp_path, f'auth_{style}')
         client = mod.Client(base_url='https://example.test', oauth2='tok')
         assert client.oauth2 == 'tok'
         assert hasattr(type(client), 'oauth2_')  # the method / resource moved aside
@@ -1773,7 +1742,7 @@ class TestExtendedReviewRegressions:
             result_objects=True,
             response_unwrap={'enabled': True, 'data_path': 'data'},
         )
-        mod = _import_fresh(tmp_path, 'qnone')
+        mod = import_fresh(tmp_path, 'qnone')
 
         def handler(_r: httpx2.Request) -> httpx2.Response:
             return httpx2.Response(200, json={'status': 'ok'})
@@ -1789,7 +1758,7 @@ class TestExtendedReviewRegressions:
             module_split={'enabled': True, 'strategy': 'tag'},
             pagination={'enabled': True, 'auto_detect': True},
         )
-        mod = _import_fresh(tmp_path, 'split_errs')
+        mod = import_fresh(tmp_path, 'split_errs')
         assert issubclass(mod.NotFoundError, mod.BaseAPIError)
         assert {'BaseAPIError', 'NotFoundError', 'paginate_offset'} <= set(mod.__all__)
 

@@ -8,18 +8,15 @@ test here generates a client for one scheme type and drives it through an
 
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
 from typing import Any
 
 import httpx2
 import pytest
-import yaml
 
 from otterapi.codegen.auth import collect_auth_schemes
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import AuthConfig, DocumentConfig
+from otterapi.config import AuthConfig
+from otterapi.tests.helpers import generate_package
 
 
 def _spec(schemes: dict) -> dict:
@@ -47,24 +44,7 @@ def _spec(schemes: dict) -> dict:
 
 
 def _generate(tmp_path: Path, spec: dict, package: str, **kwargs: Any):
-    spec_file = tmp_path / 'openapi.yaml'
-    spec_file.write_text(yaml.safe_dump(spec), encoding='utf-8')
-    Codegen(
-        DocumentConfig(source=str(spec_file), output=str(tmp_path / package), **kwargs)
-    ).generate()
-
-    sys.path.insert(0, str(tmp_path))
-    try:
-        for name in [
-            m for m in list(sys.modules) if m == package or m.startswith(f'{package}.')
-        ]:
-            sys.modules.pop(name, None)
-        return importlib.import_module(package)
-    finally:
-        try:
-            sys.path.remove(str(tmp_path))
-        except ValueError:
-            pass
+    return generate_package(tmp_path, package, spec, **kwargs)
 
 
 def _send(mod, client):

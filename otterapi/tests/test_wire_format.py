@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import ast
 import datetime
-import importlib
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +26,7 @@ import yaml
 
 from otterapi.codegen.codegen import Codegen
 from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate_package
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -36,29 +35,7 @@ from otterapi.config import DocumentConfig
 
 def _generate(tmp_path: Path, spec: dict, package: str, **config_kwargs: Any):
     """Generate *spec* into an importable package and return the module."""
-    spec_file = tmp_path / 'openapi.yaml'
-    spec_file.write_text(yaml.safe_dump(spec), encoding='utf-8')
-
-    Codegen(
-        DocumentConfig(
-            source=str(spec_file),
-            output=str(tmp_path / package),
-            **config_kwargs,
-        )
-    ).generate()
-
-    sys.path.insert(0, str(tmp_path))
-    try:
-        for name in [
-            m for m in sys.modules if m == package or m.startswith(f'{package}.')
-        ]:
-            sys.modules.pop(name, None)
-        return importlib.import_module(package)
-    finally:
-        try:
-            sys.path.remove(str(tmp_path))
-        except ValueError:
-            pass
+    return generate_package(tmp_path, package, spec, **config_kwargs)
 
 
 class Recorder:

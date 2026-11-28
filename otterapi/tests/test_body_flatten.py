@@ -9,9 +9,7 @@ protocol change.
 from __future__ import annotations
 
 import datetime
-import importlib
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +23,7 @@ from otterapi.config import (
     EndpointRequestBodyConfig,
     RequestBodyConfig,
 )
+from otterapi.tests.helpers import generate_package, import_fresh
 
 _OK = {
     '200': {
@@ -119,28 +118,7 @@ SPEC: dict = {
 
 
 def _generate(tmp_path: Path, package: str, **config_kwargs: Any):
-    spec_file = tmp_path / 'openapi.yaml'
-    spec_file.write_text(yaml.safe_dump(SPEC), encoding='utf-8')
-    Codegen(
-        DocumentConfig(
-            source=str(spec_file),
-            output=str(tmp_path / package),
-            **config_kwargs,
-        )
-    ).generate()
-
-    sys.path.insert(0, str(tmp_path))
-    try:
-        for name in [
-            m for m in list(sys.modules) if m == package or m.startswith(f'{package}.')
-        ]:
-            sys.modules.pop(name, None)
-        return importlib.import_module(package)
-    finally:
-        try:
-            sys.path.remove(str(tmp_path))
-        except ValueError:
-            pass
+    return generate_package(tmp_path, package, SPEC, **config_kwargs)
 
 
 class Sent:
@@ -386,11 +364,7 @@ def test_unflattenable_bodies_keep_the_body_parameter(tmp_path: Path):
         )
     ).generate()
 
-    sys.path.insert(0, str(tmp_path))
-    try:
-        mod = importlib.import_module('flat_array')
-    finally:
-        sys.path.remove(str(tmp_path))
+    mod = import_fresh(tmp_path, 'flat_array')
     assert 'body' in inspect.signature(mod.bulk_create).parameters
 
 

@@ -7,8 +7,6 @@ to generate a real client once, then exercises retry and context-manager behavio
 from __future__ import annotations
 
 import asyncio
-import importlib
-import sys
 from inspect import signature
 from pathlib import Path
 from types import TracebackType
@@ -18,36 +16,21 @@ from unittest.mock import patch
 import httpx2
 import pytest
 
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate, import_fresh
 
 SPEC = Path(__file__).parent / 'fixtures' / 'golden' / 'constraints' / 'spec.yaml'
 
 
 def _generate(target: Path) -> None:
-    config = DocumentConfig(
-        source=str(SPEC),
-        output=str(target),
-        base_url='https://example.test',
-    )
-    Codegen(config).generate()
+    generate(SPEC, target, base_url='https://example.test')
 
 
 @pytest.fixture(scope='module')
 def retry_pkg(tmp_path_factory):
     tmp_path = tmp_path_factory.mktemp('retry_lifecycle')
     pkg = 'retry_lifecycle_pkg'
-    sys.path.insert(0, str(tmp_path))
     _generate(tmp_path / pkg)
-    for stale in [m for m in list(sys.modules) if m == pkg or m.startswith(pkg + '.')]:
-        sys.modules.pop(stale, None)
-    try:
-        yield importlib.import_module(pkg)
-    finally:
-        try:
-            sys.path.remove(str(tmp_path))
-        except ValueError:
-            pass
+    return import_fresh(tmp_path, pkg)
 
 
 class TestRetryBehavior:
