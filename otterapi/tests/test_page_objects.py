@@ -8,16 +8,13 @@ envelope fields, resuming, and parity with the item-level ``_iter``.
 from __future__ import annotations
 
 import importlib
-import sys
 from pathlib import Path
 from typing import Any
 
 import httpx2
 import pytest
-import yaml
 
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate_package
 
 TOTAL = 23
 
@@ -141,35 +138,18 @@ class Server:
         return httpx2.Response(200, json=body)
 
 
-def _generate(tmp_path: Path, package: str, **config: Any) -> None:
-    spec_file = tmp_path / 'openapi.yaml'
-    spec_file.write_text(yaml.safe_dump(SPEC), encoding='utf-8')
-    Codegen(
-        DocumentConfig(
-            source=str(spec_file),
-            output=str(tmp_path / package),
-            base_url='https://example.test',
-            pagination=PAGINATION,
-            **config,
-        )
-    ).generate()
-
-
-def _import(tmp_path: Path, name: str) -> Any:
-    sys.path.insert(0, str(tmp_path))
-    try:
-        return importlib.import_module(name)
-    finally:
-        sys.path.remove(str(tmp_path))
+def _generate(tmp_path: Path, package: str, **config: Any) -> Any:
+    config.setdefault('pagination', PAGINATION)
+    return generate_package(
+        tmp_path, package, SPEC, base_url='https://example.test', **config
+    )
 
 
 @pytest.fixture(scope='module')
 def fn_pkg(tmp_path_factory: pytest.TempPathFactory) -> Any:
     tmp_path = tmp_path_factory.mktemp('pages_fn')
-    _generate(tmp_path, 'pages_fn')
-    endpoints = _import(tmp_path, 'pages_fn.endpoints')
-    client_cls = _import(tmp_path, 'pages_fn.client').Client
-    return endpoints, client_cls
+    pkg = _generate(tmp_path, 'pages_fn')
+    return importlib.import_module('pages_fn.endpoints'), pkg.Client
 
 
 def _client(client_cls: type, server: Server) -> Any:
@@ -274,17 +254,7 @@ class TestNumberedPages:
 
 
 def test_page_variants_can_be_disabled(tmp_path: Path) -> None:
-    pagination = {**PAGINATION, 'page_variants': False}
-    spec_file = tmp_path / 'openapi.yaml'
-    spec_file.write_text(yaml.safe_dump(SPEC), encoding='utf-8')
-    Codegen(
-        DocumentConfig(
-            source=str(spec_file),
-            output=str(tmp_path / 'nopages'),
-            base_url='https://example.test',
-            pagination=pagination,
-        )
-    ).generate()
+    _generate(tmp_path, 'nopages', pagination={**PAGINATION, 'page_variants': False})
     src = (tmp_path / 'nopages' / 'endpoints.py').read_text()
     assert 'def list_users_iter(' in src
     assert 'def list_users_page(' not in src and 'def list_users_pages(' not in src
@@ -293,8 +263,9 @@ def test_page_variants_can_be_disabled(tmp_path: Path) -> None:
 @pytest.mark.parametrize('result_objects', [False, True])
 def test_class_client_exposes_pages(tmp_path: Path, result_objects: bool) -> None:
     package = f'pages_cls_{int(result_objects)}'
-    _generate(tmp_path, package, client_style='client', result_objects=result_objects)
-    pkg = _import(tmp_path, package)
+    pkg = _generate(
+        tmp_path, package, client_style='client', result_objects=result_objects
+    )
     server = Server()
     client = pkg.Client(
         http_client=httpx2.Client(

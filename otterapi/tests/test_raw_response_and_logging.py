@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import subprocess
 import sys
@@ -11,11 +10,9 @@ from typing import Any
 
 import httpx2
 import pytest
-import yaml
 
 from otterapi.codegen.client import log_env_var_name
-from otterapi.codegen.codegen import Codegen
-from otterapi.config import DocumentConfig
+from otterapi.tests.helpers import generate_package
 
 SPEC = {
     'openapi': '3.1.0',
@@ -116,18 +113,7 @@ def handler(request: httpx2.Request) -> httpx2.Response:
 
 
 def _generate(tmp_path: Path, package: str, **config: Any) -> Any:
-    spec_file = tmp_path / 'openapi.yaml'
-    spec_file.write_text(yaml.safe_dump(SPEC), encoding='utf-8')
-    Codegen(
-        DocumentConfig(source=str(spec_file), output=str(tmp_path / package), **config)
-    ).generate()
-    sys.path.insert(0, str(tmp_path))
-    try:
-        for name in [m for m in sys.modules if m.split('.')[0] == package]:
-            sys.modules.pop(name)
-        return importlib.import_module(package)
-    finally:
-        sys.path.remove(str(tmp_path))
+    return generate_package(tmp_path, package, SPEC, **config)
 
 
 def _client(pkg: Any, **kwargs: Any) -> Any:
