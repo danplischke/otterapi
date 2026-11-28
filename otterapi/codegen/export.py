@@ -39,6 +39,7 @@ from otterapi.codegen.ast_utils import (
 )
 
 if TYPE_CHECKING:
+    from otterapi.codegen.pagination import PaginationMethodConfig
     from otterapi.codegen.types import Endpoint, Parameter, RequestBodyInfo, Type
     from otterapi.config import ExportConfig, ExportFormat
 
@@ -548,7 +549,7 @@ def build_standalone_paginated_export_fn(
     default_format: str = 'csv',
     default_batch_size: int = 1000,
     pagination_style: str | None = None,
-    pagination_config: dict | None = None,
+    pagination_config: 'PaginationMethodConfig | None' = None,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ImportDict]:
     """Build an export wrapper around a paginated endpoint's ``_iter`` variant.
 
@@ -614,5 +615,7 @@ def build_standalone_paginated_export_fn(
         start_knob=pagination_start_knob(pagination_style),
         # The same default ``_iter`` declares, so an unset ``page_size`` asks
         # for the configured page size rather than a hard-coded 100.
-        default_page_size=(pagination_config or {}).get('default_page_size', 100),
+        default_page_size=(
+            pagination_config.default_page_size if pagination_config else 100
+        ),
     )

@@ -43,6 +43,8 @@ from otterapi.codegen.ast_utils import (
     _union_expr,
     annotation_includes_none,
 )
+from otterapi.codegen.pagination import PaginationMethodConfig
+from otterapi.config import PaginationStyle
 from otterapi.exceptions import ConfigurationError
 from otterapi.openapi.constants import MediaType
 
@@ -106,14 +108,6 @@ class DataFrameLibrary(Enum):
     POLARS = 'polars'
 
 
-class PaginationStyle(Enum):
-    """Pagination style for paginated endpoint functions."""
-
-    OFFSET = 'offset'
-    CURSOR = 'cursor'
-    PAGE = 'page'
-
-
 @dataclass(frozen=True)
 class _StyleSpec:
     """How one pagination style maps onto signatures, wire names and runtime.
@@ -123,8 +117,8 @@ class _StyleSpec:
         knob_type: Its type (``int`` / ``str``), always ``| None``.
         knob_default: Passed for an unset knob (``offset or 0``); None passes
             the knob as is.
-        start_key / size_key: The pagination config keys naming the spec's
-            position and page-size parameters, with their conventional names.
+        start_key / size_key: The ``PaginationMethodConfig`` attributes naming
+            the spec's position and page-size parameters.
         runtime: The item-level runtime helpers, ``paginate_<runtime>`` /
             ``iterate_<runtime>``, which take the start as ``start_<runtime>``.
         fetcher: The page-level runtime helper, which takes it as ``knob``.
@@ -133,23 +127,23 @@ class _StyleSpec:
     knob: str
     knob_type: str
     knob_default: int | None
-    start_key: tuple[str, str]
-    size_key: tuple[str, str]
+    start_key: str
+    size_key: str
     runtime: str
     fetcher: str
 
 
 _STYLES: dict[PaginationStyle, _StyleSpec] = {
     PaginationStyle.OFFSET: _StyleSpec(
-        'offset', 'int', 0, ('offset_param', 'offset'), ('limit_param', 'limit'),
+        'offset', 'int', 0, 'offset_param', 'limit_param',
         'offset', 'fetch_offset_page',
     ),
     PaginationStyle.CURSOR: _StyleSpec(
-        'cursor', 'str', None, ('cursor_param', 'cursor'), ('limit_param', 'limit'),
+        'cursor', 'str', None, 'cursor_param', 'limit_param',
         'cursor', 'fetch_cursor_page',
     ),
     PaginationStyle.PAGE: _StyleSpec(
-        'page', 'int', 1, ('page_param', 'page'), ('per_page_param', 'per_page'),
+        'page', 'int', 1, 'page_param', 'per_page_param',
         'page', 'fetch_numbered_page',
     ),
 }  # fmt: skip
@@ -174,7 +168,7 @@ def pagination_start_knob(
 
 def pagination_omits_page_size(
     pagination_style: PaginationStyle | str | None,
-    pagination_config: dict | None,
+    pagination_config: PaginationMethodConfig | None,
 ) -> bool:
     """Whether a paginated function drops its ``page_size`` knob.
 
@@ -183,12 +177,12 @@ def pagination_omits_page_size(
     """
     if _style_spec(pagination_style) is not _STYLES[PaginationStyle.CURSOR]:
         return False
-    return not (pagination_config or {}).get('send_page_size', True)
+    return not (pagination_config or PaginationMethodConfig()).send_page_size
 
 
 def pagination_fields(
     pagination_style: PaginationStyle | str | None,
-    pagination_config: dict | None,
+    pagination_config: PaginationMethodConfig | None,
 ) -> list[tuple[str, str, str]]:
     """``(wire name, fetch_page argument, location)`` of each paging field.
 
@@ -198,28 +192,16 @@ def pagination_fields(
     spec = _style_spec(pagination_style)
     if spec is None:
         return []
-    config = pagination_config or {}
-    fields = [
-        (
-            config.get(spec.start_key[0]) or spec.start_key[1],
-            '_start',
-            config.get('cursor_location', 'query'),
-        )
-    ]
+    config = pagination_config or PaginationMethodConfig()
+    fields = [(getattr(config, spec.start_key), '_start', config.cursor_location)]
     if not pagination_omits_page_size(pagination_style, config):
-        fields.append(
-            (
-                config.get(spec.size_key[0]) or spec.size_key[1],
-                '_size',
-                config.get('limit_location', 'query'),
-            )
-        )
+        fields.append((getattr(config, spec.size_key), '_size', config.limit_location))
     return fields
 
 
 def pagination_owned_param_names(
     pagination_style: PaginationStyle | str | None,
-    pagination_config: dict | None,
+    pagination_config: PaginationMethodConfig | None,
 ) -> set[str]:
     """The spec parameter names a paginated function drives itself.
 
@@ -229,16 +211,14 @@ def pagination_owned_param_names(
     spec = _style_spec(pagination_style)
     if spec is None:
         return set()
-    config = pagination_config or {}
-    return {
-        config.get(key) or fallback for key, fallback in (spec.start_key, spec.size_key)
-    }
+    config = pagination_config or PaginationMethodConfig()
+    return {getattr(config, spec.start_key), getattr(config, spec.size_key)}
 
 
 def strip_pagination_body_fields(
     request_body_info: RequestBodyInfo | None,
     pagination_style: PaginationStyle | str | None,
-    pagination_config: dict | None,
+    pagination_config: PaginationMethodConfig | None,
 ) -> RequestBodyInfo | None:
     """``request_body_info`` without the flattened fields the paginator owns."""
     if request_body_info is None or request_body_info.flattened_fields is None:
@@ -875,7 +855,7 @@ class EndpointFunctionConfig:
     dataframe_path: str | None = None
     # Pagination config
     pagination_style: PaginationStyle | None = None
-    pagination_config: dict | None = None  # Contains offset_param, limit_param, etc.
+    pagination_config: PaginationMethodConfig | None = None
     is_iterator: bool = False  # If True, generates _iter function
     # 'page' -> one Page (the ``_page`` variant); 'pages' -> an iterator of
     # pages (``_pages``); None -> the item-level functions.
@@ -1014,8 +994,8 @@ class EndpointFunctionFactory:
 
     def _add_pagination_parameters(self, builder: FunctionSignatureBuilder) -> None:
         """Add pagination-specific parameters to the signature builder."""
-        pag_config = self.config.pagination_config or {}
-        default_page_size = pag_config.get('default_page_size', 100)
+        pag_config = self.config.pagination_config or PaginationMethodConfig()
+        default_page_size = pag_config.default_page_size
 
         # offset: int | None = None  /  cursor: str | None  /  page: int | None
         start_knob = pagination_start_knob(self.config.pagination_style)
@@ -1314,10 +1294,10 @@ class EndpointFunctionFactory:
         return spec
 
     def _next_cursor_getter(
-        self, pag_config: dict, extract_items: ast.Lambda
+        self, pag_config: PaginationMethodConfig, extract_items: ast.Lambda
     ) -> ast.expr:
         """``get_next_cursor``: from the response, from the last item, or None."""
-        if pag_config.get('next_cursor_from') == 'last_item':
+        if pag_config.next_cursor_from == 'last_item':
             # lambda page: last_item_value(<items of page>, 'cursor')
             return ast.Lambda(
                 args=copy.deepcopy(extract_items.args),
@@ -1326,12 +1306,12 @@ class EndpointFunctionFactory:
                     args=[
                         copy.deepcopy(extract_items.body),
                         ast.Constant(
-                            value=pag_config.get('next_cursor_item_path') or 'cursor'
+                            value=pag_config.next_cursor_item_path or 'cursor'
                         ),
                     ],
                 ),
             )
-        next_cursor_path = pag_config.get('next_cursor_path')
+        next_cursor_path = pag_config.next_cursor_path
         if next_cursor_path:
             return self._build_extract_lambda(next_cursor_path)
         return ast.Lambda(
@@ -1349,8 +1329,8 @@ class EndpointFunctionFactory:
         """
         spec = self._spec()
         style = self.config.pagination_style
-        pag_config = self.config.pagination_config or {}
-        extract_items = self._build_extract_lambda(pag_config.get('data_path'))
+        pag_config = self.config.pagination_config or PaginationMethodConfig()
+        extract_items = self._build_extract_lambda(pag_config.data_path)
         keywords = [
             ast.keyword(arg='fetch_page', value=_name('fetch_page')),
             ast.keyword(arg='extract_items', value=extract_items),
@@ -1362,21 +1342,16 @@ class EndpointFunctionFactory:
                     value=self._next_cursor_getter(pag_config, extract_items),
                 )
             )
-        getters = (
-            [('get_total_pages', 'total_pages_path')]
-            if style == PaginationStyle.PAGE
-            else []
-        )
+        getters: list[tuple[str, str | None]] = []
+        if style == PaginationStyle.PAGE:
+            getters.append(('get_total_pages', pag_config.total_pages_path))
         # paginate_page / iterate_page take no get_total.
         if prefix is None or style != PaginationStyle.PAGE:
-            getters.append(('get_total', 'total_path'))
-        for keyword, path_key in getters:
-            if pag_config.get(path_key):
+            getters.append(('get_total', pag_config.total_path))
+        for keyword, path in getters:
+            if path:
                 keywords.append(
-                    ast.keyword(
-                        arg=keyword,
-                        value=self._build_extract_lambda(pag_config[path_key]),
-                    )
+                    ast.keyword(arg=keyword, value=self._build_extract_lambda(path))
                 )
         start: ast.expr = _name(spec.knob)
         if spec.knob_default is not None:
@@ -1591,7 +1566,7 @@ class EndpointFunctionFactory:
 
     def _build_fetch_page_params_dict(self) -> ast.Dict:
         """The ``params`` dict: query-located paging fields plus passthrough params."""
-        pag_config = self.config.pagination_config or {}
+        pag_config = self.config.pagination_config or PaginationMethodConfig()
         fields = pagination_fields(self.config.pagination_style, pag_config)
         param_keys: list[ast.expr | None] = [
             ast.Constant(value=wire) for wire, _, loc in fields if loc == 'query'
@@ -1600,11 +1575,11 @@ class EndpointFunctionFactory:
             _name(arg) for _, arg, loc in fields if loc == 'query'
         ]
         skip_params = {
-            pag_config.get('offset_param'),
-            pag_config.get('limit_param'),
-            pag_config.get('cursor_param'),
-            pag_config.get('page_param'),
-            pag_config.get('per_page_param'),
+            pag_config.offset_param,
+            pag_config.limit_param,
+            pag_config.cursor_param,
+            pag_config.page_param,
+            pag_config.per_page_param,
         }
         for param in self.config.parameters or []:
             if param.location == 'query' and param.name not in skip_params:
@@ -2821,7 +2796,7 @@ def build_standalone_paginated_dataframe_fn(
     request_body_info: RequestBodyInfo | None,
     response_type: Type | None,
     pagination_style: str,
-    pagination_config: dict,
+    pagination_config: PaginationMethodConfig,
     library: Literal['pandas', 'polars'],
     item_type_ast: ast.expr | None = None,
     item_type_imports: dict[str, set[str]] | None = None,
@@ -2840,7 +2815,7 @@ def build_standalone_paginated_dataframe_fn(
         request_body_info: RequestBodyInfo object for the request body, or None.
         response_type: The response Type for parsing.
         pagination_style: The pagination style ('offset', 'cursor', 'page').
-        pagination_config: Dict with pagination parameter names and paths.
+        pagination_config: The resolved pagination config for the endpoint.
         library: The DataFrame library ('pandas' or 'polars').
         item_type_ast: AST for the item type in the list.
         item_type_imports: Imports needed for the item type.
@@ -2881,7 +2856,7 @@ def build_standalone_paginated_fn(
     request_body_info: RequestBodyInfo | None,
     response_type: Type | None,
     pagination_style: str,
-    pagination_config: dict,
+    pagination_config: PaginationMethodConfig,
     item_type_ast: ast.expr | None = None,
     item_type_imports: dict[str, set[str]] | None = None,
     docs: str | None = None,
@@ -2899,7 +2874,7 @@ def build_standalone_paginated_fn(
         request_body_info: RequestBodyInfo object for the request body, or None.
         response_type: The response Type for parsing.
         pagination_style: The pagination style ('offset', 'cursor', 'page').
-        pagination_config: Dict with pagination parameter names and paths.
+        pagination_config: The resolved pagination config for the endpoint.
         item_type_ast: AST for the item type in the list.
         item_type_imports: Imports needed for the item type.
         docs: Optional docstring for the generated function.
@@ -2934,7 +2909,7 @@ def build_standalone_page_fn(
     request_body_info: RequestBodyInfo | None,
     response_type: Type | None,
     pagination_style: str,
-    pagination_config: dict,
+    pagination_config: PaginationMethodConfig,
     page_mode: Literal['page', 'pages'],
     item_type_ast: ast.expr | None = None,
     item_type_imports: dict[str, set[str]] | None = None,
@@ -2972,7 +2947,7 @@ def build_standalone_paginated_iter_fn(
     request_body_info: RequestBodyInfo | None,
     response_type: Type | None,
     pagination_style: str,
-    pagination_config: dict,
+    pagination_config: PaginationMethodConfig,
     item_type_ast: ast.expr | None = None,
     item_type_imports: dict[str, set[str]] | None = None,
     docs: str | None = None,
@@ -2990,7 +2965,7 @@ def build_standalone_paginated_iter_fn(
         request_body_info: RequestBodyInfo object for the request body, or None.
         response_type: The response Type for parsing.
         pagination_style: The pagination style ('offset', 'cursor', 'page').
-        pagination_config: Dict with pagination parameter names and paths.
+        pagination_config: The resolved pagination config for the endpoint.
         item_type_ast: AST for the item type in the list.
         item_type_imports: Imports needed for the item type.
         docs: Optional docstring for the generated function.
