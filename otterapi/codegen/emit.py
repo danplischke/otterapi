@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
@@ -57,9 +58,11 @@ from otterapi.codegen.endpoints import (
     build_default_client_code,
     build_standalone_dataframe_fn,
     build_standalone_endpoint_fn,
+    build_standalone_page_fn,
     build_standalone_paginated_dataframe_fn,
     build_standalone_paginated_fn,
     build_standalone_paginated_iter_fn,
+    endpoint_supports_with_response,
 )
 from otterapi.codegen.export import (
     build_standalone_export_fn,
@@ -67,6 +70,7 @@ from otterapi.codegen.export import (
 )
 from otterapi.codegen.pagination import get_pagination_config_for_endpoint
 from otterapi.codegen.types import collect_used_model_names
+from otterapi.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from otterapi.codegen.pagination import PaginationMethodConfig
@@ -78,6 +82,8 @@ if TYPE_CHECKING:
         PaginationConfig,
         ResponseUnwrapConfig,
     )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -103,6 +109,7 @@ class EmitConfig:
     export: ExportConfig | None
     generate_sync: bool = True
     generate_async: bool = True
+    raw_response: bool = False
 
     @classmethod
     def from_document(cls, config: DocumentConfig) -> EmitConfig:
@@ -114,6 +121,7 @@ class EmitConfig:
             export=config.export,
             generate_sync=config.generate_sync,
             generate_async=config.generate_async,
+            raw_response=config.raw_response,
         )
 
     @property
@@ -126,6 +134,13 @@ class EmitConfig:
 
 
 _ENUM_BASES = frozenset({'Enum', 'StrEnum', 'IntEnum'})
+
+#: Whether a response type carries a field path; see
+#: :meth:`TypeResolver.field_path_status`.
+FieldStatus = Literal['present', 'absent', 'unknown']
+
+#: Builtins a JSON response can parse into that have no named fields.
+_NO_FIELD_NAMES = frozenset({'int', 'float', 'str', 'bool', 'bytes', 'list', 'dict'})
 
 
 def _strip_annotated(node: ast.expr) -> ast.expr:
@@ -157,12 +172,7 @@ def _union_members(node: ast.expr) -> list[ast.expr]:
 
 
 class TypeResolver:
-    """Owns the type-introspection helpers, seeded once with the generated types.
-
-    These previously existed as identical private methods on both ``Codegen`` and
-    ``SplitModuleEmitter``. Behaviour is unchanged; the split path's cleaner
-    ``_lookup_response_field_annotation`` factoring is adopted here.
-    """
+    """Owns the type-introspection helpers, seeded once with the generated types."""
 
     def __init__(self, typegen_types: dict[str, Type]):
         self._types = typegen_types
@@ -203,74 +213,113 @@ class TypeResolver:
             return item, self.collect_model_imports_from_ast(item)
 
         if data_path:
-            field_ast = self._lookup_response_field_annotation(endpoint, data_path)
-            item = self._list_item_type(field_ast)
+            item = self._list_item_type(self._resolve(endpoint, data_path)[1])
             if item is not None:
                 return item, self.collect_model_imports_from_ast(item)
 
         return None, {}
 
     # -- response-model field lookup ------------------------------------------
+    #
+    # Generated models never allow extra fields (pydantic's default is
+    # ``extra='ignore'``; ``additionalProperties: false`` becomes ``forbid``),
+    # so a field a model does not declare is never an attribute at runtime.
 
-    @staticmethod
-    def _resolve_response_type_name(endpoint: Endpoint) -> str | None:
-        """Resolve the model name backing an endpoint's response type.
-
-        Union response types (e.g. ``SuccessResponse | ErrorResponse``) have no
-        name on ``response_type`` directly, so fall back to the 2xx success
-        response in ``response_infos``.
-        """
-        type_name = endpoint.response_type.name if endpoint.response_type else None
-        if type_name or not endpoint.response_infos:
-            return type_name
-
-        for response_info in endpoint.response_infos:
-            if 200 <= response_info.status_code < 300 and response_info.type:
-                return response_info.type.name
-
-        return None
-
-    @staticmethod
-    def _find_field_annotation(
-        class_def: ast.ClassDef, field_name: str
-    ) -> ast.expr | None:
-        """Find the annotation AST for a field declared in a class body."""
-        for stmt in class_def.body:
+    def _class_field(self, class_name: str, field_name: str) -> ast.expr | None:
+        """``field_name``'s annotation on a generated class or its generated bases."""
+        type_def = self._types.get(class_name)
+        impl = type_def.implementation_ast if type_def else None
+        if not isinstance(impl, ast.ClassDef):
+            return None
+        for stmt in impl.body:
             if (
                 isinstance(stmt, ast.AnnAssign)
                 and isinstance(stmt.target, ast.Name)
                 and stmt.target.id == field_name
             ):
                 return stmt.annotation
+        for base in impl.bases:
+            if isinstance(base, ast.Name) and base.id != class_name:
+                found = self._class_field(base.id, field_name)
+                if found is not None:
+                    return found
         return None
 
-    def _lookup_response_field_annotation(
+    def _step(
+        self, annotation: ast.expr, field_name: str
+    ) -> tuple[FieldStatus, ast.expr | None]:
+        """Status (and annotation, when unambiguous) of ``.field_name`` on a type."""
+        results: list[tuple[FieldStatus, ast.expr | None]] = []
+        for member in _union_members(_strip_annotated(annotation)):
+            if isinstance(member, ast.Constant) and member.value is None:
+                continue
+            name = member.value if isinstance(member, ast.Subscript) else member
+            if isinstance(member, ast.Name) and isinstance(
+                getattr(self._types.get(member.id), 'implementation_ast', None),
+                ast.ClassDef,
+            ):
+                found = self._class_field(member.id, field_name)
+                results.append(
+                    ('present', found) if found is not None else ('absent', None)
+                )
+            elif isinstance(name, ast.Name) and name.id in _NO_FIELD_NAMES:
+                results.append(('absent', None))
+            else:
+                results.append(('unknown', None))
+        statuses = {status for status, _ in results}
+        if not results or statuses == {'absent'}:
+            return 'absent', None
+        if statuses == {'present'}:
+            return 'present', results[0][1] if len(results) == 1 else None
+        return 'unknown', None
+
+    def _resolve(
         self, endpoint: Endpoint, field_path: str
-    ) -> ast.expr | None:
-        """Return the annotation AST for the first segment of ``field_path``."""
-        if not endpoint.response_type:
-            return None
+    ) -> tuple[FieldStatus, ast.expr | None]:
+        """Whether every 2xx response of ``endpoint`` has ``field_path``, and its type.
 
-        field_name = field_path.split('.')[0]
-        type_name = self._resolve_response_type_name(endpoint)
-        if not type_name:
-            return None
+        ``'absent'`` means ``result.<path>`` would raise ``AttributeError`` (no
+        JSON response, a builtin, or a model without that field); ``'unknown'``
+        that the type could not be resolved far enough to tell. The annotation
+        is the first 2xx response's, when the path is present.
+        """
+        annotations: list[ast.expr | None] = [
+            info.type.annotation_ast
+            for info in endpoint.response_infos or []
+            if 200 <= info.status_code < 300
+            and info.type is not None
+            and info.type.annotation_ast is not None
+        ]
+        if not annotations and endpoint.response_type:
+            annotations = [endpoint.response_type.annotation_ast]
+        statuses: set[FieldStatus] = set()
+        first: ast.expr | None = None
+        for current in annotations:
+            status: FieldStatus = 'absent' if current is None else 'present'
+            for part in field_path.split('.'):
+                if current is None:
+                    break
+                status, current = self._step(current, part)
+                if status != 'present':
+                    break
+            statuses.add(status)
+            if first is None and status == 'present':
+                first = current
+        if not statuses or 'absent' in statuses:
+            return 'absent', None
+        if 'unknown' in statuses:
+            return 'unknown', None
+        return 'present', first
 
-        type_def = self._types.get(type_name)
-        if not type_def or not type_def.implementation_ast:
-            return None
-
-        impl = type_def.implementation_ast
-        if not isinstance(impl, ast.ClassDef):
-            return None
-
-        return self._find_field_annotation(impl, field_name)
+    def field_path_status(self, endpoint: Endpoint, field_path: str) -> FieldStatus:
+        """Whether every success response of ``endpoint`` has ``field_path``."""
+        return self._resolve(endpoint, field_path)[0]
 
     def unwrapped_type_ast(
         self, endpoint: Endpoint, data_path: str
     ) -> tuple[ast.expr | None, dict[str, set[str]]]:
-        """Extract the type AST (and imports) for the unwrapped data field."""
-        annotation = self._lookup_response_field_annotation(endpoint, data_path)
+        """The type (and imports) of ``result.<data_path>``, if it resolves."""
+        annotation = self._resolve(endpoint, data_path)[1]
         if annotation is None:
             return None, {}
         return annotation, self.collect_model_imports_from_ast(annotation)
@@ -333,6 +382,66 @@ class TypeResolver:
         return collect_used_model_names(endpoints, self._types)
 
 
+def _warn_if_looks_paginated(
+    endpoint: Endpoint, pagination: PaginationConfig, resolver: TypeResolver
+) -> None:
+    """Warn when an unpaginated endpoint returns an items list and a total.
+
+    Its DataFrame / export helpers would silently return only the first page.
+    """
+    if endpoint.config_name in pagination.endpoints:
+        return
+    data_path = pagination.default_data_path
+    total_path = pagination.default_total_path
+    if not data_path or not total_path:
+        return
+    if resolver.field_path_status(endpoint, data_path) != 'present':
+        return
+    if resolver.field_path_status(endpoint, total_path) != 'present':
+        return
+    logger.warning(
+        '%s (%s %s) returns a %r list with a %r count but is not paginated, so '
+        'its DataFrame/export helpers return only the first page. Configure it '
+        'under pagination.endpoints.%s (use cursor_location: body for request '
+        'bodies), or set enabled: false there to silence this warning.',
+        endpoint.sync_fn_name,
+        endpoint.method.upper(),
+        endpoint.path,
+        data_path,
+        total_path,
+        endpoint.config_name,
+    )
+
+
+def _unwrap_applies(
+    endpoint: Endpoint,
+    unwrap_path: str,
+    unwrap_config: ResponseUnwrapConfig,
+    resolver: TypeResolver,
+) -> bool:
+    """Whether ``result.<unwrap_path>`` exists on the endpoint's response.
+
+    A missing default path skips the unwrap; a missing per-endpoint path is an
+    error. Unresolvable types still unwrap.
+    """
+    status = resolver.field_path_status(endpoint, unwrap_path)
+    if status != 'absent':
+        return True
+    if unwrap_config.has_explicit_path(endpoint.config_name):
+        raise ConfigurationError(
+            f'response_unwrap.endpoints.{endpoint.config_name}.data_path '
+            f'{unwrap_path!r} does not exist on the response of '
+            f'{endpoint.method.upper()} {endpoint.path}',
+            field=f'response_unwrap.endpoints.{endpoint.config_name}.data_path',
+        )
+    logger.debug(
+        'Not unwrapping %s: its response has no %r field',
+        endpoint.sync_fn_name,
+        unwrap_path,
+    )
+    return False
+
+
 @dataclass
 class EndpointContext:
     """Everything :func:`emit_endpoint` needs for a single endpoint, resolved once.
@@ -358,16 +467,22 @@ class EndpointContext:
         pagination = config.pagination
         if pagination is not None and pagination.enabled:
             pag_config = get_pagination_config_for_endpoint(
-                endpoint.sync_fn_name, pagination, endpoint.parameters
+                endpoint.config_name, pagination, endpoint.parameters
             )
+            if pag_config is None:
+                _warn_if_looks_paginated(endpoint, pagination, resolver)
 
         should_unwrap, unwrap_path = False, None
         if config.response_unwrap:
             should_unwrap, unwrap_path = (
                 config.response_unwrap.get_unwrap_config_for_endpoint(
-                    endpoint.sync_fn_name
+                    endpoint.config_name
                 )
             )
+            if should_unwrap and unwrap_path:
+                should_unwrap = _unwrap_applies(
+                    endpoint, unwrap_path, config.response_unwrap, resolver
+                )
 
         name_pairs: list[tuple[bool, str]] = []
         if config.generate_sync:
@@ -402,9 +517,26 @@ class EmitSink:
     #: functions by endpoint / resource.
     owners: dict[str, Endpoint] = field(default_factory=dict)
     _current_endpoint: Endpoint | None = None
+    _seen: set[str] = field(default_factory=set)
 
     def add(self, fn: ast.stmt, name: str, imports: dict[str, set[str]]) -> None:
-        """Append a generated function, record its name, and merge its imports."""
+        """Append a generated function; a duplicate name fails generation."""
+        if name in self._seen:
+            first = self.owners.get(name)
+            second = self._current_endpoint
+            described = ' and '.join(
+                f'{ep.method.upper()} {ep.path}'
+                for ep in (first, second)
+                if ep is not None
+            )
+            raise ConfigurationError(
+                f'two generated functions are named {name!r}'
+                + (f' ({described})' if described else '')
+                + '; rename one with naming.overrides, or turn off the variant '
+                'that collides (e.g. pagination.page_variants: false)',
+                field='naming.overrides',
+            )
+        self._seen.add(name)
         self.body.append(fn)
         self.names.append(name)
         self.imports.add_imports(imports)
@@ -426,6 +558,10 @@ def build_pagination_config_dict(pag_config: PaginationMethodConfig) -> dict:
         'total_pages_path': pag_config.total_pages_path,
         'default_page_size': pag_config.default_page_size,
         'send_page_size': pag_config.send_page_size,
+        'cursor_location': pag_config.cursor_location,
+        'limit_location': pag_config.limit_location,
+        'next_cursor_from': pag_config.next_cursor_from,
+        'next_cursor_item_path': pag_config.next_cursor_item_path,
     }
 
 
@@ -483,23 +619,31 @@ class CoreEndpointFeature(EndpointFeature):
                 ep.response_type.annotation_ast
             )
 
-        for is_async, fn_name in ctx.name_pairs:
-            fn, imports = build_standalone_endpoint_fn(
-                fn_name=fn_name,
-                method=ep.method,
-                path=ep.path,
-                parameters=ep.parameters,
-                request_body_info=ep.request_body,
-                response_type=ep.response_type,
-                response_infos=ep.response_infos,
-                docs=ep.description,
-                is_async=is_async,
-                unwrap_data_path=ctx.unwrap_path if ctx.should_unwrap else None,
-                unwrap_type_ast=unwrap_type_ast,
-                unwrap_type_imports=unwrap_type_imports,
-                response_type_imports=response_type_imports,
-            )
-            sink.add(fn, fn_name, imports)
+        variants = [('', False)]
+        if ctx.config.raw_response and endpoint_supports_with_response(
+            ep.response_type
+        ):
+            variants.append(('_with_response', True))
+        for suffix, with_response in variants:
+            for is_async, base_name in ctx.name_pairs:
+                fn_name = f'{base_name}{suffix}'
+                fn, imports = build_standalone_endpoint_fn(
+                    fn_name=fn_name,
+                    method=ep.method,
+                    path=ep.path,
+                    parameters=ep.parameters,
+                    request_body_info=ep.request_body,
+                    response_type=ep.response_type,
+                    response_infos=ep.response_infos,
+                    docs=ep.description,
+                    is_async=is_async,
+                    unwrap_data_path=ctx.unwrap_path if ctx.should_unwrap else None,
+                    unwrap_type_ast=unwrap_type_ast,
+                    unwrap_type_imports=unwrap_type_imports,
+                    response_type_imports=response_type_imports,
+                    with_response=with_response,
+                )
+                sink.add(fn, fn_name, imports)
 
     def _emit_paginated(self, ctx: EndpointContext, sink: EmitSink) -> None:
         ep = ctx.endpoint
@@ -544,6 +688,29 @@ class CoreEndpointFeature(EndpointFeature):
             )
             sink.add(fn, iter_fn_name, imports)
 
+        pagination = ctx.config.pagination
+        if pagination is None or not pagination.page_variants:
+            return
+        for page_mode, suffix in (('page', '_page'), ('pages', '_pages')):
+            for is_async, base_fn_name in ctx.name_pairs:
+                page_fn_name = f'{base_fn_name}{suffix}'
+                fn, imports = build_standalone_page_fn(
+                    fn_name=page_fn_name,
+                    method=ep.method,
+                    path=ep.path,
+                    parameters=ep.parameters,
+                    request_body_info=ep.request_body,
+                    response_type=ep.response_type,
+                    pagination_style=ctx.pag_config.style,
+                    pagination_config=pag_dict,
+                    page_mode=cast("Literal['page', 'pages']", page_mode),
+                    item_type_ast=item_type_ast,
+                    item_type_imports=item_type_imports,
+                    docs=ep.description,
+                    is_async=is_async,
+                )
+                sink.add(fn, page_fn_name, imports)
+
     def file_imports(self, sink: EmitSink) -> list[ast.stmt]:
         if not sink.has_pagination:
             return []
@@ -564,6 +731,16 @@ class CoreEndpointFeature(EndpointFeature):
                     'iterate_page',
                     'iterate_page_async',
                     'extract_path',
+                    'merge_body_fields',
+                    'last_item_value',
+                    'Page',
+                    'AsyncPage',
+                    'fetch_offset_page',
+                    'fetch_offset_page_async',
+                    'fetch_cursor_page',
+                    'fetch_cursor_page_async',
+                    'fetch_numbered_page',
+                    'fetch_numbered_page_async',
                 }
             }
         )
@@ -596,7 +773,7 @@ class DataFrameFeature(EndpointFeature):
             return False
         assert cfg.dataframe is not None and ctx.pag_config is not None
 
-        endpoint_df_config = cfg.dataframe.endpoints.get(ctx.endpoint.sync_fn_name)
+        endpoint_df_config = cfg.dataframe.endpoints.get(ctx.endpoint.config_name)
         if endpoint_df_config and endpoint_df_config.enabled is False:
             return False
 
@@ -727,7 +904,7 @@ class ExportFeature(EndpointFeature):
             return False
 
         should_generate, formats, _path = cfg.export.should_generate_for_endpoint(
-            endpoint_name=ctx.endpoint.sync_fn_name,
+            endpoint_name=ctx.endpoint.config_name,
             returns_list=True,
         )
         if not should_generate:
@@ -776,7 +953,7 @@ class ExportFeature(EndpointFeature):
             return False
 
         should_generate, formats, _path = cfg.export.should_generate_for_endpoint(
-            endpoint_name=ctx.endpoint.sync_fn_name,
+            endpoint_name=ctx.endpoint.config_name,
             returns_list=True,
         )
         if not should_generate:

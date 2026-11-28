@@ -129,7 +129,7 @@ def get_export_config_for_endpoint(
 
     returns_list = _returns_list(endpoint.response_type, unwrap_type_ast)
     should_generate, formats, path = export_config.should_generate_for_endpoint(
-        endpoint_name=endpoint.sync_fn_name,
+        endpoint_name=endpoint.config_name,
         returns_list=returns_list,
     )
     return ExportMethodConfig(
@@ -588,9 +588,13 @@ def build_standalone_paginated_export_fn(
         pagination_omits_page_size,
         pagination_owned_param_names,
         pagination_start_knob,
+        strip_pagination_body_fields,
     )
 
     owned = pagination_owned_param_names(pagination_style, pagination_config)
+    request_body_info = strip_pagination_body_fields(
+        request_body_info, pagination_style, pagination_config
+    )
     filtered_parameters = (
         [p for p in parameters if p.name not in owned] if parameters else parameters
     )

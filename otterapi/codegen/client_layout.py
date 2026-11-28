@@ -74,6 +74,8 @@ _VARIANT_BINDINGS: tuple[tuple[str, str], ...] = (
     ('_pl', 'to_polars'),
     ('_iter', 'iterate'),
     ('_export', 'export'),
+    ('_pages', 'pages'),
+    ('_page', 'page'),
 )
 _SUFFIX_BINDINGS: dict[str, str] = dict(_VARIANT_BINDINGS)
 
@@ -698,7 +700,15 @@ def _query_method(
     params_dict = ast.Dict(keys=keys, values=values)
 
     query_cls = 'AsyncQuery' if is_async else 'Query'
-    binding_order = ('fetch', 'to_pandas', 'to_polars', 'iterate', 'export')
+    binding_order = (
+        'fetch',
+        'to_pandas',
+        'to_polars',
+        'iterate',
+        'export',
+        'page',
+        'pages',
+    )
     call_keywords = [
         ast.keyword(arg=binding, value=_attr(call_alias, variants[binding].name))
         for binding in binding_order

@@ -224,6 +224,40 @@ class EndpointPaginationConfig(BaseModel):
         ),
     )
 
+    cursor_location: Literal['query', 'body'] | None = Field(
+        default=None,
+        description=(
+            'Where to send the position parameter (offset, cursor or page): the '
+            "query string ('query', the default) or a field of the JSON request "
+            "body ('body'), for POST endpoints that page through their body."
+        ),
+    )
+
+    limit_location: Literal['query', 'body'] | None = Field(
+        default=None,
+        description=(
+            'Where to send the page-size parameter. Defaults to cursor_location.'
+        ),
+    )
+
+    next_cursor_from: Literal['response', 'last_item'] | None = Field(
+        default=None,
+        description=(
+            "Where the next cursor comes from (cursor style): 'response' reads "
+            "next_cursor_path from the page (the default); 'last_item' reads "
+            'next_cursor_item_path from the last item on the page, for APIs '
+            "that expect the last row's cursor back as the next 'after'."
+        ),
+    )
+
+    next_cursor_item_path: str | None = Field(
+        default=None,
+        description=(
+            'With next_cursor_from: last_item, the path of the cursor on an item '
+            "(default 'cursor')."
+        ),
+    )
+
     model_config = {'extra': 'forbid'}
 
     @field_validator('style', mode='before')
@@ -323,6 +357,15 @@ class PaginationConfig(BaseModel):
         ),
     )
 
+    page_variants: bool = Field(
+        default=True,
+        description=(
+            'Also generate <name>_page (one page object: items, total, next '
+            'cursor/offset/page and the response envelope) and <name>_pages '
+            '(an iterator of page objects) for every paginated endpoint.'
+        ),
+    )
+
     # Per-endpoint configuration
     endpoints: dict[str, EndpointPaginationConfig] = Field(
         default_factory=dict,
@@ -398,6 +441,14 @@ class PaginationConfig(BaseModel):
                 if endpoint_config.send_page_size is not None
                 else self.default_send_page_size
             ),
+            cursor_location=endpoint_config.cursor_location or 'query',
+            limit_location=(
+                endpoint_config.limit_location
+                or endpoint_config.cursor_location
+                or 'query'
+            ),
+            next_cursor_from=endpoint_config.next_cursor_from or 'response',
+            next_cursor_item_path=endpoint_config.next_cursor_item_path or 'cursor',
         )
         return True, resolved
 
@@ -480,6 +531,10 @@ class ResolvedPaginationConfig(BaseModel):
     default_page_size: int
     max_page_size: int | None
     send_page_size: bool = True
+    cursor_location: Literal['query', 'body'] = 'query'
+    limit_location: Literal['query', 'body'] = 'query'
+    next_cursor_from: Literal['response', 'last_item'] = 'response'
+    next_cursor_item_path: str = 'cursor'
 
     model_config = {'extra': 'forbid'}
 
@@ -958,6 +1013,11 @@ class ResponseUnwrapConfig(BaseModel):
         # Use defaults
         return True, self.data_path
 
+    def has_explicit_path(self, endpoint_name: str) -> bool:
+        """Whether ``endpoint_name`` sets its own ``data_path``."""
+        endpoint_config = self.endpoints.get(endpoint_name)
+        return endpoint_config is not None and endpoint_config.data_path is not None
+
 
 class ModuleDefinition(BaseModel):
     """Definition for a single module or module group.
@@ -1112,6 +1172,118 @@ def _normalize_module_map(
     }
 
 
+class NamingRule(BaseModel):
+    """One regex rewrite (``re.sub``) applied to every operation's name."""
+
+    pattern: str = Field(description='Regular expression to search for.')
+    replace: str = Field(default='', description='Replacement text (re.sub syntax).')
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('pattern')
+    @classmethod
+    def _compiles(cls, v: str) -> str:
+        try:
+            re.compile(v)
+        except re.error as exc:
+            raise ValueError(f'invalid regular expression {v!r}: {exc}') from exc
+        return v
+
+
+class NamingConfig(BaseModel):
+    """Rewrite the names of generated endpoint functions.
+
+    ``rules`` run in order on each operation's raw name (its operationId, or
+    the path-derived name with ``function_naming: path``); ``overrides`` then
+    pins individual operations to an exact name. Every generated variant
+    (``_df``, ``_iter``, ``async_*`` ...) derives from the result.
+
+    A rename that makes two operations share a name is an error -- unless
+    ``versioning`` resolves it (the operations differ in path version).
+    """
+
+    rules: list[NamingRule] = Field(
+        default_factory=list,
+        description='Regex rewrites applied in order to each operation name.',
+    )
+    overrides: dict[str, str] = Field(
+        default_factory=dict,
+        description='Exact function names keyed by operationId.',
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('overrides')
+    @classmethod
+    def _identifiers(cls, v: dict[str, str]) -> dict[str, str]:
+        for key, name in v.items():
+            if not name.isidentifier():
+                raise ValueError(
+                    f'naming.overrides[{key!r}] = {name!r} is not a valid identifier'
+                )
+        return v
+
+    def apply(self, raw_name: str) -> str:
+        """The name for an operation whose raw name is ``raw_name``."""
+        if raw_name in self.overrides:
+            return self.overrides[raw_name]
+        name = raw_name
+        for rule in self.rules:
+            name = re.sub(rule.pattern, rule.replace, name)
+        return name
+
+
+class VersioningConfig(BaseModel):
+    """Route endpoints that exist in several path versions.
+
+    When two operations end up with the same function name (usually after a
+    ``naming`` rule strips a ``_v2`` suffix) and their paths carry different
+    versions, the newest keeps the plain name in its module and older ones
+    are moved out of the way. An operation that exists in only one version
+    stays where it is.
+
+    ``legacy: submodule`` needs module splitting and ``client_style:
+    functions``; ``suffix`` works with every layout.
+    """
+
+    path_pattern: str = Field(
+        default=r'/v(?P<version>\d+)(?=/|$)',
+        description="Regex with a 'version' group reading the version from a path.",
+    )
+    legacy: Literal['submodule', 'suffix'] = Field(
+        default='submodule',
+        description=(
+            "Where older versions go: 'submodule' (<module>/v<N>.py, same name) "
+            "or 'suffix' (<name>_v<N> in the main module)."
+        ),
+    )
+
+    model_config = {'extra': 'forbid'}
+
+    @field_validator('path_pattern')
+    @classmethod
+    def _has_version_group(cls, v: str) -> str:
+        try:
+            compiled = re.compile(v)
+        except re.error as exc:
+            raise ValueError(f'invalid regular expression {v!r}: {exc}') from exc
+        if 'version' not in compiled.groupindex:
+            raise ValueError(
+                f"versioning.path_pattern {v!r} needs a '(?P<version>...)' group"
+            )
+        return v
+
+    def version_of(self, path: str) -> int | None:
+        """The path's version, or None when it has none."""
+        match = re.search(self.path_pattern, path)
+        if match is None:
+            return None
+        try:
+            return int(match.group('version'))
+        except (TypeError, ValueError):
+            return None
+
+
 class DocumentConfig(BaseModel):
     """Configuration for a single OpenAPI document to be processed.
 
@@ -1232,6 +1404,30 @@ class DocumentConfig(BaseModel):
             'numerically-suffixed duplicates (e.g. ``feed_changes2`` .. '
             '``feed_changes43``) produced by specs that reuse the same '
             'operationId across distinct paths.'
+        ),
+    )
+
+    raw_response: bool = Field(
+        default=False,
+        description=(
+            'Also generate <name>_with_response for every endpoint whose response '
+            'is parsed: it returns a RawResponse with the status code, headers '
+            'and the HTTP response, and parse() returns what <name> would. Class '
+            'clients get the same as <method>_with_response.'
+        ),
+    )
+
+    naming: NamingConfig = Field(
+        default_factory=NamingConfig,
+        description='Regex rules and exact overrides for endpoint function names.',
+    )
+
+    versioning: VersioningConfig | None = Field(
+        default=None,
+        description=(
+            'Route operations that exist in several path versions: the newest '
+            'keeps the plain name, older ones move to a submodule or get a '
+            'version suffix.'
         ),
     )
 

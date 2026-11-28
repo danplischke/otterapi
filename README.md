@@ -177,6 +177,62 @@ documents:
     function_naming: path   # get_v1_feed_trial_changes, get_v1_feed_hcp_profile_changes, ...
 ```
 
+#### Renaming Functions
+
+`naming.rules` rewrites every operation's name with regular expressions, in
+order; `naming.overrides` pins single operations (keyed by operationId) to an
+exact name. Every variant (`_df`, `_iter`, `_page`, `async_*`, ...), `__all__`
+and the class-client methods follow the new name.
+
+```yaml
+naming:
+  rules:
+    - pattern: '_v\d+(?=_|$)'     # get_widgets_by_id_v2_count -> get_widgets_by_id_count
+      replace: ''
+  overrides:
+    legacyGetThing: get_thing
+```
+
+A rename that gives two operations the same name fails generation (naming one
+of them `_2` would hide which one you meant) -- unless `versioning` resolves it.
+Generation also fails when two generated functions in one module would share
+a name, such as an operation called `list_users_page` next to the `_page`
+variant of a paginated `list_users`.
+
+Per-endpoint settings (`pagination.endpoints`, `dataframe.endpoints`,
+`export.endpoints`, `response_unwrap.endpoints`) are keyed by the final
+function name; an operationId works too. A key that matches no endpoint is
+reported as a warning.
+
+#### Path-Versioned APIs
+
+For specs that version endpoints in the path (`/widgets/v1/...` next to
+`/widgets/v2/...`), `versioning` keeps the newest version under the plain name
+and moves older ones out of the way:
+
+```yaml
+module_split: {enabled: true, strategy: path}
+naming:
+  rules: [{pattern: '_v\d+(?=_|$)', replace: ''}]
+versioning:
+  path_pattern: "/v(?P<version>\\d+)/"   # default: /v(?P<version>\d+)(?=/|$)
+  legacy: submodule                      # or: suffix
+```
+
+```python
+from client.widgets import get_widgets_by_id       # v2, the newest
+from client.widgets.v1 import get_widgets_by_id    # v1
+```
+
+Versioning applies to operations that end up with the same name and differ
+only in their path version; an operation that exists in one version stays
+where it is. With `legacy: submodule` older versions go to
+`<module>/v<N>.py` (the module becomes a package) and are not re-exported from
+the package root; this needs `module_split` and `client_style: functions`.
+`legacy: suffix` works with every layout and client style: older versions
+stay next to the newest as `<name>_v<N>`. Per-endpoint settings for a
+submodule version are keyed `<name>_v<N>` (e.g. `get_widgets_by_id_v1`).
+
 #### Path Filtering
 
 ```yaml
@@ -541,6 +597,51 @@ pagination:
 | `total_pages_path` | string | `null` | JSON path to total page count |
 | `default_page_size` | int | inherits | Default page size |
 | `max_page_size` | int | `null` | Maximum allowed page size |
+| `cursor_location` | `query`\|`body` | `query` | Where the position parameter (offset/cursor/page) is sent |
+| `limit_location` | `query`\|`body` | `cursor_location` | Where the page-size parameter is sent |
+| `next_cursor_from` | `response`\|`last_item` | `response` | Read the next cursor from `next_cursor_path`, or from the last item on the page |
+| `next_cursor_item_path` | string | `cursor` | Path of the cursor on an item, with `next_cursor_from: last_item` |
+
+### Paginating Through the Request Body
+
+Some APIs page `POST` endpoints through the JSON body instead of the query
+string, and expect the last row's cursor back as the next `after`. Configure
+them explicitly -- auto-detection only looks at query parameters, and never
+turns on body pagination by itself, because it re-sends the request once per
+page:
+
+```yaml
+pagination:
+  enabled: true
+  default_data_path: data
+  default_total_path: total
+  endpoints:
+    search_widgets:
+      style: cursor
+      cursor_param: after        # body field names, as on the wire
+      limit_param: limit
+      cursor_location: body      # limit_location defaults to the same
+      next_cursor_from: last_item
+      next_cursor_item_path: cursor
+```
+
+With `request_body.flatten: true` the paginated functions (`_iter`, `_df`,
+`_export`, `_page`, ...) do not take `after` and `limit` as arguments at all,
+the same way the query-string `offset` / `limit` are hidden; set them with
+`cursor=` and `page_size=`.
+
+The paginator overlays `after` and `limit` onto the dumped body for each
+page; everything else you put in the body is sent unchanged. `page_size`
+takes precedence over a `limit` set on the body, and an `after` set on the
+body is used as the starting position unless `cursor=` is passed. Paging
+stops on an empty page, once `total` items have been fetched (when the
+response has a total), or when the server returns the cursor it was just
+sent. It does not stop on a short page, since a server that caps the page
+size would otherwise cut the results off.
+
+When pagination is enabled, code generation warns about endpoints that return
+the configured items list and total count but are not paginated, since their
+DataFrame and export helpers would return only the first page.
 
 ### Usage
 
@@ -555,6 +656,42 @@ for user in list_users_iter():
 async for user in async_list_users_iter():
     print(user.name)
 ```
+
+### Page Objects
+
+Every paginated endpoint also gets `<name>_page` (one page) and `<name>_pages`
+(an iterator of pages). A page keeps what the item-level helpers discard:
+
+```python
+from client import list_users_page, list_users_pages
+
+for page in list_users_pages(page_size=100):
+    print(page.total, page.next_cursor)   # or next_offset / next_page
+    print(page.data.rate_limit)           # the validated response envelope
+    for user in page.items:
+        ...
+
+# Checkpoint a long iteration and resume it later
+page = list_users_page(cursor=saved_cursor)
+if page.has_next_page():
+    page = page.get_next_page()
+```
+
+| Attribute | Description |
+|-----------|-------------|
+| `items` | The items on the page (`Page` also iterates over them and has a `len`) |
+| `data` | The parsed response envelope, typed as the endpoint's response model |
+| `total` | The total item count (`total_path`), or `None` |
+| `total_pages` | The total page count (`total_pages_path`, page style), or `None` |
+| `next_cursor` / `next_offset` / `next_page` | Where the next page starts, or `None` on the last page |
+| `has_next_page()` / `get_next_page()` | Whether another page follows / fetch it |
+| `iter_pages(max_pages=None)` | This page and every page after it |
+
+The async variants (`async_list_users_page`, `async_list_users_pages`) return
+`AsyncPage` objects, whose `get_next_page()` is awaited and whose
+`iter_pages()` is consumed with `async for`. With `result_objects: true`,
+`Query.page()` and `Query.pages()` do the same. Turn the variants off with
+`pagination.page_variants: false`.
 
 ---
 
@@ -745,6 +882,12 @@ response_unwrap:
     get_raw_data:
       enabled: false           # don't unwrap this endpoint
 ```
+
+The document-wide `data_path` only applies to endpoints whose response
+actually has that field: an endpoint returning `{"total": 3}`, a plain object
+or no body at all returns the parsed response unchanged. A `data_path` set
+for one endpoint must exist on its response, or generation fails. Use one to
+unwrap a scalar, e.g. `count_users: {data_path: total}` returns an `int`.
 
 ### Response Unwrap Options
 
@@ -1012,6 +1155,45 @@ print(user.id, user.email)
 ```
 
 ---
+
+### Raw Responses
+
+Set `raw_response: true` to get a `<name>_with_response` variant of every
+endpoint whose response is parsed. It returns a `RawResponse` carrying that
+one call's status code and headers, and `parse()` returns exactly what the
+plain function would:
+
+```python
+raw = get_user_with_response(user_id=1)
+raw.status_code, raw.headers["x-ratelimit-remaining"]
+user = raw.parse()                     # User, typed
+
+raw = await async_get_user_with_response(user_id=1)
+user = await raw.parse()               # AsyncRawResponse
+
+client.users.get_user_with_response(user_id=1)   # class-based clients
+```
+
+Error responses still raise the usual `APIError` subclasses, with the response
+on `err.response`. Endpoints that already return the raw `Response`, `bytes`
+or `str` get no variant, nor do paginated endpoints (see the page objects).
+
+### Logging
+
+Every request is logged through the standard `logging` module under the
+`<package>._client` logger: method, URL, status code and elapsed time at
+`INFO`; request and response headers and bodies (truncated) at `DEBUG`.
+`Authorization`, cookie and API-key headers, the header / query names of the
+document's auth schemes, and body fields such as `password`, `client_secret`
+or `access_token` are written as `[REDACTED]`.
+
+Nothing is printed unless you configure logging --
+`logging.basicConfig(level=logging.INFO)` -- or set the environment variable
+named after the client, which attaches a stderr handler to that logger only:
+
+```bash
+PET_STORE_LOG=debug python my_script.py   # PetStoreClient -> PET_STORE_LOG
+```
 
 ## 🔐 Authentication
 

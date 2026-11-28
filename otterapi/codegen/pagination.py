@@ -109,6 +109,10 @@ class PaginationMethodConfig:
     default_page_size: int = 100
     max_page_size: int | None = None
     send_page_size: bool = True
+    cursor_location: str = 'query'
+    limit_location: str = 'query'
+    next_cursor_from: str = 'response'
+    next_cursor_item_path: str = 'cursor'
 
 
 def endpoint_is_paginated(
@@ -174,4 +178,8 @@ def get_pagination_config_for_endpoint(
         default_page_size=resolved.default_page_size,
         max_page_size=resolved.max_page_size,
         send_page_size=resolved.send_page_size,
+        cursor_location=resolved.cursor_location,
+        limit_location=resolved.limit_location,
+        next_cursor_from=resolved.next_cursor_from,
+        next_cursor_item_path=resolved.next_cursor_item_path,
     )

@@ -77,6 +77,10 @@ class ModuleTree:
     children: dict[str, ModuleTree] = field(default_factory=dict)
     definition: ModuleDefinition | None = None
     description: str | None = None
+    #: An older path version of its parent module's endpoints (``v1`` under
+    #: ``widgets``): emitted as ``widgets/v1.py`` and never re-exported, since
+    #: its functions share their names with the parent's.
+    is_legacy_version: bool = False
 
     def add_endpoint(self, module_path: list[str], endpoint: Endpoint) -> None:
         """Add an endpoint to the tree at the specified module path.
@@ -199,8 +203,11 @@ class ModuleTreeBuilder:
             A ModuleTree with endpoints organized according to the configuration.
         """
         root = ModuleTree(name='__root__')
+        legacy = [ep for ep in endpoints if ep.legacy_version is not None]
 
         for endpoint in endpoints:
+            if endpoint.legacy_version is not None:
+                continue
             tags = getattr(endpoint, 'tags', None)
 
             resolved = self.resolver.resolve(
@@ -221,7 +228,35 @@ class ModuleTreeBuilder:
         if self.config.min_endpoints > 1:
             self._consolidate_small_modules(root)
 
+        # Older path versions go under wherever their newest version ended up
+        # (after consolidation, so they follow it into the fallback module).
+        for endpoint in legacy:
+            assert endpoint.legacy_version is not None
+            home = self._module_of(root, endpoint.sync_fn_name)
+            if home is None:
+                home = self.resolver.resolve(
+                    endpoint.path, endpoint.method, endpoint.tags
+                ).module_path
+            version_path = [*home, f'v{endpoint.legacy_version}']
+            root.add_endpoint(version_path, endpoint)
+            node = root.get_node(version_path)
+            assert node is not None
+            node.is_legacy_version = True
+
         return root
+
+    @staticmethod
+    def _module_of(root: ModuleTree, fn_name: str) -> list[str] | None:
+        """Module path of the (non-legacy) endpoint named ``fn_name``."""
+        for path, node in root.walk():
+            if node.is_legacy_version:
+                continue
+            if any(
+                ep.sync_fn_name == fn_name and ep.legacy_version is None
+                for ep in node.endpoints
+            ):
+                return path
+        return None
 
     def _consolidate_small_modules(self, root: ModuleTree) -> None:
         """Consolidate modules with fewer than min_endpoints into fallback."""
@@ -231,7 +266,7 @@ class ModuleTreeBuilder:
             if not path or path == [self.config.fallback_module]:
                 continue
 
-            if node.endpoints and not node.children:
+            if node.endpoints and not node.children and not node.is_legacy_version:
                 if len(node.endpoints) < self.config.min_endpoints:
                     to_consolidate.append((path, node))
 
@@ -594,6 +629,8 @@ class EmittedModule:
     path: Path | UPath
     module_path: list[str]
     endpoint_names: list[str] = field(default_factory=list)
+    #: A ``v<N>`` legacy-version module: importable, never re-exported.
+    is_legacy_version: bool = False
 
 
 class SplitModuleEmitter:
@@ -633,6 +670,7 @@ class SplitModuleEmitter:
         format_output: bool = True,
         validate_output: bool = True,
         http_module: str = HTTP_MODULE,
+        raw_response: bool = False,
     ):
         """Initialize the split module emitter.
 
@@ -664,6 +702,7 @@ class SplitModuleEmitter:
             format_output: Whether to format generated code with ruff/black.
             validate_output: Whether to validate generated code syntax.
             http_module: HTTP library the generated modules import.
+            raw_response: Also emit ``_with_response`` variants.
         """
         self.config = config
         self.output_dir = UPath(output_dir)
@@ -673,6 +712,7 @@ class SplitModuleEmitter:
         self.dataframe_config = dataframe_config
         self.pagination_config = pagination_config
         self.response_unwrap_config = response_unwrap_config
+        self.raw_response = raw_response
         self.export_config = export_config
         self.generate_sync = generate_sync
         self.generate_async = generate_async
@@ -735,13 +775,15 @@ class SplitModuleEmitter:
                 description=node.description,
             )
 
-            all_exports[flat_name] = endpoint_names
+            if not node.is_legacy_version:
+                all_exports[flat_name] = endpoint_names
 
             self._emitted_modules.append(
                 EmittedModule(
                     path=file_path,
                     module_path=module_path,
                     endpoint_names=endpoint_names,
+                    is_legacy_version=node.is_legacy_version,
                 )
             )
 
@@ -750,9 +792,41 @@ class SplitModuleEmitter:
     def _emit_nested(self, tree: ModuleTree) -> None:
         """Emit modules as nested directories."""
         directories: set[tuple[str, ...]] = set()
+        # Directories whose __init__.py *is* an endpoint module: a module with
+        # legacy-version children (``widgets`` with ``widgets/v1.py``) must be
+        # a package, or the ``widgets/`` directory would shadow widgets.py.
+        package_modules: set[tuple[str, ...]] = set()
 
         for module_path, node in tree.walk_leaves():
             if not node.endpoints:
+                continue
+
+            if (
+                module_path
+                and node.children
+                and all(child.is_legacy_version for child in node.children.values())
+            ):
+                dir_path = self.output_dir / '/'.join(module_path)
+                dir_path.mkdir(parents=True, exist_ok=True)
+                for i in range(1, len(module_path)):
+                    directories.add(tuple(module_path[:i]))
+                package_modules.add(tuple(module_path))
+                file_path = dir_path / '__init__.py'
+                endpoint_names = self._emit_module_file(
+                    file_path=file_path,
+                    endpoints=node.endpoints,
+                    description=node.description,
+                    # widgets/__init__.py is the module pkg.widgets, but its
+                    # relative imports resolve from inside the package.
+                    package_depth=len(module_path) + 1,
+                )
+                self._emitted_modules.append(
+                    EmittedModule(
+                        path=file_path,
+                        module_path=module_path,
+                        endpoint_names=endpoint_names,
+                    )
+                )
                 continue
 
             if len(module_path) > 1:
@@ -781,10 +855,11 @@ class SplitModuleEmitter:
                     path=file_path,
                     module_path=module_path,
                     endpoint_names=endpoint_names,
+                    is_legacy_version=node.is_legacy_version,
                 )
             )
 
-        self._emit_nested_inits(tree, directories)
+        self._emit_nested_inits(tree, directories - package_modules)
 
     def _emit_module_file(
         self,
@@ -814,6 +889,7 @@ class SplitModuleEmitter:
             export=self.export_config,
             generate_sync=self.generate_sync,
             generate_async=self.generate_async,
+            raw_response=self.raw_response,
         )
         resolver = TypeResolver(self._typegen_types)
         sink = build_endpoint_sink(endpoints, emit_config, resolver, description)
@@ -882,6 +958,8 @@ class SplitModuleEmitter:
         all_names: list[str] = []
 
         for emitted in self._emitted_modules:
+            if emitted.is_legacy_version:
+                continue
             if (
                 len(emitted.module_path) > len(module_path)
                 and emitted.module_path[: len(module_path)] == module_path
@@ -929,6 +1007,8 @@ class SplitModuleEmitter:
             return
 
         for emitted in self._emitted_modules:
+            if emitted.is_legacy_version:
+                continue
             if len(emitted.module_path) == 1:
                 module_name = emitted.module_path[0]
                 if module_name not in imported_modules:
@@ -957,7 +1037,7 @@ class SplitModuleEmitter:
                     imported_modules.add(top_module)
 
         for emitted in self._emitted_modules:
-            if len(emitted.module_path) > 1:
+            if len(emitted.module_path) > 1 and not emitted.is_legacy_version:
                 all_names.extend(emitted.endpoint_names)
 
         self._emit_root_init_base(body, all_names)

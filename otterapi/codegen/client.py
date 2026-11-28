@@ -633,6 +633,7 @@ def generate_base_client_class(
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+            '._logging': {'log_request', 'log_response'},
             '._serialization': {'serialize_headers', 'serialize_query_params'},
         }
     else:
@@ -642,6 +643,7 @@ def generate_base_client_class(
             'types': {'UnionType', 'TracebackType'},
             'pydantic': {'TypeAdapter', 'RootModel'},
             '._retry': {'_backoff_sleep', '_backoff_sleep_async'},
+            '._logging': {'log_request', 'log_response'},
             '._serialization': {'serialize_headers', 'serialize_query_params'},
         }
 
@@ -1686,6 +1688,29 @@ def _build_transport_handler(backoff_fn: str, is_async: bool) -> ast.ExceptHandl
     )
 
 
+#: Module-level name in ``_client.py`` holding the extra header / query names
+#: (the auth schemes' own) that request logging redacts.
+LOG_REDACT_NAME = '_LOG_REDACT'
+
+
+def _log_request_stmt() -> ast.stmt:
+    """``_started = log_request(request, _LOG_REDACT)``."""
+    return _assign(
+        _name('_started'),
+        _call(_name('log_request'), args=[_name('request'), _name(LOG_REDACT_NAME)]),
+    )
+
+
+def _log_response_stmt() -> ast.stmt:
+    """``log_response(response, _started, _LOG_REDACT)``."""
+    return ast.Expr(
+        _call(
+            _name('log_response'),
+            args=[_name('response'), _name('_started'), _name(LOG_REDACT_NAME)],
+        )
+    )
+
+
 def _unreachable_retry_raise() -> ast.stmt:
     """A ``raise`` after the retry loop that the loop never actually reaches.
 
@@ -1727,7 +1752,9 @@ def _build_sync_request_body(
         *_build_apply_auth_call(has_auth),
         before_request_stmt,
         *_build_wire_format_stmts(),
+        _log_request_stmt(),
         request_stmt,
+        _log_response_stmt(),
         _build_retry_check('_backoff_sleep', is_async=False),
         ast.Return(value=_name('response')),
     ]
@@ -1816,7 +1843,9 @@ def _build_async_request_body(
         *_build_apply_auth_call(has_auth),
         before_request_stmt,
         *_build_wire_format_stmts(),
+        _log_request_stmt(),
         client_if,
+        _log_response_stmt(),
         _build_retry_check('_backoff_sleep_async', is_async=True),
         ast.Return(value=_name('response')),
     ]
@@ -1847,6 +1876,52 @@ def _build_async_request_body(
     )
 
     return [for_loop, _unreachable_retry_raise()]
+
+
+def log_env_var_name(client_name: str) -> str:
+    """``PetStoreClient`` -> ``PET_STORE_LOG``: the variable that turns logging on."""
+    import re as _re
+
+    stem = client_name.removesuffix('Client') or 'API'
+    words = _re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', stem)
+    cleaned = _re.sub(r'[^A-Za-z0-9]+', '_', words).strip('_').upper() or 'API'
+    if cleaned[0].isdigit():
+        cleaned = f'API_{cleaned}'
+    return f'{cleaned}_LOG'
+
+
+def build_logging_setup(
+    client_name: str, auth_schemes: list[AuthScheme] | None
+) -> tuple[list[ast.stmt], ImportDict]:
+    """Module-level ``_client.py`` statements for request logging.
+
+    ``_LOG_REDACT`` lists the auth schemes' own header / query / cookie names
+    (lower case) so their values never reach the log, and the environment
+    variable named after the client turns logging on.
+    """
+    redact = sorted(
+        {scheme.wire_name.lower() for scheme in auth_schemes or [] if scheme.wire_name}
+    )
+    stmts: list[ast.stmt] = [
+        ast.AnnAssign(
+            target=_name(LOG_REDACT_NAME),
+            annotation=_subscript('frozenset', _name('str')),
+            value=_call(
+                _name('frozenset'),
+                args=[ast.Tuple(elts=[ast.Constant(value=n) for n in redact])]
+                if redact
+                else [],
+            ),
+            simple=1,
+        ),
+        ast.Expr(
+            _call(
+                _name('configure_from_env'),
+                args=[ast.Constant(value=log_env_var_name(client_name))],
+            )
+        ),
+    ]
+    return stmts, {'._logging': {'configure_from_env'}}
 
 
 def _merge_imports(target: ImportDict, source: ImportDict) -> None:

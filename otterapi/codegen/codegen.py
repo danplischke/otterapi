@@ -27,6 +27,7 @@ from otterapi.codegen.ast_utils import (
 from otterapi.codegen.auth import AuthScheme, collect_auth_schemes
 from otterapi.codegen.client import (
     _exported_error_names,
+    build_logging_setup,
     generate_api_error_hierarchy,
     generate_base_client_class,
     generate_client_stub,
@@ -59,10 +60,10 @@ from otterapi.codegen.utils import (
     sanitize_identifier,
     sanitize_parameter_field_name,
     to_attribute_name,
-    to_snake_case,
     write_mod,
 )
 from otterapi.config import DocumentConfig
+from otterapi.exceptions import ConfigurationError
 from otterapi.openapi.constants import HTTP_METHODS, is_json_media_type
 from otterapi.openapi.v3_2.v3_2 import (
     OpenAPI as OpenAPIv3_2,
@@ -911,23 +912,6 @@ class Codegen(OpenAPIProcessor):
             return self._path_based_name(method, path)
         return operation.operationId or self._path_based_name(method, path)
 
-    @staticmethod
-    def _unique_fn_name(raw_name: str, used_names: set[str]) -> str:
-        """Snake-case ``raw_name`` and disambiguate it against ``used_names``.
-
-        Guarantees no two endpoints share a function name even when distinct
-        raw names sanitize to the same identifier (this can happen with
-        path-based naming, e.g. ``/feed/changes`` and ``/feed-changes``).
-        """
-        fn_name = to_snake_case(raw_name)
-        if fn_name in used_names:
-            suffix = 2
-            while f'{fn_name}_{suffix}' in used_names:
-                suffix += 1
-            fn_name = f'{fn_name}_{suffix}'
-        used_names.add(fn_name)
-        return fn_name
-
     def _generate_endpoint(
         self,
         path: str,
@@ -1035,13 +1019,11 @@ class Codegen(OpenAPIProcessor):
             ep.add_imports([response_model.annotation_imports])
 
     def _generate_endpoints(self) -> list[Endpoint]:
-        """Generate all endpoints from the OpenAPI paths.
+        """Generate all endpoints, naming every operation at once (see naming.py)."""
+        from otterapi.codegen.naming import NamedOperation, assign_names
 
-        Returns:
-            List of generated Endpoint objects.
-        """
-        endpoints: list[Endpoint] = []
-        used_fn_names: set[str] = set()
+        self._check_versioning_layout()
+        pending: list[tuple[str, str, Any, Any]] = []
         # Use the adapter for path access -- hides the "RootModel vs dict"
         # wrinkle from the rest of codegen.
         for path, path_item in self._adapter.paths().items():
@@ -1056,15 +1038,95 @@ class Codegen(OpenAPIProcessor):
             for method in HTTP_METHODS:
                 operation = getattr(path_item, method, None)
                 if operation:
-                    fn_name = self._unique_fn_name(
-                        self._raw_operation_name(method, path, operation),
-                        used_fn_names,
-                    )
-                    ep = self._generate_endpoint(
-                        path, method, operation, fn_name, path_item_parameters
-                    )
-                    endpoints.append(ep)
+                    pending.append((path, method, operation, path_item_parameters))
+
+        names = assign_names(
+            [
+                NamedOperation(
+                    raw_name=self._raw_operation_name(method, path, operation),
+                    method=method,
+                    path=path,
+                )
+                for path, method, operation, _ in pending
+            ],
+            self.config.naming,
+            self.config.versioning,
+        )
+        endpoints: list[Endpoint] = []
+        for (path, method, operation, path_item_parameters), assigned in zip(
+            pending, names, strict=True
+        ):
+            ep = self._generate_endpoint(
+                path, method, operation, assigned.fn_name, path_item_parameters
+            )
+            ep.legacy_version = assigned.legacy_version
+            ep.config_key = assigned.config_key
+            endpoints.append(ep)
+        self._normalize_endpoint_config_keys(endpoints)
         return endpoints
+
+    def _check_versioning_layout(self) -> None:
+        """``legacy: submodule`` needs a layout with modules to put it in."""
+        versioning = self.config.versioning
+        if versioning is None:
+            return
+        if versioning.legacy != 'submodule':
+            return
+        if not self.config.module_split.enabled:
+            raise ConfigurationError(
+                'versioning.legacy: submodule puts older versions in '
+                '<module>/v<N>.py, which needs module_split.enabled; use '
+                'legacy: suffix for a single endpoints module',
+                field='versioning.legacy',
+            )
+        if self.config.client_style != 'functions':
+            raise ConfigurationError(
+                'versioning.legacy: submodule is only supported with '
+                "client_style: functions (a client class can't hold two methods "
+                'of the same name); use legacy: suffix',
+                field='versioning.legacy',
+            )
+
+    def _normalize_endpoint_config_keys(self, endpoints: list[Endpoint]) -> None:
+        """Re-key operationId keys of per-endpoint config to function names.
+
+        Keys matching no endpoint are reported as a warning.
+        """
+        by_config_name = {ep.config_name: ep for ep in endpoints}
+        by_operation_id: dict[str, Endpoint] = {}
+        for ep in endpoints:
+            if ep.operation_id and ep.operation_id not in by_config_name:
+                by_operation_id.setdefault(ep.operation_id, ep)
+        sections: dict[str, Any] = {
+            'pagination': self.config.pagination,
+            'response_unwrap': self.config.response_unwrap,
+            'dataframe': self.config.dataframe,
+            'export': self.config.export,
+        }
+        filtered = bool(self.config.include_paths or self.config.exclude_paths)
+        for section_name, section in sections.items():
+            entries = getattr(section, 'endpoints', None)
+            if not entries:
+                continue
+            rekeyed: dict[str, Any] = {}
+            for key, value in entries.items():
+                if key in by_config_name:
+                    rekeyed[key] = value
+                elif key in by_operation_id:
+                    rekeyed.setdefault(by_operation_id[key].config_name, value)
+                else:
+                    rekeyed[key] = value
+                    if not filtered:
+                        logger.warning(
+                            '%s.endpoints.%s matches no generated endpoint; '
+                            'keys are function names (or operationIds)%s.',
+                            section_name,
+                            key,
+                            ', and older path versions are keyed <name>_v<N>'
+                            if self.config.versioning is not None
+                            else '',
+                        )
+            section.endpoints = rekeyed
 
     def _should_include_path(self, path: str) -> bool:
         """Check if a path should be included based on include_paths and exclude_paths.
@@ -1707,6 +1769,8 @@ class Codegen(OpenAPIProcessor):
                     'iterate_cursor_async',
                     'iterate_page',
                     'iterate_page_async',
+                    'Page',
+                    'AsyncPage',
                 ],
             )
         if self.config.export.enabled:
@@ -1877,6 +1941,7 @@ class Codegen(OpenAPIProcessor):
             format_output=self.format_output,
             validate_output=self.validate_output,
             http_module=self.config.http_library,
+            raw_response=self.config.raw_response,
         )
 
         assert self.typegen is not None
@@ -1958,6 +2023,11 @@ class Codegen(OpenAPIProcessor):
         body: list[ast.stmt] = []
         import_collector = ImportCollector()
         import_collector.add_imports(client_imports)
+        # Request logging: the auth names to redact, and the <CLIENT>_LOG opt-in.
+        logging_stmts, logging_imports = build_logging_setup(
+            client_name, self._auth_schemes()
+        )
+        import_collector.add_imports(logging_imports)
 
         # No model imports needed in _client.py anymore - models are imported in module files
 
@@ -1968,6 +2038,7 @@ class Codegen(OpenAPIProcessor):
         # Add __all__ export (include the full per-status error hierarchy
         # so users can ``from .<pkg>._client import NotFoundError`` etc.).
         body.append(_all(sorted([base_client_name, *_exported_error_names()])))
+        body.extend(logging_stmts)
 
         # Add the BaseAPIError + per-status subclass hierarchy.
         body.extend(generate_api_error_hierarchy())

@@ -455,6 +455,19 @@ class Endpoint:
     # Imports needed
     imports: dict[str, set[str]] = dataclasses.field(default_factory=dict)
 
+    # Path-version routing (see ``VersioningConfig``): set on an older version
+    # of an operation that also exists at a newer path version.
+    legacy_version: int | None = None
+    # Key per-endpoint config sections are looked up by. Defaults to the
+    # function name; an endpoint moved to a ``v<N>`` submodule shares its name
+    # with the newest version, so it is keyed ``<name>_v<N>`` instead.
+    config_key: str | None = None
+
+    @property
+    def config_name(self) -> str:
+        """The name per-endpoint config (pagination, dataframe ...) is keyed by."""
+        return self.config_key or self.sync_fn_name
+
     def add_imports(self, imports: list[dict[str, set[str]]]):
         for imports_ in imports:
             for module, names in imports_.items():
