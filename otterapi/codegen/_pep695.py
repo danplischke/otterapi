@@ -119,58 +119,45 @@ def _strip_typevar_import(
     return f'{prefix}{", ".join(kept)}'
 
 
-def _generic_class_params(node: ast.ClassDef, typevars: set[str]) -> list[str] | None:
-    """``[T, E]`` for ``class X(Generic[T, E])``; ``[]`` if not generic; None to bail.
-
-    Only the plain form is understood: ``Generic[...]`` as the one and only
-    base, every argument a module-level ``TypeVar``. Anything else (extra
-    bases, keywords, ``Generic`` mixed with ``Protocol``) bails out.
-    """
-    generic = [
-        base
-        for base in node.bases
-        if isinstance(base, ast.Subscript)
-        and isinstance(base.value, ast.Name)
-        and base.value.id == 'Generic'
-    ]
-    if not generic:
-        # A non-generic class naming a TypeVar anywhere (a base, a method
-        # annotation) would lose its declaration: leave the module alone.
-        uses = {
-            child.id
-            for child in ast.walk(node)
-            if isinstance(child, ast.Name) and child.id in typevars
-        }
-        return None if uses else []
-    if len(node.bases) != 1 or node.keywords:
-        return None
-    slice_ = generic[0].slice
-    elts = slice_.elts if isinstance(slice_, ast.Tuple) else [slice_]
-    params: list[str] = []
-    for elt in elts:
-        if not isinstance(elt, ast.Name) or elt.id not in typevars:
-            return None
-        params.append(elt.id)
-    return params
-
-
 class _Bail(Exception):
     """Raised by the per-node rewriters: leave the whole module untouched."""
+
+
+def _is_generic_base(base: ast.expr) -> bool:
+    return (
+        isinstance(base, ast.Subscript)
+        and isinstance(base.value, ast.Name)
+        and base.value.id == 'Generic'
+    )
 
 
 def _class_edit(
     node: ast.ClassDef, line: str, typevars: set[str]
 ) -> tuple[str, list[str]] | None:
-    """``(new header line, params)`` for a generic class; None if not generic."""
-    params = _generic_class_params(node, typevars)
-    if params is None:
-        raise _Bail
+    """``(new header line, params)`` for a generic class; None if not generic.
+
+    ``class Box(Generic[T])`` becomes ``class Box[T]`` and a subclass of a
+    generic base, ``class Page(_Base[T, E])``, becomes
+    ``class Page[T, E](_Base[T, E])``. A class naming a TypeVar its header
+    does not declare, ``Generic`` next to other bases, or a header spread over
+    several lines bails out.
+    """
+    params = list(dict.fromkeys(n for n in _names_in(*node.bases) if n in typevars))
+    used = {
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and child.id in typevars
+    }
     if not params:
+        if used:
+            raise _Bail
         return None
-    pattern = re.compile(
-        rf'\bclass\s+{re.escape(node.name)}\s*\(\s*Generic\[[^\]]*\]\s*\)'
-    )
-    match = pattern.search(line)
+    generic = [base for base in node.bases if _is_generic_base(base)]
+    if not used <= set(params) or node.keywords or (generic and len(node.bases) > 1):
+        raise _Bail
+    # Generic[...] itself goes; any other generic base stays after the params.
+    bases = r'\(\s*Generic\[[^\]]*\]\s*\)' if generic else r'(?=\()'
+    match = re.search(rf'\bclass\s+{re.escape(node.name)}\s*{bases}', line)
     if match is None:
         raise _Bail
     header = f'class {node.name}[{", ".join(params)}]'

@@ -169,12 +169,18 @@ class TestModernizeGenericClasses:
                 data: E
 
 
+            class AsyncPage(Page[T, E]):
+                async def first(self) -> T:
+                    return self.items[0]
+
+
             def first(page: Page[T, Any]) -> T:
                 return page.items[0]
             """)
         result = modernize_type_params(source)
         assert 'TypeVar' not in result and 'Generic' not in result
         assert 'class Page[T, E]:' in result
+        assert 'class AsyncPage[T, E](Page[T, E]):' in result
         assert 'def first[T](page: Page[T, Any]) -> T:' in result
         assert 'from typing import Any' in result
         if sys.version_info >= (3, 12):
@@ -288,7 +294,7 @@ class TestRuntimeModulesEmission:
         assert 'TypeVar' not in concurrency
         for name in ('paginate_offset', 'iterate_cursor', 'paginate_page'):
             assert f'def {name}[T](' in pagination
-            assert f'async def {name}_async[T](' in pagination
+            assert f'def {name}_async[T](' in pagination
         assert 'def run_sync[T](' in concurrency
         assert 'def run_concurrently[T](' in concurrency
 

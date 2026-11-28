@@ -6,9 +6,11 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Generic, TypeVar
 
 T = TypeVar('T')
+E = TypeVar('E')
 
 logger = logging.getLogger(__name__)
 
@@ -184,785 +186,24 @@ def _progress_context(
 
 
 # ---------------------------------------------------------------------------
-# Offset pagination
-# ---------------------------------------------------------------------------
-
-
-def paginate_offset(
-    fetch_page: Callable[[int, int], Any],
-    extract_items: Callable[[Any], list[T]],
-    get_total: Callable[[Any], int | None] | None = None,
-    *,
-    start_offset: int = 0,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> list[T]:
-    """Generic offset-based pagination that returns all items.
-
-    Args:
-        fetch_page: Function that fetches a page given (offset, limit).
-        extract_items: Function that extracts items from a page response.
-        get_total: Optional function to get total count from response.
-        start_offset: Starting offset (default: 0).
-        page_size: Items per page (default: 100).
-        max_items: Maximum items to return (default: unlimited).
-        progress: Show a progress bar. Pass ``True`` or a description string.
-            Requires ``tqdm``; falls back to a stderr message if unavailable.
-
-    Returns:
-        List of all items.
-    """
-    all_items: list[T] = []
-    current_offset = start_offset
-
-    with _progress_context(progress, desc='Fetching') as bar:
-        while True:
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            request_limit = page_size
-            if max_items is not None:
-                remaining = max_items - len(all_items)
-                request_limit = min(page_size, remaining)
-
-            page = fetch_page(current_offset, request_limit)
-            items = extract_items(page)
-
-            if not items:
-                break
-
-            all_items.extend(items)
-            if bar is not None:
-                bar.update(len(items))
-
-            if len(items) < request_limit:
-                break
-
-            if get_total is not None:
-                total = get_total(page)
-                if total is not None and current_offset + len(items) >= total:
-                    break
-
-            current_offset += len(items)
-
-    if max_items is not None and len(all_items) > max_items:
-        return all_items[:max_items]
-
-    return all_items
-
-
-async def paginate_offset_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
-    extract_items: Callable[[Any], list[T]],
-    get_total: Callable[[Any], int | None] | None = None,
-    *,
-    start_offset: int = 0,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> list[T]:
-    """Async version of paginate_offset."""
-    all_items: list[T] = []
-    current_offset = start_offset
-    bar: Any = None
-    if progress:
-        try:
-            from tqdm.auto import tqdm  # type: ignore[import-untyped]
-
-            label = progress if isinstance(progress, str) else 'Fetching'
-            bar = tqdm(desc=label, unit=' items')
-        except ImportError:
-            pass
-
-    try:
-        while True:
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            request_limit = page_size
-            if max_items is not None:
-                remaining = max_items - len(all_items)
-                request_limit = min(page_size, remaining)
-
-            page = await fetch_page(current_offset, request_limit)
-            items = extract_items(page)
-
-            if not items:
-                break
-
-            all_items.extend(items)
-            if bar is not None:
-                bar.update(len(items))
-
-            if len(items) < request_limit:
-                break
-
-            if get_total is not None:
-                total = get_total(page)
-                if total is not None and current_offset + len(items) >= total:
-                    break
-
-            current_offset += len(items)
-    finally:
-        if bar is not None:
-            bar.close()
-
-    if max_items is not None and len(all_items) > max_items:
-        return all_items[:max_items]
-
-    return all_items
-
-
-def iterate_offset(
-    fetch_page: Callable[[int, int], Any],
-    extract_items: Callable[[Any], list[T]],
-    get_total: Callable[[Any], int | None] | None = None,
-    *,
-    start_offset: int = 0,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> Iterator[T]:
-    """Generic offset-based pagination iterator (streaming).
-
-    Yields items one at a time for memory-efficient processing.
-
-    Args:
-        fetch_page: Function that fetches a page given (offset, limit).
-        extract_items: Function that extracts items from a page response.
-        get_total: Optional function to get total count from response.
-        start_offset: Starting offset (default: 0).
-        page_size: Items per page (default: 100).
-        max_items: Maximum items to yield (default: unlimited).
-        progress: Show a progress bar. Pass ``True`` or a description string.
-
-    Yields:
-        Items one at a time.
-    """
-    current_offset = start_offset
-    items_yielded = 0
-
-    with _progress_context(progress, desc='Fetching') as bar:
-        while True:
-            if max_items is not None and items_yielded >= max_items:
-                return
-
-            request_limit = page_size
-            if max_items is not None:
-                remaining = max_items - items_yielded
-                request_limit = min(page_size, remaining)
-
-            page = fetch_page(current_offset, request_limit)
-            items = extract_items(page)
-
-            if not items:
-                return
-
-            for item in items:
-                yield item
-                items_yielded += 1
-                if bar is not None:
-                    bar.update(1)
-
-                if max_items is not None and items_yielded >= max_items:
-                    return
-
-            if len(items) < request_limit:
-                return
-
-            if get_total is not None:
-                total = get_total(page)
-                if total is not None and current_offset + len(items) >= total:
-                    return
-
-            current_offset += len(items)
-
-
-async def iterate_offset_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
-    extract_items: Callable[[Any], list[T]],
-    get_total: Callable[[Any], int | None] | None = None,
-    *,
-    start_offset: int = 0,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> AsyncIterator[T]:
-    """Async version of iterate_offset."""
-    current_offset = start_offset
-    items_yielded = 0
-    bar: Any = None
-    if progress:
-        try:
-            from tqdm.auto import tqdm  # type: ignore[import-untyped]
-
-            label = progress if isinstance(progress, str) else 'Fetching'
-            bar = tqdm(desc=label, unit=' items')
-        except ImportError:
-            pass
-
-    try:
-        while True:
-            if max_items is not None and items_yielded >= max_items:
-                return
-
-            request_limit = page_size
-            if max_items is not None:
-                remaining = max_items - items_yielded
-                request_limit = min(page_size, remaining)
-
-            page = await fetch_page(current_offset, request_limit)
-            items = extract_items(page)
-
-            if not items:
-                return
-
-            for item in items:
-                yield item
-                items_yielded += 1
-                if bar is not None:
-                    bar.update(1)
-
-                if max_items is not None and items_yielded >= max_items:
-                    return
-
-            if len(items) < request_limit:
-                return
-
-            if get_total is not None:
-                total = get_total(page)
-                if total is not None and current_offset + len(items) >= total:
-                    return
-
-            current_offset += len(items)
-    finally:
-        if bar is not None:
-            bar.close()
-
-
-# ---------------------------------------------------------------------------
-# Cursor pagination
-# ---------------------------------------------------------------------------
-
-
-def paginate_cursor(
-    fetch_page: Callable[[str | None, int], Any],
-    extract_items: Callable[[Any], list[T]],
-    get_next_cursor: Callable[[Any], str | None],
-    *,
-    get_total: Callable[[Any], int | None] | None = None,
-    start_cursor: str | None = None,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> list[T]:
-    """Generic cursor-based pagination that returns all items.
-
-    Args:
-        fetch_page: Function that fetches a page given (cursor, limit).
-        extract_items: Function that extracts items from a page response.
-        get_next_cursor: Function to get next cursor from response.
-        get_total: Optional function reading the total item count; once that
-            many items have been fetched, no further page is requested.
-        start_cursor: Starting cursor (default: None for first page).
-        page_size: Items per page (default: 100).
-        max_items: Maximum items to return (default: unlimited).
-        progress: Show a progress bar. Pass ``True`` or a description string.
-
-    Returns:
-        List of all items.
-    """
-    all_items: list[T] = []
-    current_cursor = start_cursor
-
-    with _progress_context(progress, desc='Fetching') as bar:
-        while True:
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            page = fetch_page(current_cursor, page_size)
-            items = extract_items(page)
-
-            if not items:
-                break
-
-            all_items.extend(items)
-            if bar is not None:
-                bar.update(len(items))
-
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            current_cursor = _advance_cursor(
-                page, current_cursor, get_next_cursor, get_total, len(all_items)
-            )
-            if not current_cursor:
-                break
-
-    if max_items is not None and len(all_items) > max_items:
-        return all_items[:max_items]
-
-    return all_items
-
-
-async def paginate_cursor_async(
-    fetch_page: Callable[[str | None, int], Any],  # Returns Awaitable[Any]
-    extract_items: Callable[[Any], list[T]],
-    get_next_cursor: Callable[[Any], str | None],
-    *,
-    get_total: Callable[[Any], int | None] | None = None,
-    start_cursor: str | None = None,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> list[T]:
-    """Async version of paginate_cursor."""
-    all_items: list[T] = []
-    current_cursor = start_cursor
-    bar: Any = None
-    if progress:
-        try:
-            from tqdm.auto import tqdm  # type: ignore[import-untyped]
-
-            label = progress if isinstance(progress, str) else 'Fetching'
-            bar = tqdm(desc=label, unit=' items')
-        except ImportError:
-            pass
-
-    try:
-        while True:
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            page = await fetch_page(current_cursor, page_size)
-            items = extract_items(page)
-
-            if not items:
-                break
-
-            all_items.extend(items)
-            if bar is not None:
-                bar.update(len(items))
-
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            current_cursor = _advance_cursor(
-                page, current_cursor, get_next_cursor, get_total, len(all_items)
-            )
-            if not current_cursor:
-                break
-    finally:
-        if bar is not None:
-            bar.close()
-
-    if max_items is not None and len(all_items) > max_items:
-        return all_items[:max_items]
-
-    return all_items
-
-
-def iterate_cursor(
-    fetch_page: Callable[[str | None, int], Any],
-    extract_items: Callable[[Any], list[T]],
-    get_next_cursor: Callable[[Any], str | None],
-    *,
-    get_total: Callable[[Any], int | None] | None = None,
-    start_cursor: str | None = None,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> Iterator[T]:
-    """Generic cursor-based pagination iterator (streaming).
-
-    Args:
-        fetch_page: Function that fetches a page given (cursor, limit).
-        extract_items: Function that extracts items from a page response.
-        get_next_cursor: Function to get next cursor from response.
-        get_total: Optional function reading the total item count; once that
-            many items have been fetched, no further page is requested.
-        start_cursor: Starting cursor (default: None for first page).
-        page_size: Items per page (default: 100).
-        max_items: Maximum items to yield (default: unlimited).
-        progress: Show a progress bar. Pass ``True`` or a description string.
-
-    Yields:
-        Items one at a time.
-    """
-    current_cursor = start_cursor
-    items_yielded = 0
-
-    with _progress_context(progress, desc='Fetching') as bar:
-        while True:
-            if max_items is not None and items_yielded >= max_items:
-                return
-
-            page = fetch_page(current_cursor, page_size)
-            items = extract_items(page)
-
-            if not items:
-                return
-
-            for item in items:
-                yield item
-                items_yielded += 1
-                if bar is not None:
-                    bar.update(1)
-
-                if max_items is not None and items_yielded >= max_items:
-                    return
-
-            current_cursor = _advance_cursor(
-                page, current_cursor, get_next_cursor, get_total, items_yielded
-            )
-            if not current_cursor:
-                return
-
-
-async def iterate_cursor_async(
-    fetch_page: Callable[[str | None, int], Any],  # Returns Awaitable[Any]
-    extract_items: Callable[[Any], list[T]],
-    get_next_cursor: Callable[[Any], str | None],
-    *,
-    get_total: Callable[[Any], int | None] | None = None,
-    start_cursor: str | None = None,
-    page_size: int = 100,
-    max_items: int | None = None,
-    progress: bool | str = True,
-) -> AsyncIterator[T]:
-    """Async version of iterate_cursor."""
-    current_cursor = start_cursor
-    items_yielded = 0
-    bar: Any = None
-    if progress:
-        try:
-            from tqdm.auto import tqdm  # type: ignore[import-untyped]
-
-            label = progress if isinstance(progress, str) else 'Fetching'
-            bar = tqdm(desc=label, unit=' items')
-        except ImportError:
-            pass
-
-    try:
-        while True:
-            if max_items is not None and items_yielded >= max_items:
-                return
-
-            page = await fetch_page(current_cursor, page_size)
-            items = extract_items(page)
-
-            if not items:
-                return
-
-            for item in items:
-                yield item
-                items_yielded += 1
-                if bar is not None:
-                    bar.update(1)
-
-                if max_items is not None and items_yielded >= max_items:
-                    return
-
-            current_cursor = _advance_cursor(
-                page, current_cursor, get_next_cursor, get_total, items_yielded
-            )
-            if not current_cursor:
-                return
-    finally:
-        if bar is not None:
-            bar.close()
-
-
-# ---------------------------------------------------------------------------
-# Page-number pagination
-# ---------------------------------------------------------------------------
-
-
-def iterate_page(
-    fetch_page: Callable[[int, int], Any],
-    extract_items: Callable[[Any], list[T]],
-    get_total_pages: Callable[[Any], int | None] | None = None,
-    *,
-    start_page: int = 1,
-    page_size: int = 100,
-    max_items: int | None = None,
-    max_pages: int | None = None,
-    progress: bool | str = True,
-) -> Iterator[T]:
-    """Generic page-based pagination iterator (streaming).
-
-    Yields items one at a time for memory-efficient processing.
-
-    Args:
-        fetch_page: Function that fetches a page given (page, per_page).
-        extract_items: Function that extracts items from a page response.
-        get_total_pages: Optional function to get total pages from response.
-        start_page: Starting page number (default: 1).
-        page_size: Items per page (default: 100).
-        max_items: Maximum items to yield (default: unlimited).
-        max_pages: Maximum pages to fetch (default: unlimited).
-        progress: Show a progress bar. Pass ``True`` or a description string.
-
-    Yields:
-        Items one at a time.
-    """
-    current_page = start_page
-    items_yielded = 0
-    pages_fetched = 0
-
-    with _progress_context(progress, desc='Fetching') as bar:
-        while True:
-            if max_items is not None and items_yielded >= max_items:
-                return
-
-            if max_pages is not None and pages_fetched >= max_pages:
-                return
-
-            page = fetch_page(current_page, page_size)
-            items = extract_items(page)
-            pages_fetched += 1
-
-            if not items:
-                return
-
-            for item in items:
-                yield item
-                items_yielded += 1
-                if bar is not None:
-                    bar.update(1)
-
-                if max_items is not None and items_yielded >= max_items:
-                    return
-
-            if len(items) < page_size:
-                return
-
-            if get_total_pages is not None:
-                total_pages = get_total_pages(page)
-                if total_pages is not None and current_page >= total_pages:
-                    return
-
-            current_page += 1
-
-
-async def iterate_page_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
-    extract_items: Callable[[Any], list[T]],
-    get_total_pages: Callable[[Any], int | None] | None = None,
-    *,
-    start_page: int = 1,
-    page_size: int = 100,
-    max_items: int | None = None,
-    max_pages: int | None = None,
-    progress: bool | str = True,
-) -> AsyncIterator[T]:
-    """Async version of iterate_page."""
-    current_page = start_page
-    items_yielded = 0
-    pages_fetched = 0
-    bar: Any = None
-    if progress:
-        try:
-            from tqdm.auto import tqdm  # type: ignore[import-untyped]
-
-            label = progress if isinstance(progress, str) else 'Fetching'
-            bar = tqdm(desc=label, unit=' items')
-        except ImportError:
-            pass
-
-    try:
-        while True:
-            if max_items is not None and items_yielded >= max_items:
-                return
-
-            if max_pages is not None and pages_fetched >= max_pages:
-                return
-
-            page = await fetch_page(current_page, page_size)
-            items = extract_items(page)
-            pages_fetched += 1
-
-            if not items:
-                return
-
-            for item in items:
-                yield item
-                items_yielded += 1
-                if bar is not None:
-                    bar.update(1)
-
-                if max_items is not None and items_yielded >= max_items:
-                    return
-
-            if len(items) < page_size:
-                return
-
-            if get_total_pages is not None:
-                total_pages = get_total_pages(page)
-                if total_pages is not None and current_page >= total_pages:
-                    return
-
-            current_page += 1
-    finally:
-        if bar is not None:
-            bar.close()
-
-
-def paginate_page(
-    fetch_page: Callable[[int, int], Any],
-    extract_items: Callable[[Any], list[T]],
-    get_total_pages: Callable[[Any], int | None] | None = None,
-    *,
-    start_page: int = 1,
-    page_size: int = 100,
-    max_items: int | None = None,
-    max_pages: int | None = None,
-    progress: bool | str = True,
-) -> list[T]:
-    """Generic page-based pagination that returns all items.
-
-    Args:
-        fetch_page: Function that fetches a page given (page, per_page).
-        extract_items: Function that extracts items from a page response.
-        get_total_pages: Optional function to get total pages from response.
-        start_page: Starting page number (default: 1).
-        page_size: Items per page (default: 100).
-        max_items: Maximum items to return (default: unlimited).
-        max_pages: Maximum pages to fetch (default: unlimited).
-        progress: Show a progress bar. Pass ``True`` or a description string.
-
-    Returns:
-        List of all items.
-    """
-    all_items: list[T] = []
-    current_page = start_page
-    pages_fetched = 0
-
-    with _progress_context(progress, desc='Fetching') as bar:
-        while True:
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            if max_pages is not None and pages_fetched >= max_pages:
-                break
-
-            page = fetch_page(current_page, page_size)
-            items = extract_items(page)
-            pages_fetched += 1
-
-            if not items:
-                break
-
-            all_items.extend(items)
-            if bar is not None:
-                bar.update(len(items))
-
-            if len(items) < page_size:
-                break
-
-            if get_total_pages is not None:
-                total_pages = get_total_pages(page)
-                if total_pages is not None and current_page >= total_pages:
-                    break
-
-            current_page += 1
-
-    if max_items is not None and len(all_items) > max_items:
-        return all_items[:max_items]
-
-    return all_items
-
-
-async def paginate_page_async(
-    fetch_page: Callable[[int, int], Any],  # Returns Awaitable[Any]
-    extract_items: Callable[[Any], list[T]],
-    get_total_pages: Callable[[Any], int | None] | None = None,
-    *,
-    start_page: int = 1,
-    page_size: int = 100,
-    max_items: int | None = None,
-    max_pages: int | None = None,
-    progress: bool | str = True,
-) -> list[T]:
-    """Async version of paginate_page."""
-    all_items: list[T] = []
-    current_page = start_page
-    pages_fetched = 0
-    bar: Any = None
-    if progress:
-        try:
-            from tqdm.auto import tqdm  # type: ignore[import-untyped]
-
-            label = progress if isinstance(progress, str) else 'Fetching'
-            bar = tqdm(desc=label, unit=' items')
-        except ImportError:
-            pass
-
-    try:
-        while True:
-            if max_items is not None and len(all_items) >= max_items:
-                break
-
-            if max_pages is not None and pages_fetched >= max_pages:
-                break
-
-            page = await fetch_page(current_page, page_size)
-            items = extract_items(page)
-            pages_fetched += 1
-
-            if not items:
-                break
-
-            all_items.extend(items)
-            if bar is not None:
-                bar.update(len(items))
-
-            if len(items) < page_size:
-                break
-
-            if get_total_pages is not None:
-                total_pages = get_total_pages(page)
-                if total_pages is not None and current_page >= total_pages:
-                    break
-
-            current_page += 1
-    finally:
-        if bar is not None:
-            bar.close()
-
-    if max_items is not None and len(all_items) > max_items:
-        return all_items[:max_items]
-
-    return all_items
-
-
-# ---------------------------------------------------------------------------
 # Page objects
 # ---------------------------------------------------------------------------
 #
-# The item-level helpers above discard everything but the items. A page keeps
-# the rest: the total, where the next page starts (to resume or checkpoint a
-# long iteration) and the validated envelope for any other field. The
-# next-page decisions mirror the item-level helpers exactly.
-
-E = TypeVar('E')
+# Every style is implemented once, as a page fetcher: it requests one page and
+# decides where the next one starts. The item-level helpers further down are
+# thin drivers over the fetchers, so the stop rules live in one place.
 
 
-class Page(Generic[T, E]):
-    """One page of a paginated endpoint.
+class _PageBase(Generic[T, E]):
+    """Fields shared by :class:`Page` and :class:`AsyncPage`.
 
     Attributes:
         items: The items on this page.
         data: The parsed response envelope, for fields beyond the items.
         total: The total item count, when the response reports one.
         total_pages: The total page count (page-number pagination only).
-        next_cursor: The cursor of the next page (cursor pagination), or None.
-        next_offset: The offset of the next page (offset pagination), or None.
-        next_page: The number of the next page (page pagination), or None.
-
-    Pass ``next_cursor`` / ``next_offset`` / ``next_page`` back as the start
-    position of the endpoint's ``_page`` function to resume later.
+        next_cursor / next_offset / next_page: Where the next page starts
+            (pass it back as the start position to resume), or None.
     """
 
     def __init__(
@@ -975,7 +216,7 @@ class Page(Generic[T, E]):
         next_cursor: str | None = None,
         next_offset: int | None = None,
         next_page: int | None = None,
-        fetch_next: Callable[[], Page[T, E]] | None = None,
+        fetch_next: Callable[[], Any] | None = None,
     ) -> None:
         self.items = items
         self.data = data
@@ -989,23 +230,6 @@ class Page(Generic[T, E]):
     def has_next_page(self) -> bool:
         """Whether another page follows this one."""
         return self._fetch_next is not None
-
-    def get_next_page(self) -> Page[T, E] | None:
-        """Fetch the next page, or return None on the last page."""
-        if self._fetch_next is None:
-            return None
-        return self._fetch_next()
-
-    def iter_pages(self, *, max_pages: int | None = None) -> Iterator[Page[T, E]]:
-        """Yield this page and every page after it, fetching on demand."""
-        page: Page[T, E] | None = self
-        count = 0
-        while page is not None:
-            yield page
-            count += 1
-            if max_pages is not None and count >= max_pages:
-                return
-            page = page.get_next_page()
 
     def __iter__(self) -> Iterator[T]:
         return iter(self.items)
@@ -1020,39 +244,31 @@ class Page(Generic[T, E]):
         )
 
 
-class AsyncPage(Generic[T, E]):
-    """One page of a paginated endpoint, fetched asynchronously (see :class:`Page`)."""
+class Page(_PageBase[T, E]):
+    """One page of a paginated endpoint (see :class:`_PageBase` for fields)."""
 
-    def __init__(
-        self,
-        items: list[T],
-        data: E,
-        *,
-        total: int | None = None,
-        total_pages: int | None = None,
-        next_cursor: str | None = None,
-        next_offset: int | None = None,
-        next_page: int | None = None,
-        fetch_next: Callable[[], Awaitable[AsyncPage[T, E]]] | None = None,
-    ) -> None:
-        self.items = items
-        self.data = data
-        self.total = total
-        self.total_pages = total_pages
-        self.next_cursor = next_cursor
-        self.next_offset = next_offset
-        self.next_page = next_page
-        self._fetch_next = fetch_next
+    def get_next_page(self) -> Page[T, E] | None:
+        """Fetch the next page, or return None on the last page."""
+        return self._fetch_next() if self._fetch_next is not None else None
 
-    def has_next_page(self) -> bool:
-        """Whether another page follows this one."""
-        return self._fetch_next is not None
+    def iter_pages(self, *, max_pages: int | None = None) -> Iterator[Page[T, E]]:
+        """Yield this page and every page after it, fetching on demand."""
+        page: Page[T, E] | None = self
+        count = 0
+        while page is not None:
+            yield page
+            count += 1
+            if max_pages is not None and count >= max_pages:
+                return
+            page = page.get_next_page()
+
+
+class AsyncPage(_PageBase[T, E]):
+    """One page of a paginated endpoint, fetched asynchronously."""
 
     async def get_next_page(self) -> AsyncPage[T, E] | None:
         """Fetch the next page, or return None on the last page."""
-        if self._fetch_next is None:
-            return None
-        return await self._fetch_next()
+        return await self._fetch_next() if self._fetch_next is not None else None
 
     async def iter_pages(
         self, *, max_pages: int | None = None
@@ -1067,48 +283,29 @@ class AsyncPage(Generic[T, E]):
                 return
             page = await page.get_next_page()
 
-    def __iter__(self) -> Iterator[T]:
-        return iter(self.items)
-
-    def __len__(self) -> int:
-        return len(self.items)
-
-    def __repr__(self) -> str:
-        return (
-            f'{type(self).__name__}(items={len(self.items)}, total={self.total}, '
-            f'has_next_page={self.has_next_page()})'
-        )
-
-
-def _page_items(extract_items: Callable[[Any], Any], data: Any) -> list[Any]:
-    return list(extract_items(data) or [])
-
 
 def _maybe(getter: Callable[[Any], Any] | None, data: Any) -> Any:
     return getter(data) if getter is not None else None
 
 
-def _next_offset(
-    offset: int, items: list[Any], page_size: int, total: int | None
-) -> int | None:
-    """Offset of the page after ``items``, or None (as in ``paginate_offset``)."""
-    if not items or len(items) < page_size:
-        return None
-    following = offset + len(items)
-    if total is not None and following >= total:
-        return None
-    return following
+def _offset_step(
+    data: Any,
+    extract_items: Callable[[Any], Any],
+    get_total: Callable[[Any], int | None] | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[Any], int | None, int | None]:
+    """``(items, total, next offset or None)`` for one offset page."""
+    items = list(extract_items(data) or [])
+    total = _maybe(get_total, data)
+    following: int | None = offset + len(items)
+    if len(items) < max(limit, 1) or (total is not None and following >= total):
+        following = None
+    return items, total, following
 
 
-def _next_page_number(
-    page: int, items: list[Any], page_size: int, total_pages: int | None
-) -> int | None:
-    """Number of the page after ``items``, or None (as in ``paginate_page``)."""
-    if not items or len(items) < page_size:
-        return None
-    if total_pages is not None and page >= total_pages:
-        return None
-    return page + 1
+def _request_limit(page_size: int, budget: int | None) -> int:
+    return page_size if budget is None else min(page_size, budget)
 
 
 def fetch_offset_page(
@@ -1118,27 +315,32 @@ def fetch_offset_page(
     *,
     offset: int = 0,
     page_size: int = 100,
+    _budget: int | None = None,
 ) -> Page[T, Any]:
-    """Fetch one offset-paginated page."""
-    data = fetch_page(offset, page_size)
-    items = _page_items(extract_items, data)
-    total = _maybe(get_total, data)
-    following = _next_offset(offset, items, page_size, total)
-    fetch_next: Callable[[], Page[T, Any]] | None = None
+    """Fetch one offset-paginated page.
+
+    ``_budget`` (used by the item-level helpers' ``max_items``) caps how many
+    more items to request, so the last request asks only for what is left.
+    """
+    limit = _request_limit(page_size, _budget)
+    data = fetch_page(offset, limit)
+    items, total, following = _offset_step(
+        data, extract_items, get_total, offset, limit
+    )
+    budget = None if _budget is None else _budget - len(items)
+    if budget is not None and budget <= 0:
+        following = None
+    fetch_next = None
     if following is not None:
-        start = following
-
-        def _fetch_next() -> Page[T, Any]:
-            return fetch_offset_page(
-                fetch_page,
-                extract_items,
-                get_total,
-                offset=start,
-                page_size=page_size,
-            )
-
-        fetch_next = _fetch_next
-
+        fetch_next = partial(
+            fetch_offset_page,
+            fetch_page,
+            extract_items,
+            get_total,
+            offset=following,
+            page_size=page_size,
+            _budget=budget,
+        )
     return Page(items, data, total=total, next_offset=following, fetch_next=fetch_next)
 
 
@@ -1149,30 +351,50 @@ async def fetch_offset_page_async(
     *,
     offset: int = 0,
     page_size: int = 100,
+    _budget: int | None = None,
 ) -> AsyncPage[T, Any]:
     """Async version of :func:`fetch_offset_page`."""
-    data = await fetch_page(offset, page_size)
-    items = _page_items(extract_items, data)
-    total = _maybe(get_total, data)
-    following = _next_offset(offset, items, page_size, total)
-    fetch_next: Callable[[], Awaitable[AsyncPage[T, Any]]] | None = None
+    limit = _request_limit(page_size, _budget)
+    data = await fetch_page(offset, limit)
+    items, total, following = _offset_step(
+        data, extract_items, get_total, offset, limit
+    )
+    budget = None if _budget is None else _budget - len(items)
+    if budget is not None and budget <= 0:
+        following = None
+    fetch_next = None
     if following is not None:
-        start = following
-
-        async def _fetch_next() -> AsyncPage[T, Any]:
-            return await fetch_offset_page_async(
-                fetch_page,
-                extract_items,
-                get_total,
-                offset=start,
-                page_size=page_size,
-            )
-
-        fetch_next = _fetch_next
-
+        fetch_next = partial(
+            fetch_offset_page_async,
+            fetch_page,
+            extract_items,
+            get_total,
+            offset=following,
+            page_size=page_size,
+            _budget=budget,
+        )
     return AsyncPage(
         items, data, total=total, next_offset=following, fetch_next=fetch_next
     )
+
+
+def _cursor_step(
+    data: Any,
+    extract_items: Callable[[Any], Any],
+    get_next_cursor: Callable[[Any], str | None],
+    get_total: Callable[[Any], int | None] | None,
+    cursor: str | None,
+    fetched_before: int,
+) -> tuple[list[Any], int, str | None]:
+    """``(items, fetched so far, next cursor or None)`` for one cursor page."""
+    items = list(extract_items(data) or [])
+    fetched = fetched_before + len(items)
+    following = (
+        _advance_cursor(data, cursor, get_next_cursor, get_total, fetched)
+        if items
+        else None
+    )
+    return items, fetched, following
 
 
 def fetch_cursor_page(
@@ -1187,30 +409,21 @@ def fetch_cursor_page(
 ) -> Page[T, Any]:
     """Fetch one cursor-paginated page."""
     data = fetch_page(cursor, page_size)
-    items = _page_items(extract_items, data)
-    fetched = _fetched + len(items)
-    following = (
-        _advance_cursor(data, cursor, get_next_cursor, get_total, fetched)
-        if items
-        else None
+    items, fetched, following = _cursor_step(
+        data, extract_items, get_next_cursor, get_total, cursor, _fetched
     )
-    fetch_next: Callable[[], Page[T, Any]] | None = None
+    fetch_next = None
     if following is not None:
-        start = following
-
-        def _fetch_next() -> Page[T, Any]:
-            return fetch_cursor_page(
-                fetch_page,
-                extract_items,
-                get_next_cursor,
-                get_total=get_total,
-                cursor=start,
-                page_size=page_size,
-                _fetched=fetched,
-            )
-
-        fetch_next = _fetch_next
-
+        fetch_next = partial(
+            fetch_cursor_page,
+            fetch_page,
+            extract_items,
+            get_next_cursor,
+            get_total=get_total,
+            cursor=following,
+            page_size=page_size,
+            _fetched=fetched,
+        )
     return Page(
         items,
         data,
@@ -1232,30 +445,21 @@ async def fetch_cursor_page_async(
 ) -> AsyncPage[T, Any]:
     """Async version of :func:`fetch_cursor_page`."""
     data = await fetch_page(cursor, page_size)
-    items = _page_items(extract_items, data)
-    fetched = _fetched + len(items)
-    following = (
-        _advance_cursor(data, cursor, get_next_cursor, get_total, fetched)
-        if items
-        else None
+    items, fetched, following = _cursor_step(
+        data, extract_items, get_next_cursor, get_total, cursor, _fetched
     )
-    fetch_next: Callable[[], Awaitable[AsyncPage[T, Any]]] | None = None
+    fetch_next = None
     if following is not None:
-        start = following
-
-        async def _fetch_next() -> AsyncPage[T, Any]:
-            return await fetch_cursor_page_async(
-                fetch_page,
-                extract_items,
-                get_next_cursor,
-                get_total=get_total,
-                cursor=start,
-                page_size=page_size,
-                _fetched=fetched,
-            )
-
-        fetch_next = _fetch_next
-
+        fetch_next = partial(
+            fetch_cursor_page_async,
+            fetch_page,
+            extract_items,
+            get_next_cursor,
+            get_total=get_total,
+            cursor=following,
+            page_size=page_size,
+            _fetched=fetched,
+        )
     return AsyncPage(
         items,
         data,
@@ -1263,6 +467,24 @@ async def fetch_cursor_page_async(
         next_cursor=following,
         fetch_next=fetch_next,
     )
+
+
+def _numbered_step(
+    data: Any,
+    extract_items: Callable[[Any], Any],
+    get_total_pages: Callable[[Any], int | None] | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[Any], int | None, int | None]:
+    """``(items, total pages, next page number or None)`` for one page."""
+    items = list(extract_items(data) or [])
+    total_pages = _maybe(get_total_pages, data)
+    following: int | None = page + 1
+    if len(items) < max(page_size, 1) or (
+        total_pages is not None and page >= total_pages
+    ):
+        following = None
+    return items, total_pages, following
 
 
 def fetch_numbered_page(
@@ -1276,25 +498,20 @@ def fetch_numbered_page(
 ) -> Page[T, Any]:
     """Fetch one page of a page-number-paginated endpoint."""
     data = fetch_page(page, page_size)
-    items = _page_items(extract_items, data)
-    total_pages = _maybe(get_total_pages, data)
-    following = _next_page_number(page, items, page_size, total_pages)
-    fetch_next: Callable[[], Page[T, Any]] | None = None
+    items, total_pages, following = _numbered_step(
+        data, extract_items, get_total_pages, page, page_size
+    )
+    fetch_next = None
     if following is not None:
-        start = following
-
-        def _fetch_next() -> Page[T, Any]:
-            return fetch_numbered_page(
-                fetch_page,
-                extract_items,
-                get_total_pages,
-                get_total=get_total,
-                page=start,
-                page_size=page_size,
-            )
-
-        fetch_next = _fetch_next
-
+        fetch_next = partial(
+            fetch_numbered_page,
+            fetch_page,
+            extract_items,
+            get_total_pages,
+            get_total=get_total,
+            page=following,
+            page_size=page_size,
+        )
     return Page(
         items,
         data,
@@ -1316,25 +533,20 @@ async def fetch_numbered_page_async(
 ) -> AsyncPage[T, Any]:
     """Async version of :func:`fetch_numbered_page`."""
     data = await fetch_page(page, page_size)
-    items = _page_items(extract_items, data)
-    total_pages = _maybe(get_total_pages, data)
-    following = _next_page_number(page, items, page_size, total_pages)
-    fetch_next: Callable[[], Awaitable[AsyncPage[T, Any]]] | None = None
+    items, total_pages, following = _numbered_step(
+        data, extract_items, get_total_pages, page, page_size
+    )
+    fetch_next = None
     if following is not None:
-        start = following
-
-        async def _fetch_next() -> AsyncPage[T, Any]:
-            return await fetch_numbered_page_async(
-                fetch_page,
-                extract_items,
-                get_total_pages,
-                get_total=get_total,
-                page=start,
-                page_size=page_size,
-            )
-
-        fetch_next = _fetch_next
-
+        fetch_next = partial(
+            fetch_numbered_page_async,
+            fetch_page,
+            extract_items,
+            get_total_pages,
+            get_total=get_total,
+            page=following,
+            page_size=page_size,
+        )
     return AsyncPage(
         items,
         data,
@@ -1342,4 +554,383 @@ async def fetch_numbered_page_async(
         total_pages=total_pages,
         next_page=following,
         fetch_next=fetch_next,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Item-level helpers: drivers over the page fetchers
+# ---------------------------------------------------------------------------
+#
+# ``iterate_*`` stream items; ``paginate_*`` collect them. ``max_items`` stops
+# without requesting another page, and ``max_pages`` caps the requests.
+
+
+def _iter_items(
+    first_page: Callable[[], Page[T, Any]],
+    max_items: int | None,
+    progress: bool | str,
+    max_pages: int | None = None,
+) -> Iterator[T]:
+    if max_items is not None and max_items <= 0:
+        return
+    yielded = 0
+    with _progress_context(progress, desc='Fetching') as bar:
+        for page in first_page().iter_pages(max_pages=max_pages):
+            for item in page.items:
+                yield item
+                yielded += 1
+                if bar is not None:
+                    bar.update(1)
+                if max_items is not None and yielded >= max_items:
+                    return
+
+
+async def _aiter_items(
+    first_page: Callable[[], Awaitable[AsyncPage[T, Any]]],
+    max_items: int | None,
+    progress: bool | str,
+    max_pages: int | None = None,
+) -> AsyncIterator[T]:
+    if max_items is not None and max_items <= 0:
+        return
+    yielded = 0
+    with _progress_context(progress, desc='Fetching') as bar:
+        page = await first_page()
+        async for current in page.iter_pages(max_pages=max_pages):
+            for item in current.items:
+                yield item
+                yielded += 1
+                if bar is not None:
+                    bar.update(1)
+                if max_items is not None and yielded >= max_items:
+                    return
+
+
+async def _collect(items: AsyncIterator[T]) -> list[T]:
+    return [item async for item in items]
+
+
+def iterate_offset(
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
+    *,
+    start_offset: int = 0,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> Iterator[T]:
+    """Stream the items of an offset-paginated endpoint.
+
+    ``fetch_page(offset, limit)`` requests one page and ``extract_items``
+    reads the items from it; ``get_total`` (optional) reads the total count,
+    which saves the request for an empty last page.
+    """
+    return _iter_items(
+        partial(
+            fetch_offset_page,
+            fetch_page,
+            extract_items,
+            get_total,
+            offset=start_offset,
+            page_size=page_size,
+            _budget=max_items,
+        ),
+        max_items,
+        progress,
+    )
+
+
+def iterate_offset_async(
+    fetch_page: Callable[[int, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
+    *,
+    start_offset: int = 0,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> AsyncIterator[T]:
+    """Async version of :func:`iterate_offset` (consume with ``async for``)."""
+    return _aiter_items(
+        partial(
+            fetch_offset_page_async,
+            fetch_page,
+            extract_items,
+            get_total,
+            offset=start_offset,
+            page_size=page_size,
+            _budget=max_items,
+        ),
+        max_items,
+        progress,
+    )
+
+
+def paginate_offset(
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
+    *,
+    start_offset: int = 0,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> list[T]:
+    """Collect every item of an offset-paginated endpoint (see :func:`iterate_offset`)."""
+    return list(
+        iterate_offset(
+            fetch_page,
+            extract_items,
+            get_total,
+            start_offset=start_offset,
+            page_size=page_size,
+            max_items=max_items,
+            progress=progress,
+        )
+    )
+
+
+async def paginate_offset_async(
+    fetch_page: Callable[[int, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_total: Callable[[Any], int | None] | None = None,
+    *,
+    start_offset: int = 0,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> list[T]:
+    """Async version of :func:`paginate_offset`."""
+    return await _collect(
+        iterate_offset_async(
+            fetch_page,
+            extract_items,
+            get_total,
+            start_offset=start_offset,
+            page_size=page_size,
+            max_items=max_items,
+            progress=progress,
+        )
+    )
+
+
+def iterate_cursor(
+    fetch_page: Callable[[str | None, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    start_cursor: str | None = None,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> Iterator[T]:
+    """Stream the items of a cursor-paginated endpoint.
+
+    ``fetch_page(cursor, limit)`` requests one page and ``get_next_cursor``
+    reads the next page's cursor from it. Paging stops on an empty page, once
+    ``get_total`` items were fetched, or when the cursor stops advancing.
+    """
+    return _iter_items(
+        partial(
+            fetch_cursor_page,
+            fetch_page,
+            extract_items,
+            get_next_cursor,
+            get_total=get_total,
+            cursor=start_cursor,
+            page_size=page_size,
+        ),
+        max_items,
+        progress,
+    )
+
+
+def iterate_cursor_async(
+    fetch_page: Callable[[str | None, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    start_cursor: str | None = None,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> AsyncIterator[T]:
+    """Async version of :func:`iterate_cursor` (consume with ``async for``)."""
+    return _aiter_items(
+        partial(
+            fetch_cursor_page_async,
+            fetch_page,
+            extract_items,
+            get_next_cursor,
+            get_total=get_total,
+            cursor=start_cursor,
+            page_size=page_size,
+        ),
+        max_items,
+        progress,
+    )
+
+
+def paginate_cursor(
+    fetch_page: Callable[[str | None, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    start_cursor: str | None = None,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> list[T]:
+    """Collect every item of a cursor-paginated endpoint (see :func:`iterate_cursor`)."""
+    return list(
+        iterate_cursor(
+            fetch_page,
+            extract_items,
+            get_next_cursor,
+            get_total=get_total,
+            start_cursor=start_cursor,
+            page_size=page_size,
+            max_items=max_items,
+            progress=progress,
+        )
+    )
+
+
+async def paginate_cursor_async(
+    fetch_page: Callable[[str | None, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_next_cursor: Callable[[Any], str | None],
+    *,
+    get_total: Callable[[Any], int | None] | None = None,
+    start_cursor: str | None = None,
+    page_size: int = 100,
+    max_items: int | None = None,
+    progress: bool | str = True,
+) -> list[T]:
+    """Async version of :func:`paginate_cursor`."""
+    return await _collect(
+        iterate_cursor_async(
+            fetch_page,
+            extract_items,
+            get_next_cursor,
+            get_total=get_total,
+            start_cursor=start_cursor,
+            page_size=page_size,
+            max_items=max_items,
+            progress=progress,
+        )
+    )
+
+
+def iterate_page(
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
+    *,
+    start_page: int = 1,
+    page_size: int = 100,
+    max_items: int | None = None,
+    max_pages: int | None = None,
+    progress: bool | str = True,
+) -> Iterator[T]:
+    """Stream the items of a page-number-paginated endpoint.
+
+    ``fetch_page(page, per_page)`` requests one page; ``get_total_pages``
+    (optional) reads the page count.
+    """
+    return _iter_items(
+        partial(
+            fetch_numbered_page,
+            fetch_page,
+            extract_items,
+            get_total_pages,
+            page=start_page,
+            page_size=page_size,
+        ),
+        max_items,
+        progress,
+        max_pages,
+    )
+
+
+def iterate_page_async(
+    fetch_page: Callable[[int, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
+    *,
+    start_page: int = 1,
+    page_size: int = 100,
+    max_items: int | None = None,
+    max_pages: int | None = None,
+    progress: bool | str = True,
+) -> AsyncIterator[T]:
+    """Async version of :func:`iterate_page` (consume with ``async for``)."""
+    return _aiter_items(
+        partial(
+            fetch_numbered_page_async,
+            fetch_page,
+            extract_items,
+            get_total_pages,
+            page=start_page,
+            page_size=page_size,
+        ),
+        max_items,
+        progress,
+        max_pages,
+    )
+
+
+def paginate_page(
+    fetch_page: Callable[[int, int], Any],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
+    *,
+    start_page: int = 1,
+    page_size: int = 100,
+    max_items: int | None = None,
+    max_pages: int | None = None,
+    progress: bool | str = True,
+) -> list[T]:
+    """Collect every item of a page-number-paginated endpoint (see :func:`iterate_page`)."""
+    return list(
+        iterate_page(
+            fetch_page,
+            extract_items,
+            get_total_pages,
+            start_page=start_page,
+            page_size=page_size,
+            max_items=max_items,
+            max_pages=max_pages,
+            progress=progress,
+        )
+    )
+
+
+async def paginate_page_async(
+    fetch_page: Callable[[int, int], Awaitable[Any]],
+    extract_items: Callable[[Any], list[T]],
+    get_total_pages: Callable[[Any], int | None] | None = None,
+    *,
+    start_page: int = 1,
+    page_size: int = 100,
+    max_items: int | None = None,
+    max_pages: int | None = None,
+    progress: bool | str = True,
+) -> list[T]:
+    """Async version of :func:`paginate_page`."""
+    return await _collect(
+        iterate_page_async(
+            fetch_page,
+            extract_items,
+            get_total_pages,
+            start_page=start_page,
+            page_size=page_size,
+            max_items=max_items,
+            max_pages=max_pages,
+            progress=progress,
+        )
     )
